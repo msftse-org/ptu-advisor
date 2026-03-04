@@ -1,0 +1,482 @@
+/* =============================================================================
+    PTU Advisor – Premium Dark Product UI
+    ============================================================================= */
+
+/* Import distinctive fonts */
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+/* CSS Variables */
+:root {
+    --bg-primary: #070b14;
+    --bg-secondary: #0d1322;
+    --bg-card: #121a2b;
+    --bg-elevated: #1a2540;
+    --surface-glass: rgba(17, 24, 40, 0.72);
+    --accent: #7c8cff;
+    --accent-dim: #5f72f2;
+    --accent-soft: rgba(124, 140, 255, 0.14);
+    --accent-glow: rgba(124, 140, 255, 0.24);
+    --warning: #f7b955;
+    --danger: #ff6a7a;
+    --success: #4fd9a4;
+    --text-primary: #f2f6ff;
+    --text-secondary: #c3cbe0;
+    --text-muted: #8e97b3;
+    --border: #253153;
+    --border-strong: #33446f;
+    --shadow-soft: 0 16px 44px rgba(2, 6, 23, 0.45);
+}
+
+/* Global dark theme */
+.stApp {
+    background:
+        radial-gradient(1100px 540px at 8% -12%, rgba(124, 140, 255, 0.2), transparent 56%),
+        radial-gradient(900px 480px at 98% 0%, rgba(93, 234, 255, 0.11), transparent 58%),
+        linear-gradient(180deg, #060912 0%, #0c1426 55%, #0a1222 100%) !important;
+}
+
+.main {
+    padding: 0 1.1rem;
+    font-family: 'DM Sans', -apple-system, sans-serif !important;
+}
+
+/* All text styling */
+h1, h2, h3, h4, h5, h6 {
+    font-family: 'DM Sans', sans-serif !important;
+    color: var(--text-primary) !important;
+}
+
+p, span, div, label {
+    font-family: 'DM Sans', sans-serif !important;
+}
+
+/* Sidebar dark theme */
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, rgba(10, 17, 32, 0.95), rgba(11, 18, 35, 0.9)) !important;
+    border-right: 1px solid var(--border) !important;
+    box-shadow: inset -1px 0 0 rgba(148, 163, 255, 0.06) !important;
+}
+
+[data-testid="stSidebar"] * {
+    color: var(--text-secondary) !important;
+}
+
+[data-testid="stSidebar"] h1,
+[data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 {
+    color: var(--text-primary) !important;
+}
+
+/* Metric cards - glowing effect */
+[data-testid="stMetric"] {
+    background: linear-gradient(180deg, rgba(20, 30, 52, 0.9), rgba(16, 24, 43, 0.86)) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 14px !important;
+    padding: 20px !important;
+    box-shadow: var(--shadow-soft) !important;
+    transition: all 0.24s ease !important;
+    min-height: 120px !important;
+    display: flex !important;
+    flex-direction: column !important;
+    justify-content: center !important;
+}
+
+/* Ensure equal column widths for metrics */
+[data-testid="stHorizontalBlock"] > [data-testid="column"] {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+}
+
+[data-testid="stMetric"]:hover {
+    border-color: var(--border-strong) !important;
+    box-shadow: 0 18px 38px rgba(10, 16, 31, 0.5), 0 0 0 1px rgba(124, 140, 255, 0.2) !important;
+    transform: translateY(-1px) !important;
+}
+
+[data-testid="stMetric"] label {
+    color: var(--text-muted) !important;
+    font-size: 0.75rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.1em !important;
+    font-weight: 500 !important;
+}
+
+[data-testid="stMetric"] [data-testid="stMetricValue"] {
+    font-family: 'JetBrains Mono', monospace !important;
+    color: #e7ecff !important;
+    font-size: 2rem !important;
+    font-weight: 600 !important;
+}
+
+[data-testid="stMetric"] [data-testid="stMetricDelta"] {
+    font-family: 'JetBrains Mono', monospace !important;
+}
+
+/* Recommendation banners - redesigned */
+.recommendation-ptu {
+    background: linear-gradient(135deg, rgba(79, 217, 164, 0.14) 0%, rgba(79, 217, 164, 0.04) 100%) !important;
+    border: 1px solid rgba(79, 217, 164, 0.4) !important;
+    border-left: 4px solid var(--success) !important;
+    padding: 1.5rem !important;
+    border-radius: 12px !important;
+    margin: 1rem 0 !important;
+    box-shadow: 0 8px 28px rgba(16, 185, 129, 0.14) !important;
+}
+
+.recommendation-payg {
+    background: linear-gradient(135deg, rgba(100, 149, 255, 0.15) 0%, rgba(100, 149, 255, 0.04) 100%) !important;
+    border: 1px solid rgba(100, 149, 255, 0.45) !important;
+    border-left: 4px solid #6e9cff !important;
+    padding: 1.5rem !important;
+    border-radius: 12px !important;
+    margin: 1rem 0 !important;
+    box-shadow: 0 8px 28px rgba(78, 116, 255, 0.15) !important;
+}
+
+.recommendation-borderline {
+    background: linear-gradient(135deg, rgba(247, 185, 85, 0.15) 0%, rgba(247, 185, 85, 0.04) 100%) !important;
+    border: 1px solid var(--warning) !important;
+    border-left: 4px solid var(--warning) !important;
+    padding: 1.5rem !important;
+    border-radius: 12px !important;
+    margin: 1rem 0 !important;
+    box-shadow: 0 8px 28px rgba(247, 185, 85, 0.14) !important;
+}
+
+/* Tab styling - dark theme */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 4px !important;
+    background: rgba(17, 26, 45, 0.86) !important;
+    padding: 4px !important;
+    border-radius: 14px !important;
+    border: 1px solid var(--border) !important;
+}
+
+.stTabs [data-baseweb="tab"] {
+    padding: 12px 24px !important;
+    border-radius: 8px !important;
+    color: var(--text-muted) !important;
+    font-weight: 500 !important;
+    transition: all 0.2s ease !important;
+}
+
+.stTabs [data-baseweb="tab"]:hover {
+    color: var(--text-primary) !important;
+    background: var(--bg-elevated) !important;
+}
+
+.stTabs [aria-selected="true"] {
+    background: linear-gradient(135deg, var(--accent), #6f86ff) !important;
+    color: #f8faff !important;
+    box-shadow: 0 8px 18px rgba(124, 140, 255, 0.28) !important;
+}
+
+/* Code blocks - terminal style */
+.stCodeBlock {
+    background: var(--bg-primary) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    font-family: 'JetBrains Mono', monospace !important;
+}
+
+code {
+    font-family: 'JetBrains Mono', monospace !important;
+    color: var(--accent) !important;
+}
+
+pre {
+    background: var(--bg-primary) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    padding: 16px !important;
+}
+
+/* Buttons - accent glow */
+.stButton > button {
+    background: linear-gradient(135deg, var(--accent) 0%, var(--accent-dim) 100%) !important;
+    color: #f6f8ff !important;
+    border: 1px solid rgba(165, 177, 255, 0.45) !important;
+    border-radius: 10px !important;
+    padding: 12px 32px !important;
+    font-weight: 600 !important;
+    font-family: 'DM Sans', sans-serif !important;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    box-shadow: 0 10px 22px rgba(74, 94, 216, 0.28) !important;
+}
+
+.stButton > button:hover {
+    transform: translateY(-1px) !important;
+    box-shadow: 0 14px 32px rgba(74, 94, 216, 0.34) !important;
+}
+
+/* Selectbox/Radio styling */
+[data-baseweb="select"] {
+    background: rgba(18, 28, 48, 0.9) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 10px !important;
+}
+
+[data-baseweb="select"] > div {
+    background: rgba(18, 28, 48, 0.9) !important;
+    color: var(--text-primary) !important;
+}
+
+/* Radio buttons */
+.stRadio > div {
+    background: linear-gradient(180deg, rgba(18, 27, 47, 0.9), rgba(15, 23, 39, 0.9)) !important;
+    border-radius: 10px !important;
+    padding: 10px !important;
+    border: 1px solid var(--border) !important;
+}
+
+.stRadio label {
+    color: var(--text-secondary) !important;
+    border-radius: 8px !important;
+    transition: background 0.2s ease !important;
+}
+
+.stRadio label:hover {
+    background: rgba(124, 140, 255, 0.08) !important;
+}
+
+/* Multiselect */
+.stMultiSelect [data-baseweb="tag"] {
+    background: var(--accent) !important;
+    color: var(--bg-primary) !important;
+}
+
+/* Dividers */
+hr {
+    border-color: var(--border) !important;
+    opacity: 0.5 !important;
+}
+
+/* Info boxes - dark theme */
+.info-box {
+    background: var(--bg-card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 12px !important;
+    padding: 1.25rem !important;
+    margin: 1rem 0 !important;
+}
+
+/* Expander styling - modern Streamlit selectors */
+[data-testid="stExpander"] {
+    background: linear-gradient(180deg, rgba(18, 27, 47, 0.92), rgba(15, 22, 41, 0.92)) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 14px !important;
+    overflow: hidden !important;
+}
+
+[data-testid="stExpander"] details {
+    background: var(--bg-card) !important;
+}
+
+[data-testid="stExpander"] summary {
+    background: transparent !important;
+    color: var(--text-primary) !important;
+    padding: 14px 16px !important;
+    cursor: pointer !important;
+}
+
+/* Hide the Material Icon text that shows as "keyboard_arrow_right/down" */
+[data-testid="stExpander"] [data-testid="stIconMaterial"] {
+    font-size: 0 !important;
+    line-height: 0 !important;
+    width: 0 !important;
+    height: 0 !important;
+    overflow: hidden !important;
+    display: inline-block !important;
+    position: relative !important;
+}
+
+/* Add a visible arrow using ::after pseudo-element */
+[data-testid="stExpander"] [data-testid="stIconMaterial"]::after {
+    content: ">" !important;
+    font-size: 12px !important;
+    line-height: 1 !important;
+    color: #aeb8da !important;
+    font-family: sans-serif !important;
+    display: inline-block !important;
+    width: 16px !important;
+    height: 16px !important;
+    text-align: center !important;
+}
+
+/* Change arrow when expanded */
+[data-testid="stExpander"] details[open] [data-testid="stIconMaterial"]::after {
+    content: "v" !important;
+}
+
+[data-testid="stExpander"] summary:hover {
+    background: rgba(124, 140, 255, 0.08) !important;
+}
+
+[data-testid="stExpander"] > div,
+[data-testid="stExpander"] details > div {
+    background: var(--bg-card) !important;
+    padding: 0 16px 16px 16px !important;
+}
+
+/* Hide Streamlit branding */
+#MainMenu {visibility: hidden;}
+footer {visibility: hidden;}
+
+/* Caption styling */
+.stCaption {
+    color: var(--text-muted) !important;
+}
+
+/* Section cards */
+.section-card {
+    background: linear-gradient(180deg, rgba(19, 29, 50, 0.92), rgba(15, 24, 42, 0.92));
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 24px;
+    margin-bottom: 24px;
+    box-shadow: var(--shadow-soft);
+}
+
+.section-card h3 {
+    color: var(--text-primary);
+    margin: 0 0 16px 0;
+    font-weight: 600;
+}
+
+/* Glow text effect */
+.glow-text {
+    color: #dce3ff;
+    text-shadow: none;
+}
+
+/* Status indicators */
+.status-good { color: var(--success); }
+.status-warning { color: var(--warning); }
+.status-danger { color: var(--danger); }
+
+/* Animated pulse for key metrics */
+@keyframes subtle-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.8; }
+}
+
+.pulse {
+    animation: subtle-pulse 2s ease-in-out infinite;
+}
+
+/* Progress indicators */
+.stProgress > div > div {
+    background: var(--accent) !important;
+}
+
+/* Tooltip styling */
+[data-testid="stTooltipIcon"] {
+    color: var(--text-muted) !important;
+}
+
+/* Links */
+a {
+    color: var(--accent) !important;
+    text-decoration: none !important;
+    transition: opacity 0.2s ease !important;
+}
+
+a:hover {
+    opacity: 0.8 !important;
+}
+
+/* Markdown text */
+.stMarkdown {
+    color: var(--text-secondary) !important;
+}
+
+.stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4 {
+    color: var(--text-primary) !important;
+}
+
+/* ── Sticky section headers (#3) ── */
+.section-header-sticky {
+    position: sticky;
+    top: 8px;
+    z-index: 100;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    background: rgba(12, 18, 34, 0.8);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    border-radius: 14px;
+}
+
+/* ── Page map bar ── */
+.page-map-bar {
+    display: flex;
+    gap: 8px;
+    margin: 0 0 28px 0;
+    padding: 8px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+}
+
+.page-map-item {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 10px 8px;
+    border-radius: 8px;
+    background: var(--bg-elevated);
+    transition: background 0.2s ease;
+}
+
+.page-map-item:hover {
+    background: rgba(0, 212, 170, 0.08);
+}
+
+.page-map-icon {
+    font-size: 14px;
+    line-height: 1;
+}
+
+.page-map-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-family: 'DM Sans', sans-serif;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+}
+
+/* ── Section dividers (#9) ── */
+.section-divider {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin: 28px 0;
+}
+
+.section-divider .divider-line {
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border), transparent);
+}
+
+.section-divider .divider-label {
+    color: #aeb8da;
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    font-family: 'JetBrains Mono', monospace;
+    white-space: nowrap;
+}
+
+/* ── Responsive: collapse columns on narrow viewports ── */
+@media (max-width: 768px) {
+    [data-testid="stHorizontalBlock"] {
+        flex-direction: column !important;
+    }
+    [data-testid="stMetric"] {
+        min-height: 80px !important;
+    }
+}

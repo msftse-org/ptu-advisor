@@ -1,0 +1,1736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PTU Advisor Report - {{ deployment_name }}</title>
+    <style>
+        :root {
+            --color-primary: #0078D4;
+            --color-success: #107C10;
+            --color-warning: #FFB900;
+            --color-danger: #D13438;
+            --color-neutral: #737373;
+            --color-light: #F3F2F1;
+            --color-dark: #323130;
+            --color-white: #FFFFFF;
+            --color-background: #FAF9F8;
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            line-height: 1.6;
+            color: var(--color-dark);
+            background-color: var(--color-background);
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: var(--color-white);
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        
+        /* Header */
+        .header {
+            background: linear-gradient(135deg, var(--color-primary), #005a9e);
+            color: var(--color-white);
+            padding: 30px 40px;
+        }
+        
+        .header h1 {
+            font-size: 24px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        
+        .header .subtitle {
+            opacity: 0.9;
+            font-size: 14px;
+        }
+        
+        .header .meta {
+            margin-top: 16px;
+            display: flex;
+            gap: 30px;
+            flex-wrap: wrap;
+        }
+        
+        .header .meta-item {
+            font-size: 13px;
+        }
+        
+        .header .meta-item strong {
+            display: block;
+            font-weight: 600;
+            font-size: 11px;
+            opacity: 0.8;
+            text-transform: uppercase;
+        }
+        
+        /* Recommendation Banner */
+        .recommendation-banner {
+            padding: 24px 40px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            border-bottom: 1px solid var(--color-light);
+        }
+        
+        .recommendation-banner.success {
+            background: linear-gradient(135deg, #DFF6DD, #E6F4E5);
+            border-left: 6px solid var(--color-success);
+        }
+        
+        .recommendation-banner.warning {
+            background: linear-gradient(135deg, #FFF4CE, #FFF8E1);
+            border-left: 6px solid var(--color-warning);
+        }
+        
+        .recommendation-banner.danger {
+            background: linear-gradient(135deg, #FDE7E9, #FDECEE);
+            border-left: 6px solid var(--color-danger);
+        }
+        
+        .recommendation-emoji {
+            font-size: 40px;
+        }
+        
+        .recommendation-content h2 {
+            font-size: 20px;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        
+        .recommendation-content p {
+            color: var(--color-neutral);
+            font-size: 14px;
+        }
+        
+        .confidence-badge {
+            margin-left: auto;
+            text-align: center;
+            padding: 10px 20px;
+            background: rgba(255, 255, 255, 0.8);
+            border-radius: 8px;
+        }
+        
+        .confidence-badge .value {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--color-primary);
+        }
+        
+        .confidence-badge .label {
+            font-size: 11px;
+            color: var(--color-neutral);
+            text-transform: uppercase;
+        }
+        
+        /* Tab Navigation */
+        .tab-nav {
+            display: flex;
+            background: var(--color-light);
+            border-bottom: 1px solid #e0e0e0;
+            padding: 0 20px;
+            overflow-x: auto;
+            gap: 4px;
+        }
+        
+        .tab-btn {
+            padding: 14px 20px;
+            border: none;
+            background: transparent;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--color-neutral);
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            transition: all 0.2s ease;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .tab-btn:hover {
+            color: var(--color-primary);
+            background: rgba(0, 120, 212, 0.05);
+        }
+        
+        .tab-btn.active {
+            color: var(--color-primary);
+            border-bottom-color: var(--color-primary);
+            background: var(--color-white);
+        }
+        
+        .tab-btn .icon {
+            font-size: 16px;
+        }
+        
+        .tab-content {
+            display: none;
+            padding: 30px 40px;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        /* Section Styling */
+        .section {
+            margin-bottom: 30px;
+        }
+        
+        .section:last-child {
+            margin-bottom: 0;
+        }
+        
+        .section-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--color-dark);
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid var(--color-light);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        /* Metric Cards Grid */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        
+        .metric-card {
+            background: var(--color-light);
+            border-radius: 8px;
+            padding: 16px;
+            text-align: center;
+        }
+        
+        .metric-card .value {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--color-primary);
+        }
+        
+        .metric-card .label {
+            font-size: 11px;
+            color: var(--color-neutral);
+            margin-top: 4px;
+            text-transform: uppercase;
+        }
+        
+        .metric-card.success .value { color: var(--color-success); }
+        .metric-card.warning .value { color: #E65100; }
+        .metric-card.danger .value { color: var(--color-danger); }
+        
+        /* Data Tables */
+        .data-table-section {
+            margin-bottom: 20px;
+            background: var(--color-white);
+            border: 1px solid var(--color-light);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .data-table-section h3 {
+            font-size: 14px;
+            font-weight: 600;
+            padding: 12px 16px;
+            background: var(--color-light);
+            margin: 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+        
+        .data-table th,
+        .data-table td {
+            padding: 10px 16px;
+            text-align: left;
+            border-bottom: 1px solid var(--color-light);
+        }
+        
+        .data-table th {
+            background: #fafafa;
+            font-weight: 600;
+            font-size: 12px;
+            text-transform: uppercase;
+            color: var(--color-neutral);
+        }
+        
+        .data-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+        
+        .data-table .label-col {
+            font-weight: 500;
+            color: var(--color-dark);
+            width: 200px;
+        }
+        
+        .data-table .subtle {
+            color: var(--color-neutral);
+            font-size: 12px;
+        }
+        
+        .latency-table th,
+        .latency-table td {
+            text-align: center;
+        }
+        
+        .latency-table .label-col {
+            text-align: left;
+        }
+        
+        /* Badges */
+        .badge-good {
+            background: #E8F5E9;
+            color: #2E7D32;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .badge-ok {
+            background: #FFF3E0;
+            color: #E65100;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        .badge-elevated {
+            background: #FFEBEE;
+            color: #C62828;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        
+        /* Dimension Card */
+        .dimension-card {
+            border: 1px solid var(--color-light);
+            border-radius: 8px;
+            padding: 20px;
+            background: var(--color-white);
+            margin-bottom: 16px;
+        }
+        
+        .dimension-card.success {
+            border-left: 4px solid var(--color-success);
+        }
+        
+        .dimension-card.warning {
+            border-left: 4px solid var(--color-warning);
+        }
+        
+        .dimension-card.danger {
+            border-left: 4px solid var(--color-danger);
+        }
+        
+        .dimension-card.muted {
+            border-left: 4px solid var(--color-neutral);
+        }
+        
+        .dimension-card h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .dimension-card p {
+            font-size: 14px;
+            color: var(--color-neutral);
+        }
+        
+        /* Chart Container */
+        .chart-container {
+            margin-bottom: 24px;
+        }
+        
+        .chart-container img {
+            width: 100%;
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            border: 1px solid var(--color-light);
+        }
+        
+        .chart-container .chart-description {
+            font-size: 13px;
+            color: var(--color-neutral);
+            margin-top: 8px;
+            font-style: italic;
+        }
+        
+        /* Explanation Section */
+        .explanation-section {
+            margin-bottom: 20px;
+            padding: 20px;
+            background: var(--color-light);
+            border-radius: 8px;
+        }
+        
+        .explanation-section.high-importance {
+            background: linear-gradient(135deg, #E8F4FD, #F0F8FF);
+            border: 1px solid #B3D7F2;
+        }
+        
+        .explanation-section h3 {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 12px;
+            color: var(--color-dark);
+        }
+        
+        .explanation-section p,
+        .explanation-section ul {
+            font-size: 14px;
+            color: var(--color-dark);
+        }
+        
+        .explanation-content {
+            line-height: 1.7;
+        }
+        
+        .explanation-content p {
+            margin-bottom: 12px;
+        }
+        
+        .explanation-content p:last-child {
+            margin-bottom: 0;
+        }
+        
+        .explanation-content strong {
+            font-weight: 600;
+        }
+        
+        /* Info Boxes */
+        .info-box {
+            padding: 16px;
+            border-radius: 8px;
+            margin: 16px 0;
+            font-size: 14px;
+        }
+        
+        .info-box.tip {
+            background: #E8F5E9;
+            border: 1px solid #A5D6A7;
+        }
+        
+        .info-box.tip strong {
+            color: #2E7D32;
+        }
+        
+        .info-box.warning {
+            background: #FFF8E1;
+            border: 1px solid #FFE082;
+        }
+        
+        .info-box.warning strong {
+            color: #F57C00;
+        }
+        
+        .info-box.danger {
+            background: #FFEBEE;
+            border: 1px solid #EF9A9A;
+        }
+        
+        .info-box.danger strong {
+            color: #C62828;
+        }
+        
+        /* Guide Styles */
+        .guide-section {
+            margin-bottom: 28px;
+            padding: 20px;
+            background: var(--color-white);
+            border: 1px solid var(--color-light);
+            border-radius: 8px;
+        }
+        
+        .guide-section h3 {
+            font-size: 17px;
+            font-weight: 600;
+            color: var(--color-primary);
+            margin-bottom: 14px;
+        }
+        
+        .guide-section h4 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--color-dark);
+            margin: 18px 0 10px 0;
+            padding-top: 14px;
+            border-top: 1px solid var(--color-light);
+        }
+        
+        .guide-section h4:first-of-type {
+            margin-top: 0;
+            padding-top: 0;
+            border-top: none;
+        }
+        
+        .guide-section p {
+            font-size: 14px;
+            margin-bottom: 10px;
+            line-height: 1.7;
+        }
+        
+        .guide-section ul {
+            margin: 10px 0 10px 20px;
+            font-size: 14px;
+        }
+        
+        .guide-section li {
+            margin-bottom: 6px;
+            line-height: 1.6;
+        }
+        
+        .metric-definition {
+            background: #f8f9fa;
+            border-left: 4px solid var(--color-primary);
+            padding: 12px 16px;
+            margin: 12px 0;
+            font-size: 14px;
+        }
+        
+        .metric-definition strong {
+            color: var(--color-primary);
+        }
+        
+        .threshold-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 14px 0;
+            font-size: 13px;
+        }
+        
+        .threshold-table th,
+        .threshold-table td {
+            padding: 8px 12px;
+            text-align: left;
+            border: 1px solid var(--color-light);
+        }
+        
+        .threshold-table th {
+            background: var(--color-light);
+            font-weight: 600;
+        }
+        
+        .threshold-table .good { background: #E8F5E9; color: #2E7D32; }
+        .threshold-table .ok { background: #FFF3E0; color: #E65100; }
+        .threshold-table .bad { background: #FFEBEE; color: #C62828; }
+        
+        /* Doc Links */
+        .doc-links-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 12px;
+            margin-top: 14px;
+        }
+        
+        .doc-link-card {
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            padding: 14px;
+            background: var(--color-light);
+            border-radius: 8px;
+            text-decoration: none;
+            color: inherit;
+            transition: all 0.2s ease;
+        }
+        
+        .doc-link-card:hover {
+            background: #e8e8e8;
+            transform: translateY(-2px);
+        }
+        
+        .doc-link-card .icon {
+            font-size: 22px;
+        }
+        
+        .doc-link-card .title {
+            font-weight: 600;
+            color: var(--color-primary);
+            font-size: 13px;
+        }
+        
+        .doc-link-card .desc {
+            font-size: 11px;
+            color: var(--color-neutral);
+            margin-top: 3px;
+        }
+        
+        /* What Would Change */
+        .what-would-change {
+            background: #FFF8E1;
+            border: 1px solid #FFE082;
+            border-radius: 8px;
+            padding: 20px;
+        }
+        
+        .what-would-change h3 {
+            color: #F57C00;
+            margin-bottom: 12px;
+            font-size: 16px;
+        }
+        
+        /* Data Quality */
+        .data-quality {
+            padding: 16px;
+            background: var(--color-light);
+            border-radius: 8px;
+            font-size: 14px;
+        }
+        
+        /* Footer */
+        .footer {
+            background: var(--color-light);
+            padding: 20px 40px;
+            text-align: center;
+            font-size: 12px;
+            color: var(--color-neutral);
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header {
+                padding: 20px;
+            }
+            
+            .header .meta {
+                flex-direction: column;
+                gap: 12px;
+            }
+            
+            .recommendation-banner {
+                flex-direction: column;
+                text-align: center;
+                padding: 20px;
+            }
+            
+            .confidence-badge {
+                margin-left: 0;
+            }
+            
+            .tab-content {
+                padding: 20px;
+            }
+            
+            .tab-nav {
+                padding: 0 10px;
+            }
+            
+            .tab-btn {
+                padding: 12px 14px;
+                font-size: 12px;
+            }
+        }
+        
+        /* Print styles */
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+            
+            .container {
+                box-shadow: none;
+            }
+            
+            .tab-nav {
+                display: none;
+            }
+            
+            .tab-content {
+                display: block !important;
+            }
+            
+            .chart-container img {
+                max-width: 100%;
+                page-break-inside: avoid;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🔍 PTU Advisor Report</h1>
+            <p class="subtitle">Automated PTU vs PAYG Recommendation</p>
+            
+            <div class="meta">
+                <div class="meta-item">
+                    <strong>Deployment</strong>
+                    {{ deployment_name }}
+                </div>
+                <div class="meta-item">
+                    <strong>Model</strong>
+                    {{ model_name }}
+                </div>
+                <div class="meta-item">
+                    <strong>Analysis Period</strong>
+                    {{ analysis_period }}
+                </div>
+                <div class="meta-item">
+                    <strong>Report Generated</strong>
+                    {{ report_date }}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Recommendation Banner -->
+        <div class="recommendation-banner {{ recommendation_class }}">
+            <div class="recommendation-emoji">{{ recommendation_emoji }}</div>
+            <div class="recommendation-content">
+                <h2>{{ recommendation_text }}</h2>
+                <p>{{ summary }}</p>
+            </div>
+            <div class="confidence-badge">
+                <div class="value">{{ (confidence * 100)|int }}%</div>
+                <div class="label">Confidence</div>
+            </div>
+        </div>
+        
+        <!-- Tab Navigation -->
+        <div class="tab-nav">
+            <button class="tab-btn active" onclick="switchTab('overview')">
+                <span class="icon">📋</span> Overview
+            </button>
+            <button class="tab-btn" onclick="switchTab('requests')">
+                <span class="icon">📊</span> Requests
+            </button>
+            <button class="tab-btn" onclick="switchTab('tokens')">
+                <span class="icon">🔤</span> Tokens
+            </button>
+            <button class="tab-btn" onclick="switchTab('latency')">
+                <span class="icon">⏱️</span> Latency
+            </button>
+            <button class="tab-btn" onclick="switchTab('capacity')">
+                <span class="icon">🎯</span> Capacity
+            </button>
+            <button class="tab-btn" onclick="switchTab('charts')">
+                <span class="icon">📉</span> Charts
+            </button>
+            <button class="tab-btn" onclick="switchTab('costs')">
+                <span class="icon">💰</span> Costs
+            </button>
+            <button class="tab-btn" onclick="switchTab('guide')">
+                <span class="icon">📖</span> Guide
+            </button>
+        </div>
+        
+        <!-- ==================== TAB: OVERVIEW ==================== -->
+        <div id="tab-overview" class="tab-content active">
+            
+            <div class="section">
+                <h2 class="section-title">📋 Deployment Information</h2>
+                <div class="data-table-section">
+                    <table class="data-table">
+                        <tbody>
+                            <tr><td class="label-col">Deployment Name</td><td>{{ deployment_name }}</td></tr>
+                            <tr><td class="label-col">Model</td><td>{{ model_name }}</td></tr>
+                            <tr><td class="label-col">Analysis Period</td><td>{{ analysis_period }}</td></tr>
+                            <tr><td class="label-col">Data Points Collected</td><td>{{ metrics_summary.data_points }} hourly samples</td></tr>
+                            <tr><td class="label-col">SKU Type</td><td>{{ metrics_summary.sku_type }}</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2 class="section-title">🎯 Key Metrics at a Glance</h2>
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.total_requests|format_number }}</div>
+                        <div class="label">Total Requests</div>
+                    </div>
+                    <div class="metric-card {% if metrics_summary.throttling_rate > 0.05 %}danger{% elif metrics_summary.throttling_rate > 0.01 %}warning{% else %}success{% endif %}">
+                        <div class="value">{{ metrics_summary.throttling_rate|format_percent }}</div>
+                        <div class="label">Throttling Rate</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.tpm_mean|format_number }}</div>
+                        <div class="label">Avg TPM</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.p50_latency|format_duration }}</div>
+                        <div class="label">P50 Latency</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.active_percentage|format_percent }}</div>
+                        <div class="label">Active Time</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2 class="section-title">📊 Dimension Analysis</h2>
+                {% for dim in dimensions %}
+                <div class="dimension-card {{ dimension_score_class(dim.score) }}">
+                    <h3>
+                        {% if dim.score.value == 'positive' %}✅{% elif dim.score.value == 'negative' %}❌{% elif dim.score.value == 'neutral' %}⚖️{% else %}❓{% endif %}
+                        {{ dim.name }}
+                    </h3>
+                    <p>{{ dim.summary }}</p>
+                </div>
+                {% endfor %}
+            </div>
+            
+            {% if what_would_change %}
+            <div class="section">
+                <div class="what-would-change">
+                    <h3>🔄 What Would Change with PTU</h3>
+                    <p>{{ what_would_change }}</p>
+                </div>
+            </div>
+            {% endif %}
+            
+            <div class="section">
+                <h2 class="section-title">✅ Data Quality</h2>
+                <div class="data-quality">
+                    {{ data_quality }}
+                </div>
+            </div>
+            
+        </div>
+        
+        <!-- ==================== TAB: REQUESTS ==================== -->
+        <div id="tab-requests" class="tab-content">
+            
+            <div class="section">
+                <h2 class="section-title">📊 Request Metrics</h2>
+                
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.total_requests|format_number }}</div>
+                        <div class="label">Total Requests</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.rpm_mean|format_number }}</div>
+                        <div class="label">Avg RPM</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.rpm_max|format_number }}</div>
+                        <div class="label">Peak RPM</div>
+                    </div>
+                    <div class="metric-card success">
+                        <div class="value">{{ metrics_summary.success_rate|format_percent }}</div>
+                        <div class="label">Success Rate</div>
+                    </div>
+                    <div class="metric-card {% if metrics_summary.throttling_rate > 0.05 %}danger{% elif metrics_summary.throttling_rate > 0.01 %}warning{% else %}success{% endif %}">
+                        <div class="value">{{ metrics_summary.throttling_rate|format_percent }}</div>
+                        <div class="label">Throttling Rate</div>
+                    </div>
+                </div>
+                
+                <div class="data-table-section">
+                    <h3>Detailed Request Statistics</h3>
+                    <table class="data-table">
+                        <tbody>
+                            <tr><td class="label-col">Total Requests Analyzed</td><td>{{ metrics_summary.total_requests|format_number }}</td></tr>
+                            <tr><td class="label-col">Average Requests/Hour</td><td>{{ metrics_summary.rpm_mean|format_number }}</td></tr>
+                            <tr><td class="label-col">Peak Requests/Hour</td><td>{{ metrics_summary.rpm_max|format_number }}</td></tr>
+                            <tr><td class="label-col">Successful Requests</td><td>{{ metrics_summary.successful_requests|format_number }} <span class="subtle">({{ metrics_summary.success_rate|format_percent }})</span></td></tr>
+                            <tr><td class="label-col">Throttled Requests (429s)</td><td>{{ metrics_summary.throttled_requests|format_number }} <span class="subtle">({{ metrics_summary.throttling_rate|format_percent }})</span></td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            {% if metrics_summary.throttling_rate > 0.05 %}
+            <div class="info-box danger">
+                <strong>⚠️ High Throttling Detected:</strong> Your deployment is experiencing {{ metrics_summary.throttling_rate|format_percent }} throttling rate, which exceeds the 5% threshold. This significantly impacts user experience and strongly indicates PTU would be beneficial.
+            </div>
+            {% elif metrics_summary.throttling_rate > 0.01 %}
+            <div class="info-box warning">
+                <strong>⚡ Moderate Throttling:</strong> Your deployment has {{ metrics_summary.throttling_rate|format_percent }} throttling. While not critical, this indicates you're approaching PAYG limits. Monitor closely and consider PTU for growth.
+            </div>
+            {% else %}
+            <div class="info-box tip">
+                <strong>✅ Healthy Request Rate:</strong> Throttling is below 1%, indicating PAYG capacity is sufficient for your current workload.
+            </div>
+            {% endif %}
+            
+            <div class="section">
+                <h2 class="section-title">📖 Understanding Request Metrics</h2>
+                <div class="guide-section">
+                    <h4>Requests Per Minute (RPM)</h4>
+                    <p>The rate at which API calls are made to your deployment. Average RPM shows typical load, while Peak RPM indicates maximum burst capacity needed.</p>
+                    
+                    <h4>Throttling (HTTP 429)</h4>
+                    <p>When your request rate exceeds the available capacity, Azure returns HTTP 429 "Too Many Requests" errors. Each throttled request represents a failed API call that may need retry logic.</p>
+                    
+                    <table class="threshold-table">
+                        <tr>
+                            <th>Throttling Rate</th>
+                            <th>Assessment</th>
+                            <th>Recommendation</th>
+                        </tr>
+                        <tr>
+                            <td class="good">&lt; 1%</td>
+                            <td>Healthy</td>
+                            <td>PAYG capacity is sufficient</td>
+                        </tr>
+                        <tr>
+                            <td class="ok">1% - 5%</td>
+                            <td>Moderate</td>
+                            <td>Approaching limits, monitor closely</td>
+                        </tr>
+                        <tr>
+                            <td class="bad">&gt; 5%</td>
+                            <td>High</td>
+                            <td>PTU strongly recommended</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+            
+        </div>
+        
+        <!-- ==================== TAB: TOKENS ==================== -->
+        <div id="tab-tokens" class="tab-content">
+            
+            <div class="section">
+                <h2 class="section-title">🔤 Token Metrics</h2>
+                
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.tpm_mean|format_number }}</div>
+                        <div class="label">Avg TPM</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.tpm_max|format_number }}</div>
+                        <div class="label">Peak TPM</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ "%.2f"|format(metrics_summary.tpm_cv) }}</div>
+                        <div class="label">CV (Variability)</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.avg_tokens_per_request|int }}</div>
+                        <div class="label">Tokens/Request</div>
+                    </div>
+                </div>
+                
+                <div class="data-table-section">
+                    <h3>Detailed Token Statistics</h3>
+                    <table class="data-table">
+                        <tbody>
+                            <tr><td class="label-col">Average TPM</td><td>{{ metrics_summary.tpm_mean|format_number }} <span class="subtle">tokens per minute</span></td></tr>
+                            <tr><td class="label-col">Peak TPM</td><td>{{ metrics_summary.tpm_max|format_number }} <span class="subtle">maximum observed</span></td></tr>
+                            <tr><td class="label-col">TPM Std Deviation</td><td>{{ metrics_summary.tpm_std|format_number }} <span class="subtle">(CV: {{ "%.2f"|format(metrics_summary.tpm_cv) }})</span></td></tr>
+                            <tr><td class="label-col">Total Tokens Processed</td><td>{{ metrics_summary.total_tokens|format_number }}</td></tr>
+                            <tr><td class="label-col">Avg Tokens/Request</td><td>{{ metrics_summary.avg_tokens_per_request|int }}</td></tr>
+                            <tr><td class="label-col">Prompt/Completion Ratio</td><td>{{ (metrics_summary.prompt_ratio * 100)|int }}% / {{ (metrics_summary.completion_ratio * 100)|int }}%</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            {% if metrics_summary.tpm_cv < 0.3 %}
+            <div class="info-box tip">
+                <strong>✅ Stable Workload:</strong> Your CV of {{ "%.2f"|format(metrics_summary.tpm_cv) }} indicates a consistent workload pattern. This is ideal for PTU as you can size precisely.
+            </div>
+            {% elif metrics_summary.tpm_cv < 0.7 %}
+            <div class="info-box warning">
+                <strong>⚖️ Moderate Variability:</strong> Your CV of {{ "%.2f"|format(metrics_summary.tpm_cv) }} shows some variation. PTU can still work well if peaks are predictable.
+            </div>
+            {% else %}
+            <div class="info-box danger">
+                <strong>⚠️ High Variability:</strong> Your CV of {{ "%.2f"|format(metrics_summary.tpm_cv) }} indicates a spiky workload. You may waste PTU capacity during quiet periods.
+            </div>
+            {% endif %}
+            
+            <div class="section">
+                <h2 class="section-title">📖 Understanding Token Metrics</h2>
+                <div class="guide-section">
+                    <h4>Tokens Per Minute (TPM)</h4>
+                    <p>The rate of token processing, combining both input (prompt) and output (completion) tokens. This is the <strong>primary metric for PTU sizing</strong>.</p>
+                    
+                    <h4>Coefficient of Variation (CV)</h4>
+                    <p>Standard deviation divided by mean (σ/μ). Measures the relative variability of your workload.</p>
+                    
+                    <table class="threshold-table">
+                        <tr>
+                            <th>CV Value</th>
+                            <th>Workload Type</th>
+                            <th>PTU Suitability</th>
+                        </tr>
+                        <tr>
+                            <td class="good">&lt; 0.3</td>
+                            <td>Stable/Consistent</td>
+                            <td>Excellent for PTU</td>
+                        </tr>
+                        <tr>
+                            <td class="ok">0.3 - 0.7</td>
+                            <td>Moderate Variability</td>
+                            <td>Good if peaks are predictable</td>
+                        </tr>
+                        <tr>
+                            <td class="bad">&gt; 0.7</td>
+                            <td>Highly Variable</td>
+                            <td>May waste PTU capacity</td>
+                        </tr>
+                    </table>
+                    
+                    <h4>Prompt/Completion Ratio</h4>
+                    <p>The split between input and output tokens. Output tokens typically consume more PTU capacity than input tokens, so high completion ratios require more PTU.</p>
+                </div>
+            </div>
+            
+        </div>
+        
+        <!-- ==================== TAB: LATENCY ==================== -->
+        <div id="tab-latency" class="tab-content">
+            
+            <div class="section">
+                <h2 class="section-title">⏱️ Latency Metrics</h2>
+                
+                <div class="metrics-grid">
+                    <div class="metric-card {% if metrics_summary.p50_latency < 500 %}success{% elif metrics_summary.p50_latency < 1000 %}warning{% else %}danger{% endif %}">
+                        <div class="value">{{ metrics_summary.p50_latency|format_duration }}</div>
+                        <div class="label">P50 Latency</div>
+                    </div>
+                    <div class="metric-card {% if metrics_summary.p95_latency < 2000 %}success{% elif metrics_summary.p95_latency < 4000 %}warning{% else %}danger{% endif %}">
+                        <div class="value">{{ metrics_summary.p95_latency|format_duration }}</div>
+                        <div class="label">P95 Latency</div>
+                    </div>
+                    <div class="metric-card {% if metrics_summary.p99_latency < 4000 %}success{% elif metrics_summary.p99_latency < 8000 %}warning{% else %}danger{% endif %}">
+                        <div class="value">{{ metrics_summary.p99_latency|format_duration }}</div>
+                        <div class="label">P99 Latency</div>
+                    </div>
+                    <div class="metric-card {% if metrics_summary.latency_variance < 5 %}success{% elif metrics_summary.latency_variance < 10 %}warning{% else %}danger{% endif %}">
+                        <div class="value">{{ "%.1f"|format(metrics_summary.latency_variance) }}x</div>
+                        <div class="label">Variance (P99/P50)</div>
+                    </div>
+                </div>
+                
+                <div class="data-table-section">
+                    <h3>Time to First Byte (TTFB) Analysis</h3>
+                    <table class="data-table latency-table">
+                        <thead>
+                            <tr>
+                                <th>Percentile</th>
+                                <th>Avg</th>
+                                <th>Min</th>
+                                <th>Max</th>
+                                <th>Assessment</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="label-col">P50 (Median)</td>
+                                <td>{{ metrics_summary.p50_latency|format_duration }}</td>
+                                <td>{{ metrics_summary.p50_min|format_duration }}</td>
+                                <td>{{ metrics_summary.p50_max|format_duration }}</td>
+                                <td>{% if metrics_summary.p50_latency < 500 %}<span class="badge-good">Good</span>{% elif metrics_summary.p50_latency < 1000 %}<span class="badge-ok">OK</span>{% else %}<span class="badge-elevated">Elevated</span>{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">P95</td>
+                                <td>{{ metrics_summary.p95_latency|format_duration }}</td>
+                                <td>{{ metrics_summary.p95_min|format_duration }}</td>
+                                <td>{{ metrics_summary.p95_max|format_duration }}</td>
+                                <td>{% if metrics_summary.p95_latency < 2000 %}<span class="badge-good">Good</span>{% elif metrics_summary.p95_latency < 4000 %}<span class="badge-ok">OK</span>{% else %}<span class="badge-elevated">Elevated</span>{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">P99</td>
+                                <td>{{ metrics_summary.p99_latency|format_duration }}</td>
+                                <td>{{ metrics_summary.p99_min|format_duration }}</td>
+                                <td>{{ metrics_summary.p99_max|format_duration }}</td>
+                                <td>{% if metrics_summary.p99_latency < 4000 %}<span class="badge-good">Good</span>{% elif metrics_summary.p99_latency < 8000 %}<span class="badge-ok">OK</span>{% else %}<span class="badge-elevated">Elevated</span>{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Variance (P99/P50)</td>
+                                <td colspan="3">{{ "%.1f"|format(metrics_summary.latency_variance) }}x</td>
+                                <td>{% if metrics_summary.latency_variance < 5 %}<span class="badge-good">Stable</span>{% elif metrics_summary.latency_variance < 10 %}<span class="badge-ok">Variable</span>{% else %}<span class="badge-elevated">Unstable</span>{% endif %}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            {% if metrics_summary.latency_variance > 10 %}
+            <div class="info-box danger">
+                <strong>⚠️ High Latency Variance:</strong> Your P99/P50 ratio of {{ "%.1f"|format(metrics_summary.latency_variance) }}x indicates very inconsistent performance. PTU would significantly improve latency consistency.
+            </div>
+            {% elif metrics_summary.latency_variance > 5 %}
+            <div class="info-box warning">
+                <strong>⚡ Variable Latency:</strong> Your P99/P50 ratio of {{ "%.1f"|format(metrics_summary.latency_variance) }}x shows some users experience delays. PTU could help standardize response times.
+            </div>
+            {% else %}
+            <div class="info-box tip">
+                <strong>✅ Stable Latency:</strong> Your P99/P50 ratio of {{ "%.1f"|format(metrics_summary.latency_variance) }}x indicates consistent performance across requests.
+            </div>
+            {% endif %}
+            
+            <div class="section">
+                <h2 class="section-title">📖 Understanding Latency Metrics</h2>
+                <div class="guide-section">
+                    <h4>Time to First Byte (TTFB)</h4>
+                    <p>The time from when a request is sent until the first token of the response is received. Critical for user-perceived responsiveness, especially in chat applications.</p>
+                    
+                    <h4>Percentile Latencies</h4>
+                    <ul>
+                        <li><strong>P50 (Median):</strong> 50% of requests are faster than this. Represents typical experience.</li>
+                        <li><strong>P95:</strong> 95% of requests are faster. Important for SLA definitions.</li>
+                        <li><strong>P99:</strong> 99% of requests are faster. Captures worst-case scenarios.</li>
+                    </ul>
+                    
+                    <table class="threshold-table">
+                        <tr>
+                            <th>Metric</th>
+                            <th class="good">Good</th>
+                            <th class="ok">Acceptable</th>
+                            <th class="bad">Elevated</th>
+                        </tr>
+                        <tr>
+                            <td>P50 TTFB</td>
+                            <td>&lt; 500ms</td>
+                            <td>500ms - 1s</td>
+                            <td>&gt; 1s</td>
+                        </tr>
+                        <tr>
+                            <td>P95 TTFB</td>
+                            <td>&lt; 2s</td>
+                            <td>2s - 4s</td>
+                            <td>&gt; 4s</td>
+                        </tr>
+                        <tr>
+                            <td>P99 TTFB</td>
+                            <td>&lt; 4s</td>
+                            <td>4s - 8s</td>
+                            <td>&gt; 8s</td>
+                        </tr>
+                        <tr>
+                            <td>Variance</td>
+                            <td>&lt; 5x</td>
+                            <td>5x - 10x</td>
+                            <td>&gt; 10x</td>
+                        </tr>
+                    </table>
+                    
+                    <div class="metric-definition">
+                        <strong>💡 PTU Benefit:</strong> PTU typically provides more consistent latency because you have dedicated capacity. High latency variance is a strong indicator that PTU would improve user experience.
+                    </div>
+                </div>
+            </div>
+            
+        </div>
+        
+        <!-- ==================== TAB: CAPACITY ==================== -->
+        <div id="tab-capacity" class="tab-content">
+            
+            <div class="section">
+                <h2 class="section-title">🎯 Capacity Analysis</h2>
+                
+                <div class="metrics-grid">
+                    <div class="metric-card {% if metrics_summary.throttling_rate > 0.05 %}danger{% elif metrics_summary.throttling_rate > 0.01 %}warning{% else %}success{% endif %}">
+                        <div class="value">{{ metrics_summary.throttling_rate|format_percent }}</div>
+                        <div class="label">Throttling Rate</div>
+                    </div>
+                    <div class="metric-card {% if metrics_summary.utilization > 0.9 %}danger{% elif metrics_summary.utilization > 0.7 %}warning{% else %}success{% endif %}">
+                        <div class="value">{{ metrics_summary.utilization|format_percent }}</div>
+                        <div class="label">Utilization</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.active_percentage|format_percent }}</div>
+                        <div class="label">Active Time</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.non_zero_hours }}</div>
+                        <div class="label">Active Hours</div>
+                    </div>
+                </div>
+                
+                <div class="data-table-section">
+                    <h3>Capacity Indicators</h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Indicator</th>
+                                <th>Status</th>
+                                <th>Implication</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="label-col">Throttling Rate</td>
+                                <td>{{ metrics_summary.throttling_rate|format_percent }}</td>
+                                <td>{% if metrics_summary.throttling_rate > 0.05 %}PAYG capacity limit reached{% elif metrics_summary.throttling_rate > 0.01 %}Approaching PAYG limits{% else %}Within capacity{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Utilization Level</td>
+                                <td>{{ metrics_summary.utilization|format_percent }}</td>
+                                <td>{% if metrics_summary.utilization > 0.9 %}Near ceiling{% elif metrics_summary.utilization > 0.7 %}Healthy utilization{% else %}Room for growth{% endif %}</td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Active Time</td>
+                                <td>{{ metrics_summary.active_percentage|format_percent }}</td>
+                                <td>{% if metrics_summary.active_percentage > 0.9 %}Always-on workload{% elif metrics_summary.active_percentage > 0.5 %}Business hours pattern{% else %}Sporadic usage{% endif %}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            {% if metrics_summary.active_percentage > 0.9 %}
+            <div class="info-box tip">
+                <strong>✅ Always-On Workload:</strong> Your deployment is active {{ metrics_summary.active_percentage|format_percent }} of the time. This is ideal for PTU as you'll maximize capacity utilization.
+            </div>
+            {% elif metrics_summary.active_percentage > 0.5 %}
+            <div class="info-box warning">
+                <strong>⚖️ Business Hours Pattern:</strong> Your deployment is active during {{ metrics_summary.active_percentage|format_percent }} of time periods. PTU could be cost-effective if peak hours are consistent.
+            </div>
+            {% else %}
+            <div class="info-box danger">
+                <strong>⚠️ Sporadic Usage:</strong> Your deployment is only active {{ metrics_summary.active_percentage|format_percent }} of the time. PTU may not be cost-effective as capacity would be unused most of the time.
+            </div>
+            {% endif %}
+            
+            <div class="section">
+                <h2 class="section-title">📖 Understanding Capacity Metrics</h2>
+                <div class="guide-section">
+                    <h4>Throttling Rate</h4>
+                    <p>Percentage of requests that received HTTP 429 (Too Many Requests) responses. This is often the most important indicator - any significant throttling directly impacts users.</p>
+                    
+                    <h4>Utilization Level</h4>
+                    <p>An estimate of how much of your available PAYG capacity you're using, derived from throttling patterns and request rates. High utilization (&gt;85-90%) indicates you're approaching the ceiling.</p>
+                    
+                    <h4>Active Time Percentage</h4>
+                    <p>The percentage of time periods that had non-zero traffic. Important for understanding if PTU capacity would be fully utilized.</p>
+                    
+                    <table class="threshold-table">
+                        <tr>
+                            <th>Active Time</th>
+                            <th>Pattern</th>
+                            <th>PTU Recommendation</th>
+                        </tr>
+                        <tr>
+                            <td class="good">&gt; 90%</td>
+                            <td>Always-on</td>
+                            <td>Ideal for PTU - maximize value</td>
+                        </tr>
+                        <tr>
+                            <td class="ok">50% - 90%</td>
+                            <td>Business hours</td>
+                            <td>Good if peaks are predictable</td>
+                        </tr>
+                        <tr>
+                            <td class="bad">&lt; 50%</td>
+                            <td>Sporadic</td>
+                            <td>May waste PTU capacity</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+            
+        </div>
+        
+        <!-- ==================== TAB: CHARTS ==================== -->
+        <div id="tab-charts" class="tab-content">
+            
+            <div class="section">
+                <h2 class="section-title">📉 Visualizations</h2>
+                {% for chart in charts %}
+                <div class="chart-container">
+                    <img src="data:image/png;base64,{{ chart.image_base64 }}" alt="{{ chart.title }}" />
+                    <p class="chart-description">{{ chart.description }}</p>
+                </div>
+                {% endfor %}
+            </div>
+            
+            <div class="section">
+                <h2 class="section-title">📝 Detailed Analysis</h2>
+                {% for section in explanation_sections %}
+                <div class="explanation-section {% if section.importance == 'high' %}high-importance{% endif %}">
+                    <h3>{{ section.title }}</h3>
+                    <div class="explanation-content">{{ section.content|markdown_to_html|safe }}</div>
+                </div>
+                {% endfor %}
+            </div>
+            
+        </div>
+        
+        <!-- ==================== TAB: COSTS ==================== -->
+        <div id="tab-costs" class="tab-content">
+            
+            {% if ptu_estimates and ptu_estimates.available %}
+            <div class="section">
+                <h2 class="section-title">💰 PTU Sizing & Cost Estimates</h2>
+                
+                <div class="info-box tip">
+                    <strong>ℹ️ Important:</strong> These estimates are based on your observed metrics and Azure PTU documentation. 
+                    Actual costs vary by region and commitment type. Always verify with 
+                    <a href="https://azure.microsoft.com/pricing/details/cognitive-services/openai-service/" target="_blank">official Azure pricing</a>.
+                </div>
+                
+                <!-- Detected Model & Metrics -->
+                <div class="data-table-section">
+                    <h3>📊 Analysis Inputs</h3>
+                    <table class="data-table">
+                        <tr>
+                            <td class="label-col">Detected Model</td>
+                            <td><strong>{{ ptu_estimates.model_detected }}</strong></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Peak TPM (P95)</td>
+                            <td>{{ ptu_estimates.peak_tpm | format_number }} tokens/min</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Average TPM</td>
+                            <td>{{ ptu_estimates.avg_tpm | format_number }} tokens/min</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Completion Token Ratio</td>
+                            <td>{{ (ptu_estimates.completion_ratio * 100) | round(1) }}%</td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Effective TPM Multiplier</td>
+                            <td>{{ ptu_estimates.effective_multiplier | round(2) }}x 
+                                <span class="subtle">(accounts for output token weighting)</span></td>
+                        </tr>
+                        <tr>
+                            <td class="label-col">Raw PTU Requirement</td>
+                            <td>{{ ptu_estimates.raw_ptu_needed | round(1) }} PTU 
+                                <span class="subtle">(before rounding to increments)</span></td>
+                        </tr>
+                    </table>
+                </div>
+                
+                <!-- PTU Types Comparison -->
+                <div class="data-table-section">
+                    <h3>🌍 PTU Deployment Options</h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Deployment Type</th>
+                                <th>Minimum</th>
+                                <th>Increment</th>
+                                <th>Recommended PTU</th>
+                                <th>Conservative PTU</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="label-col">
+                                    <strong>Global / Data Zone Provisioned</strong>
+                                    <div class="subtle">Lowest latency, multi-region</div>
+                                </td>
+                                <td>{{ ptu_estimates.global_min }} PTU</td>
+                                <td>+{{ ptu_estimates.global_inc }} PTU</td>
+                                <td><strong style="color: var(--color-primary);">{{ ptu_estimates.global_ptu_recommended }} PTU</strong></td>
+                                <td>{{ ptu_estimates.global_ptu_conservative }} PTU</td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">
+                                    <strong>Regional Provisioned</strong>
+                                    <div class="subtle">Single region, lower cost</div>
+                                </td>
+                                <td>{{ ptu_estimates.regional_min }} PTU</td>
+                                <td>+{{ ptu_estimates.regional_inc }} PTU</td>
+                                <td><strong style="color: var(--color-primary);">{{ ptu_estimates.regional_ptu_recommended }} PTU</strong></td>
+                                <td>{{ ptu_estimates.regional_ptu_conservative }} PTU</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div style="padding: 12px 16px; background: #f5f5f5; font-size: 12px; color: var(--color-neutral);">
+                        <strong>Recommended:</strong> Based on P95 peak load with 1.2x safety margin • 
+                        <strong>Conservative:</strong> Based on average load with safety margin
+                    </div>
+                </div>
+                
+                <!-- Cost Estimates -->
+                <div class="data-table-section">
+                    <h3>💵 Estimated Monthly Costs</h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Deployment Type</th>
+                                <th>PTU Units</th>
+                                <th>Hourly Cost</th>
+                                <th>Monthly (PAYG)</th>
+                                <th>Monthly (1-Year Reserved)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td class="label-col">Global / Data Zone</td>
+                                <td>{{ ptu_estimates.global_ptu_recommended }} PTU</td>
+                                <td>${{ ptu_estimates.global_hourly_cost | round(2) }}/hr</td>
+                                <td>${{ ptu_estimates.global_monthly_cost | format_number }}</td>
+                                <td style="color: var(--color-success); font-weight: 600;">
+                                    ${{ ptu_estimates.global_monthly_reserved | format_number }}
+                                    <span class="badge-good">~65% off</span>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td class="label-col">Regional</td>
+                                <td>{{ ptu_estimates.regional_ptu_recommended }} PTU</td>
+                                <td>${{ ptu_estimates.regional_hourly_cost | round(2) }}/hr</td>
+                                <td>${{ ptu_estimates.regional_monthly_cost | format_number }}</td>
+                                <td style="color: var(--color-success); font-weight: 600;">
+                                    ${{ ptu_estimates.regional_monthly_reserved | format_number }}
+                                    <span class="badge-good">~65% off</span>
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div style="padding: 12px 16px; background: #fff3e0; font-size: 12px; color: #e65100;">
+                        ⚠️ <strong>Disclaimer:</strong> Cost estimates use approximate rates (~$2.00/PTU/hr Global, ~$1.50/PTU/hr Regional).
+                        Actual pricing varies by region. Check <a href="https://azure.microsoft.com/pricing/details/cognitive-services/openai-service/" target="_blank">Azure Pricing</a> for current rates.
+                    </div>
+                </div>
+                
+                <!-- Model PTU Specs -->
+                <div class="data-table-section">
+                    <h3>📋 Model-Specific PTU Specifications</h3>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Model</th>
+                                <th>Input TPM per PTU</th>
+                                <th>Output Ratio</th>
+                                <th>Global/Data Zone Min</th>
+                                <th>Regional Min</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr {% if ptu_estimates.model_detected == 'gpt-5' %}style="background: #e3f2fd;"{% endif %}>
+                                <td><strong>GPT-5</strong></td>
+                                <td>3,400 TPM</td>
+                                <td>1:8</td>
+                                <td>15 PTU</td>
+                                <td>50 PTU</td>
+                            </tr>
+                            <tr {% if ptu_estimates.model_detected == 'gpt-4.1' %}style="background: #e3f2fd;"{% endif %}>
+                                <td><strong>GPT-4.1</strong></td>
+                                <td>4,750 TPM</td>
+                                <td>1:4</td>
+                                <td>15 PTU</td>
+                                <td>50 PTU</td>
+                            </tr>
+                            <tr {% if ptu_estimates.model_detected == 'gpt-4.1-mini' %}style="background: #e3f2fd;"{% endif %}>
+                                <td><strong>GPT-4.1-mini</strong></td>
+                                <td>23,750 TPM</td>
+                                <td>1:4</td>
+                                <td>15 PTU</td>
+                                <td>25 PTU</td>
+                            </tr>
+                            <tr {% if ptu_estimates.model_detected == 'gpt-4o' %}style="background: #e3f2fd;"{% endif %}>
+                                <td><strong>GPT-4o</strong></td>
+                                <td>2,500 TPM</td>
+                                <td>1:3</td>
+                                <td>15 PTU</td>
+                                <td>50 PTU</td>
+                            </tr>
+                            <tr {% if ptu_estimates.model_detected == 'gpt-4o-mini' %}style="background: #e3f2fd;"{% endif %}>
+                                <td><strong>GPT-4o-mini</strong></td>
+                                <td>37,000 TPM</td>
+                                <td>1:3</td>
+                                <td>15 PTU</td>
+                                <td>25 PTU</td>
+                            </tr>
+                            <tr {% if ptu_estimates.model_detected == 'o1' %}style="background: #e3f2fd;"{% endif %}>
+                                <td><strong>o1</strong></td>
+                                <td>3,000 TPM</td>
+                                <td>1:4</td>
+                                <td>15 PTU</td>
+                                <td>50 PTU</td>
+                            </tr>
+                            <tr {% if ptu_estimates.model_detected == 'o3-mini' %}style="background: #e3f2fd;"{% endif %}>
+                                <td><strong>o3-mini</strong></td>
+                                <td>14,900 TPM</td>
+                                <td>1:4</td>
+                                <td>15 PTU</td>
+                                <td>25 PTU</td>
+                            </tr>
+                            <tr {% if ptu_estimates.model_detected == 'gpt-3.5-turbo' %}style="background: #e3f2fd;"{% endif %}>
+                                <td><strong>GPT-3.5-turbo</strong></td>
+                                <td>37,000 TPM</td>
+                                <td>1:3</td>
+                                <td>15 PTU</td>
+                                <td>25 PTU</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                    <div style="padding: 12px 16px; background: #e3f2fd; font-size: 12px;">
+                        <strong>Your detected model ({{ ptu_estimates.model_detected }})</strong> provides 
+                        <strong>{{ ptu_estimates.input_tpm_per_ptu | format_number }} input TPM per PTU</strong> 
+                        with a <strong>1:{{ ptu_estimates.output_ratio }} output ratio</strong> 
+                        (1 output token = {{ ptu_estimates.output_ratio }} input tokens for capacity calculation).
+                    </div>
+                </div>
+                
+                <!-- Recommendations -->
+                <div class="section" style="margin-top: 20px;">
+                    <h2 class="section-title">💡 Recommendations</h2>
+                    
+                    <div class="dimension-card {% if recommendation.recommendation == 'PTU_RECOMMENDED' %}success{% elif recommendation.recommendation == 'FURTHER_ANALYSIS' %}warning{% else %}info{% endif %}">
+                        <h4>Which PTU Type Should You Choose?</h4>
+                        <table class="threshold-table" style="margin-top: 12px;">
+                            <tr>
+                                <th style="width: 180px;">PTU Type</th>
+                                <th>Best For</th>
+                            </tr>
+                            <tr>
+                                <td><strong>Global Provisioned</strong></td>
+                                <td>Production workloads requiring lowest latency and highest availability across regions. Best for customer-facing apps.</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Data Zone Provisioned</strong></td>
+                                <td>Workloads with data residency requirements. Traffic stays within a defined geographic boundary.</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Regional Provisioned</strong></td>
+                                <td>Cost-optimized production workloads. Single region but lower per-PTU cost. Good for internal tools.</td>
+                            </tr>
+                        </table>
+                    </div>
+                    
+                    <div class="info-box tip">
+                        <strong>💡 Cost Optimization Tips:</strong>
+                        <ul style="margin: 8px 0 0 20px;">
+                            <li><strong>1-Year Reserved:</strong> Save ~65% with Azure reservation commitments</li>
+                            <li><strong>Right-size:</strong> Start with conservative estimate, scale up based on actual usage</li>
+                            <li><strong>Monitor utilization:</strong> PTU is cost-effective at >60% sustained utilization</li>
+                            <li><strong>Consider Regional:</strong> If latency isn't critical, Regional PTU offers lower cost</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+            
+            {% else %}
+            <div class="section">
+                <h2 class="section-title">💰 PTU Cost Estimates</h2>
+                <div class="info-box warning">
+                    <strong>⚠️ Insufficient Data:</strong> Unable to calculate PTU estimates. Token metrics are required for sizing calculations.
+                </div>
+            </div>
+            {% endif %}
+            
+        </div>
+        
+        <!-- ==================== TAB: GUIDE ==================== -->
+        <div id="tab-guide" class="tab-content">
+            
+            <div class="guide-section">
+                <h3>📖 Understanding This Report</h3>
+                <p>This guide provides comprehensive explanations of all metrics used in the PTU Advisor analysis. Understanding these metrics will help you make informed decisions about whether Provisioned Throughput Units (PTU) are right for your Foundry deployment.</p>
+                
+                <div class="info-box tip">
+                    <strong>💡 Tip:</strong> PTU provides dedicated capacity with predictable performance and costs, while Pay-As-You-Go (PAYG) offers flexibility with usage-based pricing. The right choice depends on your workload characteristics.
+                </div>
+            </div>
+            
+            <div class="guide-section">
+                <h3>⚖️ PTU vs PAYG: Key Differences</h3>
+                
+                <h4>Provisioned Throughput Units (PTU)</h4>
+                <div class="metric-definition">
+                    <strong>Definition:</strong> PTU provides reserved, dedicated capacity for Foundry models. You purchase a fixed number of PTUs that guarantee a specific throughput level.
+                </div>
+                <ul>
+                    <li><strong>Predictable Performance:</strong> Guaranteed capacity means consistent latency without throttling</li>
+                    <li><strong>Fixed Costs:</strong> Monthly commitment, typically more cost-effective at high utilization (&gt;60-70%)</li>
+                    <li><strong>Capacity Planning:</strong> Requires upfront estimation of throughput needs</li>
+                </ul>
+                
+                <h4>Pay-As-You-Go (PAYG)</h4>
+                <div class="metric-definition">
+                    <strong>Definition:</strong> Standard deployments use shared capacity with per-token pricing. Pay only for what you use, but may experience throttling.
+                </div>
+                <ul>
+                    <li><strong>Flexibility:</strong> Scale up or down instantly based on demand</li>
+                    <li><strong>No Commitment:</strong> Pay only for actual token usage</li>
+                    <li><strong>Throttling Risk:</strong> May receive HTTP 429 errors during peak demand</li>
+                </ul>
+            </div>
+            
+            <div class="guide-section">
+                <h3>🎯 The Four Analysis Dimensions</h3>
+                <p>PTU Advisor analyzes your deployment across four key dimensions:</p>
+                
+                <h4>1. Workload Shape</h4>
+                <p>How consistent or variable your token throughput is over time. Stable workloads are ideal for PTU.</p>
+                
+                <h4>2. Capacity Pressure</h4>
+                <p>Whether you're hitting PAYG capacity limits, measured through throttling rate and utilization levels.</p>
+                
+                <h4>3. Latency Sensitivity</h4>
+                <p>Whether you have latency issues and would benefit from PTU's more consistent performance.</p>
+                
+                <h4>4. Load Predictability</h4>
+                <p>Whether your usage follows predictable patterns (daily cycles, business hours, etc.).</p>
+            </div>
+            
+            <div class="guide-section">
+                <h3>📐 PTU Sizing Guidance</h3>
+                <p>If the recommendation is to adopt PTU, here's how to size your deployment:</p>
+                
+                <div class="metric-definition">
+                    <strong>Required PTU ≈ (Peak TPM × Safety Margin) ÷ PTU Conversion Rate</strong>
+                </div>
+                <ul>
+                    <li><strong>Peak TPM:</strong> Use your observed P95 or P99 peak TPM</li>
+                    <li><strong>Safety Margin:</strong> Typically 1.2x to 1.5x for headroom</li>
+                    <li><strong>PTU Conversion Rate:</strong> Varies by model (check Azure documentation)</li>
+                </ul>
+            </div>
+            
+            <div class="guide-section">
+                <h3>📚 Official Documentation</h3>
+                <p>For the most up-to-date information, refer to the official Microsoft documentation:</p>
+                
+                <div class="doc-links-grid">
+                    <a href="https://learn.microsoft.com/azure/ai-services/openai/concepts/provisioned-throughput" target="_blank" class="doc-link-card">
+                        <div class="icon">📘</div>
+                        <div>
+                            <div class="title">PTU Overview</div>
+                            <div class="desc">Understanding provisioned throughput</div>
+                        </div>
+                    </a>
+                    
+                    <a href="https://learn.microsoft.com/azure/ai-services/openai/how-to/provisioned-throughput-onboarding" target="_blank" class="doc-link-card">
+                        <div class="icon">🚀</div>
+                        <div>
+                            <div class="title">PTU Onboarding</div>
+                            <div class="desc">Step-by-step deployment guide</div>
+                        </div>
+                    </a>
+                    
+                    <a href="https://learn.microsoft.com/azure/ai-services/openai/quotas-limits" target="_blank" class="doc-link-card">
+                        <div class="icon">📊</div>
+                        <div>
+                            <div class="title">Quotas & Limits</div>
+                            <div class="desc">Rate limits for deployments</div>
+                        </div>
+                    </a>
+                    
+                    <a href="https://learn.microsoft.com/azure/ai-services/openai/how-to/latency" target="_blank" class="doc-link-card">
+                        <div class="icon">⏱️</div>
+                        <div>
+                            <div class="title">Latency Optimization</div>
+                            <div class="desc">Tips for improving response times</div>
+                        </div>
+                    </a>
+                    
+                    <a href="https://learn.microsoft.com/azure/ai-services/openai/how-to/monitoring" target="_blank" class="doc-link-card">
+                        <div class="icon">📈</div>
+                        <div>
+                            <div class="title">Monitoring & Metrics</div>
+                            <div class="desc">Azure Monitor metrics</div>
+                        </div>
+                    </a>
+                    
+                    <a href="https://azure.microsoft.com/pricing/details/cognitive-services/openai-service/" target="_blank" class="doc-link-card">
+                        <div class="icon">💰</div>
+                        <div>
+                            <div class="title">Pricing Details</div>
+                            <div class="desc">PAYG and PTU pricing</div>
+                        </div>
+                    </a>
+                </div>
+            </div>
+            
+            <div class="guide-section">
+                <h3>📝 Glossary</h3>
+                <table class="threshold-table">
+                    <tr>
+                        <th style="width: 150px;">Term</th>
+                        <th>Definition</th>
+                    </tr>
+                    <tr>
+                        <td><strong>PTU</strong></td>
+                        <td>Provisioned Throughput Unit - reserved capacity for Foundry</td>
+                    </tr>
+                    <tr>
+                        <td><strong>PAYG</strong></td>
+                        <td>Pay-As-You-Go - usage-based pricing with shared capacity</td>
+                    </tr>
+                    <tr>
+                        <td><strong>TPM</strong></td>
+                        <td>Tokens Per Minute - rate of token processing</td>
+                    </tr>
+                    <tr>
+                        <td><strong>RPM</strong></td>
+                        <td>Requests Per Minute - rate of API calls</td>
+                    </tr>
+                    <tr>
+                        <td><strong>TTFB</strong></td>
+                        <td>Time To First Byte - latency until first response token</td>
+                    </tr>
+                    <tr>
+                        <td><strong>HTTP 429</strong></td>
+                        <td>Too Many Requests - throttled request error</td>
+                    </tr>
+                    <tr>
+                        <td><strong>CV</strong></td>
+                        <td>Coefficient of Variation - measure of relative variability</td>
+                    </tr>
+                    <tr>
+                        <td><strong>P50/P95/P99</strong></td>
+                        <td>Percentile values - value below which X% of observations fall</td>
+                    </tr>
+                </table>
+            </div>
+            
+        </div>
+        
+        <!-- Footer -->
+        <div class="footer">
+            <p>Generated by PTU Advisor v1.0 • For internal use only • Based on observed metrics, not guarantees</p>
+            <p>© 2026 Microsoft Corporation</p>
+        </div>
+    </div>
+    
+    <script>
+        function switchTab(tabName) {
+            // Hide all tab contents
+            document.querySelectorAll('.tab-content').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Remove active class from all buttons
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            
+            // Show selected tab
+            document.getElementById('tab-' + tabName).classList.add('active');
+            
+            // Add active class to clicked button
+            event.target.closest('.tab-btn').classList.add('active');
+        }
+    </script>
+</body>
+</html>

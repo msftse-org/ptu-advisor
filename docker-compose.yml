@@ -1,0 +1,52 @@
+# ============================================================
+# PTU Advisor - Docker Compose
+# ============================================================
+# Quick start:
+#   docker compose up                          # App on http://localhost:8000
+#   docker compose run --rm cli demo --scenario ptu-recommended
+# ============================================================
+
+services:
+  # ── Web Application (FastAPI + React) ────────────────────
+  app:
+    build: .
+    container_name: ptu-advisor
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./outputs:/app/outputs          # persist generated reports
+    environment:
+      # Azure credentials (optional – only needed for live data)
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID:-}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}
+      - AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID:-}
+      # LLM features (optional – for AI-generated explanations)
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
+      - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - PTU_ADVISOR_LLM_PROVIDER=${PTU_ADVISOR_LLM_PROVIDER:-azure}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+  # ── CLI (one-shot commands) ──────────────────────────────
+  cli:
+    build: .
+    profiles: ["cli"]                   # only starts when explicitly requested
+    entrypoint: ["ptu-advisor"]
+    volumes:
+      - ./outputs:/app/outputs
+    environment:
+      - AZURE_TENANT_ID=${AZURE_TENANT_ID:-}
+      - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
+      - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}
+      - AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID:-}
+      - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
+      - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - PTU_ADVISOR_LLM_PROVIDER=${PTU_ADVISOR_LLM_PROVIDER:-azure}

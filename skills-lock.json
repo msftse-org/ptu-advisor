@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "skills": {
+    "azure-identity-py": {
+      "source": "microsoft/skills",
+      "sourceType": "github",
+      "computedHash": "ed709f2f312f7a1634dcd8a2c9189519971185cfa4a0fa5823dd4e258c41224e"
+    },
+    "azure-monitor-query-py": {
+      "source": "microsoft/skills",
+      "sourceType": "github",
+      "computedHash": "bb92f1606e5453db80444a57e6ef2fa0f559c977cd2b689f361df18819e42563"
+    },
+    "frontend-ui-dark-ts": {
+      "source": "microsoft/skills",
+      "sourceType": "github",
+      "computedHash": "1b892ece7247b97fa6faa35754b30eedec11eb9dde83b8b39783f7fdb6afc38d"
+    },
+    "pydantic-models-py": {
+      "source": "microsoft/skills",
+      "sourceType": "github",
+      "computedHash": "53778216c89c91c28a9a51bb170e535e2d29bab2c539f542cc8f218cbac2ec43"
+    },
+    "test-driven-development": {
+      "source": "obra/superpowers",
+      "sourceType": "github",
+      "computedHash": "126f1ebf6ccd414f42544f6e83d8cc5adb089e1108eaffb7c400701e37eecd9f"
+    }
+  }
+}
