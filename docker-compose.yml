@@ -10,12 +10,13 @@ services:
   # ── Web Application (FastAPI + React) ────────────────────
   app:
     build: .
-    container_name: ptu-advisor
     ports:
       - "8000:8000"
     volumes:
       - ./outputs:/app/outputs          # persist generated reports
+      - ${HOME}/.azure:/home/advisor/.azure
     environment:
+      - AZURE_CONFIG_DIR=/home/advisor/.azure
       # Azure credentials (optional – only needed for live data)
       - AZURE_TENANT_ID=${AZURE_TENANT_ID:-}
       - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
@@ -41,7 +42,9 @@ services:
     entrypoint: ["ptu-advisor"]
     volumes:
       - ./outputs:/app/outputs
+      - ${HOME}/.azure:/home/advisor/.azure
     environment:
+      - AZURE_CONFIG_DIR=/home/advisor/.azure
       - AZURE_TENANT_ID=${AZURE_TENANT_ID:-}
       - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
       - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}

@@ -41,7 +41,7 @@ Before running PTU Advisor, prepare the following.
 ### Azure Access (for live analysis)
 
 - Azure subscription access to the target AI Foundry / Azure OpenAI resources
-- Azure CLI installed and authenticated:
+- Azure CLI installed and authenticated (**required before `docker compose up` when using live Azure mode**):
 
 ```shell
 az login
@@ -67,6 +67,30 @@ AZURE_OPENAI_DEPLOYMENT=gpt-4o
 ---
 
 ## Quick Start: Docker (recommended)
+
+### Use host Azure CLI login with Docker
+
+Yes — this repository supports host-based Azure CLI auth with Docker.
+
+> **Important:** For live Azure discovery/analysis, `az login` on the host is a prerequisite to `docker compose up`.
+> Without a valid host login, setup/discovery endpoints will fail in live mode.
+
+1. Authenticate on your host machine:
+
+```shell
+az login
+az account set --subscription <your-subscription-id>
+```
+
+2. Start the stack:
+
+```shell
+docker compose up --build
+```
+
+The compose file mounts your host `~/.azure` into the container and sets `AZURE_CONFIG_DIR`, so discovery and live analysis can use the same signed-in context.
+
+If you only want demo mode, Azure login is not required.
 
 ### 1. Launch the full application
 
@@ -272,6 +296,22 @@ cd frontend && npm run build
 az login
 az account show
 ```
+
+### Docker + Azure setup issues
+
+For **live mode** with Docker, verify this order:
+
+```shell
+az login
+az account set --subscription <your-subscription-id>
+docker compose up --build
+```
+
+If discovery still fails:
+
+- Confirm host Azure profile exists at `~/.azure`
+- Rebuild the app image: `docker compose up -d --build`
+- Check app logs: `docker compose logs -f app`
 
 ### Workspace or deployment not found
 

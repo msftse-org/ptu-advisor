@@ -881,12 +881,18 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
 # the React SPA is served for every non-API path (including index.html
 # fallback for client-side routing).
 # ---------------------------------------------------------------------------
-import os  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-_STATIC_DIR = Path(__file__).resolve().parent.parent.parent / "static"
+_STATIC_CANDIDATES = [
+    # Source layout (repo/local editable installs)
+    Path(__file__).resolve().parent.parent.parent / "static",
+    # Docker runtime layout (frontend copied to /app/static)
+    Path("/app/static"),
+]
 
-if _STATIC_DIR.is_dir():
+_STATIC_DIR = next((path for path in _STATIC_CANDIDATES if path.is_dir()), None)
+
+if _STATIC_DIR:
     from starlette.responses import FileResponse  # noqa: E402
 
     @app.get("/{full_path:path}")

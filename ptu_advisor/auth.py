@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from typing import Optional
 
 from azure.identity import (
@@ -49,9 +50,24 @@ def get_azure_credential() -> TokenCredential:
         AuthenticationError: If authentication fails.
     """
     try:
+        env_tenant = (os.getenv("AZURE_TENANT_ID") or "").strip()
+        env_client = (os.getenv("AZURE_CLIENT_ID") or "").strip()
+        env_secret = (os.getenv("AZURE_CLIENT_SECRET") or "").strip()
+
+        use_env_credential = bool(env_tenant and env_client and env_secret)
+        if use_env_credential:
+            try:
+                uuid.UUID(env_tenant)
+                uuid.UUID(env_client)
+            except ValueError:
+                use_env_credential = False
+
         # Prefer Azure SDK defaults (cloud/runtime), then CLI for local dev.
         credential = ChainedTokenCredential(
-            DefaultAzureCredential(exclude_interactive_browser_credential=True),
+            DefaultAzureCredential(
+                exclude_interactive_browser_credential=True,
+                exclude_environment_credential=not use_env_credential,
+            ),
             AzureCliCredential(),
             ManagedIdentityCredential(),
         )

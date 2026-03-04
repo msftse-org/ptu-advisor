@@ -42,7 +42,15 @@ LABEL maintainer="Microsoft <ptu-advisor@microsoft.com>"
 LABEL description="PTU Advisor – Azure AI Foundry PTU vs PAYG recommendation tool"
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    AZURE_CORE_ONLY_SHOW_ERRORS=1
+
+# Install Azure CLI so AzureCliCredential can work inside container
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg && \
+    curl -sL https://aka.ms/InstallAzureCLIDeb | bash && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN groupadd --gid 1000 advisor && \
