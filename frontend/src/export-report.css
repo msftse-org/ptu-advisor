@@ -1,0 +1,82 @@
+/* ── Export Report: dropdown button + print styles ── */
+
+/* Dropdown container in the banner */
+.export-dropdown {
+  position: relative;
+  display: inline-block;
+  margin-left: auto;           /* push to the right edge of the flex row */
+}
+
+.export-btn {
+  background: rgba(18, 28, 48, 0.9);
+  color: #c3cbe0;
+  border: 1px solid rgba(165, 177, 255, 0.4);
+  border-radius: 10px;
+  padding: 7px 14px;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+.export-btn:hover {
+  border-color: rgba(165, 177, 255, 0.65);
+  background: rgba(25, 38, 65, 0.95);
+  color: #d0daff;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(95, 114, 242, 0.18);
+}
+.export-btn:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+.export-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 170px;
+  background: rgba(18, 28, 48, 0.96);
+  border: 1px solid rgba(165, 177, 255, 0.3);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  list-style: none;
+  padding: 4px 0;
+  z-index: 100;
+  margin: 0;
+}
+.export-menu li button {
+  display: block;
+  width: 100%;
+  padding: 9px 16px;
+  background: none;
+  border: none;
+  color: #c3cbe0;
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.export-menu li button:hover {
+  background: rgba(124, 140, 255, 0.12);
+  color: #d0daff;
+}
+
+/* ── Print stylesheet: only show the report, everything else hidden ── */
+@media print {
+  body > *:not(#export-report-root) {
+    display: none !important;
+  }
+  #export-report-root {
+    position: static !important;
+    left: auto !important;
+    font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #323130;
+    max-width: 800px;
+    margin: 0 auto;
+  }
+}

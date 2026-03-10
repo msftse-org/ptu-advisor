@@ -197,7 +197,8 @@ describe('Results UX parity checks', () => {
     fireEvent.click(screen.getByText('Demo Mode'))
     fireEvent.click(screen.getByRole('button', { name: /run analysis/i }))
 
-    await screen.findByText(/PTU RECOMMENDED/i)
+    const allMatches = await screen.findAllByText(/PTU RECOMMENDED/i)
+    expect(allMatches.length).toBeGreaterThan(0)
 
     const tooltipNotes = screen.getAllByLabelText(/^Info:/i)
     expect(tooltipNotes.length).toBeGreaterThan(8)

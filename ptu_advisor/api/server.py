@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional
 
 import numpy as np
@@ -33,6 +34,9 @@ class AnalyzeRequest(BaseModel):
     mode: Literal["demo", "live"] = "live"
     focus_topic: str = "Cost Reduction"
     lookback_days: int = Field(default=14, ge=1, le=30)
+    granularity_minutes: Literal[5, 15, 30, 60] = 60
+    window_start: Optional[datetime] = None
+    window_end: Optional[datetime] = None
 
     subscription_id: Optional[str] = None
     resource_group: Optional[str] = None
@@ -118,6 +122,82 @@ def _pick_demo_scenario(focus_topic: str) -> DemoScenario:
         if isinstance(first, DemoScenario):
             return first
     return DemoScenario.PTU_RECOMMENDED
+
+
+def _filter_series_by_window(
+    series: Optional[TimeSeries],
+    start: Optional[datetime],
+    end: Optional[datetime],
+) -> Optional[TimeSeries]:
+    if series is None or (start is None and end is None):
+        return series
+
+    filtered_timestamps: List[datetime] = []
+    filtered_values: List[float] = []
+    for ts, value in zip(series.timestamps, series.values):
+        if start and ts < start:
+            continue
+        if end and ts > end:
+            continue
+        filtered_timestamps.append(ts)
+        filtered_values.append(value)
+
+    if not filtered_timestamps:
+        return None
+
+    return TimeSeries(
+        timestamps=filtered_timestamps,
+        values=filtered_values,
+        metric_name=series.metric_name,
+        unit=series.unit,
+    )
+
+
+def _filter_metrics_by_window(
+    metrics: DeploymentMetrics,
+    start: Optional[datetime],
+    end: Optional[datetime],
+) -> DeploymentMetrics:
+    if start is None and end is None:
+        return metrics
+
+    normalized_start = start
+    normalized_end = end
+    if normalized_start and normalized_end and normalized_start > normalized_end:
+        normalized_start, normalized_end = normalized_end, normalized_start
+
+    filtered = DeploymentMetrics(
+        deployment_name=metrics.deployment_name,
+        model_name=metrics.model_name,
+        start_time=normalized_start or metrics.start_time,
+        end_time=normalized_end or metrics.end_time,
+        deployment_info=metrics.deployment_info,
+    )
+
+    for attr_name in [
+        "requests_per_minute",
+        "successful_requests",
+        "throttled_requests",
+        "prompt_tokens",
+        "completion_tokens",
+        "tokens_per_minute",
+        "time_to_first_byte_p50",
+        "time_to_first_byte_p95",
+        "time_to_first_byte_p99",
+        "ptu_utilization",
+    ]:
+        series = getattr(metrics, attr_name)
+        setattr(filtered, attr_name, _filter_series_by_window(series, normalized_start, normalized_end))
+
+    # Prefer token timestamps first, then request timestamps if tokens are unavailable.
+    timeline = filtered.tokens_per_minute or filtered.requests_per_minute
+    if timeline:
+        filtered.timestamps = list(timeline.timestamps)
+        if filtered.timestamps:
+            filtered.start_time = filtered.timestamps[0]
+            filtered.end_time = filtered.timestamps[-1]
+
+    return filtered
 
 
 def _serialize_analysis(
@@ -777,12 +857,22 @@ def deployments(
 def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
     if payload.mode == "demo":
         scenario = _pick_demo_scenario(payload.focus_topic)
-        metrics, _scenario_cfg = generate_demo_metrics(scenario, lookback_days=payload.lookback_days)
+        metrics, _scenario_cfg = generate_demo_metrics(
+            scenario,
+            lookback_days=payload.lookback_days,
+            granularity_minutes=payload.granularity_minutes,
+        )
+        metrics = _filter_metrics_by_window(metrics, payload.window_start, payload.window_end)
+        effective_lookback_days = max(
+            1,
+            int(max(1.0, (metrics.end_time - metrics.start_time).total_seconds() / 86_400.0)),
+        )
         config = AnalysisConfig(
             resource_group="demo-rg",
             workspace="demo-workspace",
             deployment=metrics.deployment_name,
-            lookback_days=payload.lookback_days,
+            lookback_days=effective_lookback_days,
+            aggregation_interval_minutes=payload.granularity_minutes,
         )
         engine = DecisionEngine(config)
         analysis = engine.analyze(metrics)
@@ -790,7 +880,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             metrics=metrics,
             analysis=analysis,
             focus_topic=payload.focus_topic,
-            lookback_days=payload.lookback_days,
+            lookback_days=effective_lookback_days,
             reservation_type=payload.reservation_type,
             baseline_percentile=payload.baseline_percentile,
             region=normalize_region(payload.region),
@@ -811,10 +901,17 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         deployment=payload.deployment,
         subscription_id=payload.subscription_id,
         lookback_days=payload.lookback_days,
+        aggregation_interval_minutes=payload.granularity_minutes,
     )
 
     collector = MetricsCollector(credential, config)
     metrics = collector.collect()
+    metrics = _filter_metrics_by_window(metrics, payload.window_start, payload.window_end)
+
+    effective_lookback_days = max(
+        1,
+        int(max(1.0, (metrics.end_time - metrics.start_time).total_seconds() / 86_400.0)),
+    )
 
     if metrics.tokens_per_minute is None and metrics.requests_per_minute is None:
         diagnostics = collector.get_diagnostics()
@@ -858,13 +955,22 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             },
         )
 
-    engine = DecisionEngine(config)
+    analysis_config = AnalysisConfig(
+        resource_group=payload.resource_group,
+        workspace=payload.workspace,
+        deployment=payload.deployment,
+        subscription_id=payload.subscription_id,
+        lookback_days=effective_lookback_days,
+        aggregation_interval_minutes=payload.granularity_minutes,
+    )
+
+    engine = DecisionEngine(analysis_config)
     analysis = engine.analyze(metrics)
     return _serialize_analysis(
         metrics=metrics,
         analysis=analysis,
         focus_topic=payload.focus_topic,
-        lookback_days=payload.lookback_days,
+        lookback_days=effective_lookback_days,
         reservation_type=payload.reservation_type,
         baseline_percentile=payload.baseline_percentile,
         region=normalize_region(payload.region),

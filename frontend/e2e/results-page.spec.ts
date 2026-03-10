@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test'
 
+let capturedAnalyzeRequests: Array<Record<string, unknown>> = []
+
 const mockAnalysisResponse = {
   recommendation: 'ptu_recommended',
   confidence: 0.93,
@@ -42,32 +44,33 @@ const mockAnalysisResponse = {
   },
   charts: {
     tokens: {
-      timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T01:00:00Z'],
-      prompt: [4000, 4200],
-      completion: [2600, 2800],
-      total: [6600, 7000],
+      timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T00:15:00Z', '2026-02-01T00:30:00Z', '2026-02-01T00:45:00Z'],
+      prompt: [4000, 4200, 4150, 4300],
+      completion: [2600, 2800, 2700, 2900],
+      total: [6600, 7000, 6850, 7200],
     },
     requests: {
-      timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T01:00:00Z'],
-      successful: [1000, 1100],
-      throttled: [15, 22],
-      total: [1015, 1122],
+      timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T00:15:00Z', '2026-02-01T00:30:00Z', '2026-02-01T00:45:00Z'],
+      successful: [1000, 1100, 1080, 1130],
+      throttled: [15, 22, 20, 24],
+      total: [1015, 1122, 1100, 1154],
     },
     latency: {
-      timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T01:00:00Z'],
-      p50: [390, 430],
-      p95: [880, 930],
-      p99: [1400, 1480],
+      timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T00:15:00Z', '2026-02-01T00:30:00Z', '2026-02-01T00:45:00Z'],
+      p50: [390, 430, 415, 440],
+      p95: [880, 930, 905, 950],
+      p99: [1400, 1480, 1450, 1500],
     },
     tpm: {
-      timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T01:00:00Z'],
-      values: [12000, 12800],
+      timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T00:15:00Z', '2026-02-01T00:30:00Z', '2026-02-01T00:45:00Z'],
+      values: [12000, 12800, 12400, 13000],
       avg: 12345,
+      p25: 11200,
       p95: 21456,
     },
     throttling: {
-      timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T01:00:00Z'],
-      values: [15, 22],
+      timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T00:15:00Z', '2026-02-01T00:30:00Z', '2026-02-01T00:45:00Z'],
+      values: [15, 22, 20, 24],
     },
     cost_curves: {
       baseline_tpm: [5000, 10000],
@@ -132,6 +135,7 @@ const mockAnalysisResponse = {
 }
 
 test.beforeEach(async ({ page }) => {
+  capturedAnalyzeRequests = []
   await page.route('**/api/**', async (route) => {
     const url = route.request().url()
 
@@ -154,6 +158,8 @@ test.beforeEach(async ({ page }) => {
     }
 
     if (url.includes('/api/analyze')) {
+      const payload = route.request().postDataJSON() as Record<string, unknown>
+      capturedAnalyzeRequests.push(payload)
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -177,10 +183,28 @@ test('demo flow renders second page with expected controls and context', async (
   await page.getByRole('button', { name: 'Run Analysis' }).click()
 
   await expect(page.getByText('PTU RECOMMENDED')).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Cost Assumptions' })).toBeVisible()
-  await expect(page.getByText('PTU Pricing Term')).toBeVisible()
-  await expect(page.getByText('PTU Baseline Coverage (P75)')).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'Recommendation Context' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Assumptions' })).toBeVisible()
+  await expect(page.locator('label').filter({ hasText: 'PTU Pricing Term' }).first()).toBeVisible()
+  await expect(page.getByText(/PTU Baseline Coverage/)).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Recommendation Rationale' })).toBeVisible()
   await expect(page.getByText('Why this recommendation')).toBeVisible()
-  await expect(page.getByText('interactive chart: hover for exact values and drag the bottom range bar to zoom.', { exact: false })).toBeVisible()
+  await expect(page.getByText('Drag across any chart to zoom in')).toBeVisible()
+  expect(capturedAnalyzeRequests.length).toBeGreaterThan(0)
+  expect(capturedAnalyzeRequests[0].granularity_minutes).toBe(15)
+})
+
+test('expand button opens token chart in fixed modal mode', async ({ page }) => {
+  await page.goto('/')
+
+  await page.getByRole('button', { name: 'Demo Mode' }).click()
+  await page.getByRole('button', { name: 'Run Analysis' }).click()
+
+  const expandTokenChart = page.getByRole('button', { name: 'Expand Token Volume Over Time' })
+  await expandTokenChart.click()
+
+  const tokenCard = page.locator('.chart-card').filter({ hasText: 'Token Volume Over Time' }).first()
+  await expect(tokenCard).toHaveClass(/is-chart-expanded/)
+
+  const position = await tokenCard.evaluate((node) => window.getComputedStyle(node).position)
+  expect(position).toBe('fixed')
 })

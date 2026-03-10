@@ -64,6 +64,25 @@ def test_demo_analyze_returns_expected_shape():
     assert "formula_blocks" in payload["cost_analysis"]
 
 
+def test_demo_analyze_supports_granularity_and_time_window():
+    response = client.post(
+        "/api/analyze",
+        json={
+            "mode": "demo",
+            "focus_topic": "Cost Reduction",
+            "lookback_days": 14,
+            "granularity_minutes": 15,
+            "window_start": "2026-02-01T00:00:00Z",
+            "window_end": "2026-02-01T12:00:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["metrics"]["lookback_days"] >= 1
+    assert isinstance(payload["charts"]["tokens"]["timestamps"], list)
+
+
 def test_live_analyze_without_required_fields_returns_400():
     response = client.post("/api/analyze", json={"mode": "live"})
 

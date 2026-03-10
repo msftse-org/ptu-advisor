@@ -503,6 +503,7 @@ FOCUS_TOPICS = {
 def generate_demo_metrics(
     scenario: DemoScenario,
     lookback_days: int = 14,
+    granularity_minutes: int = 60,
 ) -> Tuple[DeploymentMetrics, ScenarioConfig]:
     """
     Generate realistic demo metrics for a scenario.
@@ -510,20 +511,22 @@ def generate_demo_metrics(
     Args:
         scenario: The demo scenario to generate.
         lookback_days: Number of days of data to generate.
+        granularity_minutes: Aggregation interval in minutes (5, 15, 30, 60).
         
     Returns:
         Tuple of (DeploymentMetrics, ScenarioConfig).
     """
     config = SCENARIOS[scenario]
     
-    # Generate timestamps (hourly for the lookback period)
+    # Generate timestamps at the selected granularity for the lookback period.
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=lookback_days)
-    
-    hours = lookback_days * 24
+
+    granularity = granularity_minutes if granularity_minutes in (5, 15, 30, 60) else 60
+    point_count = max(2, int((lookback_days * 24 * 60) / granularity))
     timestamps = [
-        start_time + timedelta(hours=i) 
-        for i in range(hours)
+        start_time + timedelta(minutes=i * granularity)
+        for i in range(point_count)
     ]
     
     # Generate TPM based on scenario

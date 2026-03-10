@@ -16,6 +16,7 @@ import {
   YAxis,
 } from 'recharts'
 import { api } from './api'
+import { ExportReport } from './ExportReport'
 import type {
   AccountInfo,
   AnalysisResponse,
@@ -94,6 +95,12 @@ const CALC_MODELS = [
 type CalcScenario = { name: string; term: string; cost: number; ptuUnits: number }
 type LegendEntry = { label: string; color: string }
 type CostCurvePoint = { baselineTpm: number; payg: number; hybrid: number; ptuUnits: number }
+type TimeWindow = { start: string; end: string }
+type RunAnalysisOptions = {
+  preserveCurrent?: boolean
+  timeWindow?: TimeWindow | null
+  updateCharts?: boolean
+}
 
 function StaticLegend({ items }: { items: LegendEntry[] }) {
   return (
@@ -171,6 +178,16 @@ function makeSmartDateFormatter(timestamps: string[]) {
     if (spanHours <= 168 && !dense) return `${mon}/${day} ${hh}:${mm}`
     return `${mon}/${day}`
   }
+}
+
+/** Full date+time formatter for tooltips — always shows date and time regardless of density. */
+function tooltipDateFmt(iso: string): string {
+  const d = new Date(iso)
+  const mon = d.getMonth() + 1
+  const day = d.getDate()
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return `${mon}/${day} ${hh}:${mm}`
 }
 
 function formatDeploymentTitle(deployment: DeploymentInfo): string {
@@ -286,6 +303,17 @@ function LoadingSpinner() {
       <span className="loading-text">Analyzing deployment metrics</span>
       <div className="loading-pulse">
         <span /><span /><span />
+      </div>
+    </div>
+  )
+}
+
+function ThinkingOverlay() {
+  return (
+    <div className="thinking-overlay">
+      <div className="thinking-pill">
+        <div className="loading-spinner thinking-spinner" />
+        <span>Updating analysis…</span>
       </div>
     </div>
   )
@@ -411,6 +439,9 @@ function App() {
   const [zoomLeft, setZoomLeft] = useState<string | null>(null)
   const [zoomRight, setZoomRight] = useState<string | null>(null)
   const [zoomDomain, setZoomDomain] = useState<[number, number] | null>(null)
+  const [selectedTimestamp, setSelectedTimestamp] = useState<string | null>(null)
+  const [granularityMinutes, setGranularityMinutes] = useState<15 | 30 | 60>(15)
+  const [baseAnalysis, setBaseAnalysis] = useState<AnalysisResponse | null>(null)
 
   const [lookbackDays, setLookbackDays] = useState(14)
   const [reservationType, setReservationType] = useState<string>('Monthly Commitment (Estimated 64% off)')
@@ -516,6 +547,12 @@ function App() {
     setDeployments([])
     setDeploymentName('')
 
+    // Sync the assumptions region to the account's actual Azure region
+    const loc = selectedAccount.location.toLowerCase().replace(/\s+/g, '')
+    if (pricingRegions.some((r) => r.name === loc)) {
+      setSelectedRegion(loc)
+    }
+
     api.deployments(subscriptionId, selectedAccount.resource_group, selectedAccount.name)
       .then((items) => {
         setDeployments(items)
@@ -526,31 +563,58 @@ function App() {
       .catch((e: Error) => setError(e.message))
   }, [mode, subscriptionId, selectedAccount])
 
-  const runAnalysis = useCallback(async (preserveCurrent = false) => {
+  const runAnalysis = useCallback(async ({ preserveCurrent = false, timeWindow = null, updateCharts = true }: RunAnalysisOptions = {}) => {
     setLoading(true)
     setError('')
     if (!preserveCurrent) {
       setAnalysis(null)
+      setBaseAnalysis(null)
       setBaselinePtu(null) // Reset so next analysis picks its own default
+      setZoomDomain(null)
+      setSelectedTimestamp(null)
     }
     try {
       // Only send baseline_ptu when known (after first analysis sets the default)
       const ptuParam = baselinePtu != null ? { baseline_ptu: baselinePtu } : {}
+      const windowParams = timeWindow ? { window_start: timeWindow.start, window_end: timeWindow.end } : {}
       if (mode === 'demo') {
         const result = await api.analyze({
           mode: 'demo',
           focus_topic: focusTopic,
           lookback_days: lookbackDays,
+          granularity_minutes: granularityMinutes,
           reservation_type: reservationType,
           region: selectedRegion,
           deployment_type: selectedDeploymentType,
+          ...windowParams,
           ...ptuParam,
         })
         // Initialise the PTU slider on first analysis load
         if (baselinePtu == null) {
           setBaselinePtu(result.cost_analysis.hybrid.baseline_ptu)
         }
-        setAnalysis(result)
+        if (updateCharts || !analysis) {
+          setAnalysis(result)
+          setBaseAnalysis(result)
+        } else {
+          setAnalysis((current) => {
+            if (!current) return result
+            return {
+              ...current,
+              recommendation: result.recommendation,
+              confidence: result.confidence,
+              summary: result.summary,
+              explanation: result.explanation,
+              what_would_change: result.what_would_change,
+              data_quality: result.data_quality,
+              analysis_period: result.analysis_period,
+              dimensions: result.dimensions,
+              metrics: result.metrics,
+              cost_analysis: result.cost_analysis,
+              insights: result.insights,
+            }
+          })
+        }
         return
       }
 
@@ -561,6 +625,7 @@ function App() {
       const result = await api.analyze({
         mode: 'live',
         lookback_days: lookbackDays,
+        granularity_minutes: granularityMinutes,
         subscription_id: subscriptionId,
         resource_group: selectedAccount.resource_group,
         workspace: selectedAccount.name,
@@ -569,13 +634,39 @@ function App() {
         reservation_type: reservationType,
         region: selectedRegion,
         deployment_type: selectedDeploymentType,
+        ...windowParams,
         ...ptuParam,
       })
       // Initialise the PTU slider on first analysis load
       if (baselinePtu == null) {
         setBaselinePtu(result.cost_analysis.hybrid.baseline_ptu)
       }
-      setAnalysis(result)
+      if (updateCharts || !analysis) {
+        setAnalysis(result)
+        setBaseAnalysis(result)
+      } else {
+        setAnalysis((current) => {
+          if (!current) return result
+          return {
+            ...current,
+            recommendation: result.recommendation,
+            confidence: result.confidence,
+            summary: result.summary,
+            explanation: result.explanation,
+            what_would_change: result.what_would_change,
+            data_quality: result.data_quality,
+            analysis_period: result.analysis_period,
+            dimensions: result.dimensions,
+            metrics: result.metrics,
+            cost_analysis: result.cost_analysis,
+            insights: result.insights,
+            charts: {
+              ...current.charts,
+              cost_curves: result.charts.cost_curves,
+            },
+          }
+        })
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Analysis failed')
     } finally {
@@ -585,6 +676,7 @@ function App() {
     mode,
     focusTopic,
     lookbackDays,
+    granularityMinutes,
     reservationType,
     baselinePtu,
     selectedRegion,
@@ -592,9 +684,11 @@ function App() {
     subscriptionId,
     selectedAccount,
     deploymentName,
+    analysis,
   ])
 
   const previousAssumptionKey = useRef('')
+  const previousZoomWindowKey = useRef('')
 
   useEffect(() => {
     if (!analysis) {
@@ -602,7 +696,14 @@ function App() {
       return
     }
 
-    const currentKey = `${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}`
+    const activeZoomWindow = zoomDomain
+      ? {
+          start: analysis.charts.tokens.timestamps[zoomDomain[0]],
+          end: analysis.charts.tokens.timestamps[zoomDomain[1]],
+        }
+      : null
+
+    const currentKey = `${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}|${granularityMinutes}`
     if (!previousAssumptionKey.current) {
       previousAssumptionKey.current = currentKey
       return
@@ -614,11 +715,11 @@ function App() {
 
     previousAssumptionKey.current = currentKey
     const timer = setTimeout(() => {
-      runAnalysis(true)
+      runAnalysis({ preserveCurrent: true, timeWindow: activeZoomWindow, updateCharts: !activeZoomWindow })
     }, 250)
 
     return () => clearTimeout(timer)
-  }, [analysis, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, loading, runAnalysis])
+  }, [analysis, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, loading, runAnalysis, zoomDomain])
 
   useEffect(() => {
     if (!expandedChart) return
@@ -645,55 +746,55 @@ function App() {
     if (!analysis) return []
     const series = analysis.charts.tokens
     return series.timestamps.map((ts, idx) => ({
-      time: smartDateFmt(ts),
+      time: ts,
       prompt: series.prompt[idx] ?? 0,
       completion: series.completion[idx] ?? 0,
       total: series.total[idx] ?? 0,
     }))
-  }, [analysis, smartDateFmt])
+  }, [analysis])
 
   const requestsChartData = useMemo(() => {
     if (!analysis) return []
     const series = analysis.charts.requests
     return series.timestamps.map((ts, idx) => ({
-      time: smartDateFmt(ts),
+      time: ts,
       successful: series.successful[idx] ?? 0,
       throttled: series.throttled[idx] ?? 0,
       total: series.total[idx] ?? 0,
     }))
-  }, [analysis, smartDateFmt])
+  }, [analysis])
 
   const latencyChartData = useMemo(() => {
     if (!analysis) return []
     const series = analysis.charts.latency
     return series.timestamps.map((ts, idx) => ({
-      time: smartDateFmt(ts),
+      time: ts,
       p50: series.p50[idx] ?? 0,
       p95: series.p95[idx] ?? 0,
       p99: series.p99[idx] ?? 0,
     }))
-  }, [analysis, smartDateFmt])
+  }, [analysis])
 
   const throttleChartData = useMemo(() => {
     if (!analysis) return []
     const series = analysis.charts.throttling
     return series.timestamps.map((ts, idx) => ({
-      time: smartDateFmt(ts),
+      time: ts,
       throttled: series.values[idx] ?? 0,
     }))
-  }, [analysis, smartDateFmt])
+  }, [analysis])
 
   const tpmChartData = useMemo(() => {
     if (!analysis) return []
     const series = analysis.charts.tpm
     const refTpm = analysis.charts.cost_curves.break_even_tpm ?? series.p25
     return series.timestamps.map((ts, idx) => ({
-      time: smartDateFmt(ts),
+      time: ts,
       tpm: series.values[idx] ?? 0,
       avg: series.avg,
       refLine: refTpm,
     }))
-  }, [analysis, smartDateFmt])
+  }, [analysis])
 
   /** Label for the TPM reference line (break-even or P25). */
   const tpmRefLabel = useMemo(() => {
@@ -740,6 +841,46 @@ function App() {
 
   const fullTimeLabels = useMemo(() => tokenChartData.map((d) => d.time), [tokenChartData])
 
+  useEffect(() => {
+    if (!selectedTimestamp) return
+    const existsInCurrentData = fullTimeLabels.includes(selectedTimestamp)
+    if (!existsInCurrentData) {
+      setSelectedTimestamp(null)
+    }
+  }, [selectedTimestamp, fullTimeLabels])
+
+  const zoomWindow = useMemo<TimeWindow | null>(() => {
+    if (!analysis || !zoomDomain) return null
+    const timestamps = analysis.charts.tokens.timestamps
+    const start = timestamps[zoomDomain[0]]
+    const end = timestamps[zoomDomain[1]]
+    if (!start || !end) return null
+    return { start, end }
+  }, [analysis, zoomDomain])
+
+  const selectedPointDetails = useMemo(() => {
+    if (!selectedTimestamp) return null
+
+    const tokenPoint = tokenChartData.find((point) => point.time === selectedTimestamp)
+    const requestPoint = requestsChartData.find((point) => point.time === selectedTimestamp)
+    const latencyPoint = latencyChartData.find((point) => point.time === selectedTimestamp)
+    const throttlePoint = throttleChartData.find((point) => point.time === selectedTimestamp)
+    const tpmPoint = tpmChartData.find((point) => point.time === selectedTimestamp)
+
+    if (!tokenPoint && !requestPoint && !latencyPoint && !throttlePoint && !tpmPoint) {
+      return null
+    }
+
+    return {
+      time: selectedTimestamp,
+      tokenPoint,
+      requestPoint,
+      latencyPoint,
+      throttlePoint,
+      tpmPoint,
+    }
+  }, [selectedTimestamp, tokenChartData, requestsChartData, latencyChartData, throttleChartData, tpmChartData])
+
   const handleZoomMouseDown = useCallback((e: { activeLabel?: string | number } | null) => {
     if (e?.activeLabel != null) setZoomLeft(String(e.activeLabel))
   }, [])
@@ -747,6 +888,12 @@ function App() {
   const handleZoomMouseMove = useCallback((e: { activeLabel?: string | number } | null) => {
     if (zoomLeft && e?.activeLabel != null) setZoomRight(String(e.activeLabel))
   }, [zoomLeft])
+
+  const handlePointSelect = useCallback((e: { activeLabel?: string | number } | null) => {
+    if (e?.activeLabel != null) {
+      setSelectedTimestamp(String(e.activeLabel))
+    }
+  }, [])
 
   const handleZoomMouseUp = useCallback(() => {
     if (!zoomLeft || !zoomRight) {
@@ -770,13 +917,51 @@ function App() {
     setZoomRight(null)
   }, [zoomLeft, zoomRight, fullTimeLabels])
 
-  const resetZoom = useCallback(() => setZoomDomain(null), [])
+  const resetZoom = useCallback(() => {
+    setZoomDomain(null)
+    if (baseAnalysis) {
+      setAnalysis(baseAnalysis)
+    }
+  }, [baseAnalysis])
+
+  useEffect(() => {
+    if (!analysis) {
+      previousZoomWindowKey.current = ''
+      return
+    }
+
+    if (!zoomWindow) {
+      previousZoomWindowKey.current = ''
+      if (baseAnalysis && analysis !== baseAnalysis) {
+        setAnalysis(baseAnalysis)
+      }
+      return
+    }
+
+    const currentKey = `${zoomWindow.start}|${zoomWindow.end}|${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}|${granularityMinutes}`
+    if (previousZoomWindowKey.current === currentKey || loading) {
+      return
+    }
+
+    previousZoomWindowKey.current = currentKey
+    const timer = setTimeout(() => {
+      runAnalysis({ preserveCurrent: true, timeWindow: zoomWindow, updateCharts: false })
+    }, 250)
+
+    return () => clearTimeout(timer)
+  }, [analysis, baseAnalysis, zoomWindow, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, loading, runAnalysis])
 
   const zoomChartProps = useMemo(() => ({
     onMouseDown: handleZoomMouseDown,
     onMouseMove: handleZoomMouseMove,
     onMouseUp: handleZoomMouseUp,
-  }), [handleZoomMouseDown, handleZoomMouseMove, handleZoomMouseUp])
+    onClick: handlePointSelect,
+  }), [handleZoomMouseDown, handleZoomMouseMove, handleZoomMouseUp, handlePointSelect])
+
+  const getChartHeight = useCallback((chartKey: string, baseHeight: number) => {
+    if (expandedChart !== chartKey) return baseHeight
+    return Math.max(420, window.innerHeight - 180)
+  }, [expandedChart])
 
   const recommendationTitle = useMemo(() => {
     if (!analysis) return ''
@@ -1173,6 +1358,19 @@ function App() {
                   onChange={(e) => setLookbackDays(Number(e.target.value))}
                 />
               </label>
+
+              <label>
+                Graph Granularity
+                <select
+                  value={granularityMinutes}
+                  onChange={(e) => setGranularityMinutes(Number(e.target.value) as 15 | 30 | 60)}
+                  data-testid="granularity-select"
+                >
+                  <option value={15}>15 minutes</option>
+                  <option value={30}>30 minutes</option>
+                  <option value={60}>60 minutes</option>
+                </select>
+              </label>
             </div>
 
             {error && (
@@ -1345,11 +1543,13 @@ function App() {
         </footer>
 
         {analysis && (
-          <section className="results results-v2">
+          <section className="results results-v2" style={{ position: 'relative' }}>
+            {loading && <ThinkingOverlay />}
             <div className={`result-banner ${recommendationClass}`}>
               <div className="result-banner-top">
                 <RecBadge recommendation={analysis.recommendation} />
                 <p className="confidence">Confidence score: {(analysis.confidence * 100).toFixed(1)}%</p>
+                <ExportReport analysis={analysis} baseAnalysis={baseAnalysis} isZoomed={zoomDomain !== null} />
               </div>
               <h2 className="result-banner-title">{recommendationTitle}</h2>
               <p className="result-banner-summary">{recommendationSummary}</p>
@@ -1380,22 +1580,58 @@ function App() {
             </div>
 
             <h3 className="section-title section-title-with-icon stagger-3"><img src={RESULTS_ICON_URLS.evidence} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-3">Evidence</span></h3>
-            {zoomDomain && (
+            {zoomDomain && (<>
               <div className="zoom-indicator stagger-3">
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="4.5"/><path d="M13 13l-3.5-3.5"/><path d="M6 4v4M4 6h4"/></svg>
                 <span>Zoomed to {zoomDomain[1] - zoomDomain[0] + 1} of {tokenChartData.length} points</span>
                 <button className="zoom-reset-btn" onClick={resetZoom}>Reset Zoom</button>
               </div>
+              <div className="zoom-pan-bar stagger-3">
+                <span className="zoom-pan-label">{tooltipDateFmt(fullTimeLabels[zoomDomain[0]] ?? '')}</span>
+                <input
+                  type="range"
+                  className="zoom-pan-slider"
+                  min={0}
+                  max={Math.max(0, tokenChartData.length - 1 - (zoomDomain[1] - zoomDomain[0]))}
+                  value={zoomDomain[0]}
+                  onChange={(e) => {
+                    const newStart = Number(e.target.value)
+                    const width = zoomDomain[1] - zoomDomain[0]
+                    setZoomDomain([newStart, newStart + width])
+                  }}
+                />
+                <span className="zoom-pan-label">{tooltipDateFmt(fullTimeLabels[zoomDomain[1]] ?? '')}</span>
+              </div>
+            </>)}
+            {zoomWindow && (
+              <p className="zoom-hint stagger-3" data-testid="zoom-window-label">
+                Recommendation context: {smartDateFmt(zoomWindow.start)} to {smartDateFmt(zoomWindow.end)}
+              </p>
             )}
             {!zoomDomain && (
               <p className="zoom-hint stagger-3">Drag across any chart to zoom in</p>
+            )}
+            {selectedPointDetails && (
+              <article className="chart-card selected-point-card" data-testid="selected-point-card">
+                <WidgetHeader title="Selected Time Snapshot" tip="Click any chart point to pin one timestamp across all charts." />
+                <p className="selected-point-time">{smartDateFmt(selectedPointDetails.time)}</p>
+                <div className="selected-point-grid">
+                  <span>TPM: {selectedPointDetails.tpmPoint ? formatWithCommas(selectedPointDetails.tpmPoint.tpm) : 'N/A'}</span>
+                  <span>Prompt: {selectedPointDetails.tokenPoint ? formatWithCommas(selectedPointDetails.tokenPoint.prompt) : 'N/A'}</span>
+                  <span>Completion: {selectedPointDetails.tokenPoint ? formatWithCommas(selectedPointDetails.tokenPoint.completion) : 'N/A'}</span>
+                  <span>Requests: {selectedPointDetails.requestPoint ? formatWithCommas(selectedPointDetails.requestPoint.total) : 'N/A'}</span>
+                  <span>HTTP 429: {selectedPointDetails.throttlePoint ? formatWithCommas(selectedPointDetails.throttlePoint.throttled) : 'N/A'}</span>
+                  <span>P95 Latency: {selectedPointDetails.latencyPoint ? `${formatWithCommas(selectedPointDetails.latencyPoint.p95)} ms` : 'N/A'}</span>
+                </div>
+                <button className="zoom-reset-btn" onClick={() => setSelectedTimestamp(null)}>Clear Point</button>
+              </article>
             )}
             <div className="chart-grid chart-grid-v2 stagger-4">
               <article className={`chart-card${expandedChart === 'tokens' ? ' is-chart-expanded' : ''}`}>
                 <WidgetHeader title="Token Volume Over Time" tip="Hover to inspect exact values by interval." onExpand={() => setExpandedChart(expandedChart === 'tokens' ? null : 'tokens')} />
                 {tokenChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <ResponsiveContainer width="100%" height={expandedChart === 'tokens' ? window.innerHeight - 140 : 240}>
-                  <ComposedChart data={applyZoom(tokenChartData)} {...zoomChartProps}>
+                <ResponsiveContainer width="100%" height={getChartHeight('tokens', 240)}>
+                  <ComposedChart data={applyZoom(tokenChartData)} syncId="time-sync" {...zoomChartProps}>
                     <defs>
                       <linearGradient id="gradPrompt" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor={CHART_COLORS.primary} stopOpacity={0.24} />
@@ -1407,14 +1643,16 @@ function App() {
                       </linearGradient>
                     </defs>
                     <CartesianGrid stroke="rgba(120,140,170,0.12)" />
-                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} interval="preserveStartEnd" tickLine={false} axisLine={false} />
+                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
                     <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatWithCommas(Number(v))} label={{ value: 'Tokens', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={(value) => (typeof value === 'number' ? formatWithCommas(value) : String(value ?? ''))} />
+                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={((value: any, name: string) => { if (name === 'total') return [null, null]; return typeof value === 'number' ? formatWithCommas(value) : String(value ?? '') }) as any} />
                     <Legend content={<StaticLegend items={[{ label: 'Prompt Tokens', color: CHART_COLORS.primary }, { label: 'Completion Tokens', color: CHART_COLORS.secondary }]} />} />
-                    <Area type="monotone" dataKey="prompt" fill="url(#gradPrompt)" stroke="none" legendType="none" />
-                    <Area type="monotone" dataKey="completion" fill="url(#gradCompletion)" stroke="none" legendType="none" />
+                    <Area type="monotone" dataKey="prompt" fill="url(#gradPrompt)" stroke="none" legendType="none" tooltipType="none" />
+                    <Area type="monotone" dataKey="completion" fill="url(#gradCompletion)" stroke="none" legendType="none" tooltipType="none" />
                     <Line type="monotone" dataKey="prompt" stroke={CHART_COLORS.primary} dot={false} activeDot={{ r: 4 }} name="Prompt Tokens" legendType="none" />
                     <Line type="monotone" dataKey="completion" stroke={CHART_COLORS.secondary} dot={false} activeDot={{ r: 4 }} name="Completion Tokens" legendType="none" />
+                    {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
                     {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
                   </ComposedChart>
                 </ResponsiveContainer>
@@ -1424,8 +1662,8 @@ function App() {
               <article className={`chart-card${expandedChart === 'requests' ? ' is-chart-expanded' : ''}`}>
                 <WidgetHeader title="Request Outcomes" tip="Hover to inspect exact values by interval." onExpand={() => setExpandedChart(expandedChart === 'requests' ? null : 'requests')} />
                 {requestsChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <ResponsiveContainer width="100%" height={expandedChart === 'requests' ? window.innerHeight - 140 : 240}>
-                  <ComposedChart data={applyZoom(requestsChartData)} {...zoomChartProps}>
+                <ResponsiveContainer width="100%" height={getChartHeight('requests', 240)}>
+                  <ComposedChart data={applyZoom(requestsChartData)} syncId="time-sync" {...zoomChartProps}>
                     <defs>
                       <linearGradient id="gradSuccess" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor={CHART_COLORS.success} stopOpacity={0.2} />
@@ -1437,14 +1675,16 @@ function App() {
                       </linearGradient>
                     </defs>
                     <CartesianGrid stroke="rgba(120,140,170,0.12)" />
-                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} interval="preserveStartEnd" tickLine={false} axisLine={false} />
+                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
                     <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatWithCommas(Number(v))} label={{ value: 'Requests', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={(value) => (typeof value === 'number' ? formatWithCommas(value) : String(value ?? ''))} />
+                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={((value: any, name: string) => { if (name === 'total') return [null, null]; return typeof value === 'number' ? formatWithCommas(value) : String(value ?? '') }) as any} />
                     <Legend content={<StaticLegend items={[{ label: 'Successful', color: CHART_COLORS.success }, { label: 'HTTP 429', color: CHART_COLORS.danger }]} />} />
-                    <Area type="monotone" dataKey="successful" fill="url(#gradSuccess)" stroke="none" legendType="none" />
-                    <Area type="monotone" dataKey="throttled" fill="url(#gradThrottled)" stroke="none" legendType="none" />
+                    <Area type="monotone" dataKey="successful" fill="url(#gradSuccess)" stroke="none" legendType="none" tooltipType="none" />
+                    <Area type="monotone" dataKey="throttled" fill="url(#gradThrottled)" stroke="none" legendType="none" tooltipType="none" />
                     <Line type="monotone" dataKey="successful" stroke={CHART_COLORS.success} dot={false} activeDot={{ r: 4 }} name="Successful" legendType="none" />
                     <Line type="monotone" dataKey="throttled" stroke={CHART_COLORS.danger} dot={false} activeDot={{ r: 4 }} name="HTTP 429" legendType="none" />
+                    {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
                     {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
                   </ComposedChart>
                 </ResponsiveContainer>
@@ -1454,16 +1694,17 @@ function App() {
               <article className={`chart-card${expandedChart === 'latency' ? ' is-chart-expanded' : ''}`}>
                 <WidgetHeader title="Response Time Stability" tip="Hover to inspect exact latency levels by interval." onExpand={() => setExpandedChart(expandedChart === 'latency' ? null : 'latency')} />
                 {latencyChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <ResponsiveContainer width="100%" height={expandedChart === 'latency' ? window.innerHeight - 140 : 240}>
-                  <LineChart data={applyZoom(latencyChartData)} {...zoomChartProps}>
+                <ResponsiveContainer width="100%" height={getChartHeight('latency', 240)}>
+                  <LineChart data={applyZoom(latencyChartData)} syncId="time-sync" {...zoomChartProps}>
                     <CartesianGrid stroke="rgba(120,140,170,0.2)" />
-                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} interval="preserveStartEnd" tickLine={false} axisLine={false} />
+                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
                     <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatWithCommas(Number(v))} label={{ value: 'ms', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={(value) => (typeof value === 'number' ? `${formatWithCommas(value)} ms` : String(value ?? ''))} />
+                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={(value: number | string | undefined) => (typeof value === 'number' ? `${formatWithCommas(value)} ms` : String(value ?? ''))} />
                     <Legend wrapperStyle={{ fontSize: 11 }} />
                     <Line type="monotone" dataKey="p50" stroke={CHART_COLORS.primary} strokeWidth={2} dot={false} activeDot={{ r: 4 }} name="P50" connectNulls />
                     <Line type="monotone" dataKey="p95" stroke={CHART_COLORS.secondary} strokeWidth={2} dot={false} activeDot={{ r: 4 }} name="P95" connectNulls />
                     <Line type="monotone" dataKey="p99" stroke={CHART_COLORS.warning} strokeWidth={2} dot={false} activeDot={{ r: 4 }} name="P99" connectNulls />
+                    {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
                     {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
                   </LineChart>
                 </ResponsiveContainer>
@@ -1473,14 +1714,15 @@ function App() {
               <article className={`chart-card${expandedChart === 'throttle' ? ' is-chart-expanded' : ''}`}>
                 <WidgetHeader title="Rate-Limit Events (429)" tip="Hover to inspect exact values by interval." onExpand={() => setExpandedChart(expandedChart === 'throttle' ? null : 'throttle')} />
                 {throttleChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <ResponsiveContainer width="100%" height={expandedChart === 'throttle' ? window.innerHeight - 140 : 240}>
-                  <LineChart data={applyZoom(throttleChartData)} {...zoomChartProps}>
+                <ResponsiveContainer width="100%" height={getChartHeight('throttle', 240)}>
+                  <LineChart data={applyZoom(throttleChartData)} syncId="time-sync" {...zoomChartProps}>
                     <CartesianGrid stroke="rgba(120,140,170,0.2)" />
-                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} interval="preserveStartEnd" tickLine={false} axisLine={false} />
+                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
                     <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatWithCommas(Number(v))} label={{ value: '429 Events', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={(value) => (typeof value === 'number' ? formatWithCommas(value) : String(value ?? ''))} />
+                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={(value: number | string | undefined) => (typeof value === 'number' ? formatWithCommas(value) : String(value ?? ''))} />
                     <Legend wrapperStyle={{ fontSize: 11 }} />
                     <Line type="monotone" dataKey="throttled" stroke={CHART_COLORS.warning} dot={false} activeDot={{ r: 4 }} name="Rate Limited" />
+                    {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
                     {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
                   </LineChart>
                 </ResponsiveContainer>
@@ -1491,8 +1733,8 @@ function App() {
             <article className={`chart-card wide-card${expandedChart === 'tpm' ? ' is-chart-expanded' : ''}`}>
               <WidgetHeader title={`Throughput Band (TPM vs Avg/${tpmRefLabel})`} tip={`Shows raw TPM against average and ${tpmRefLabel} throughput levels.`} onExpand={() => setExpandedChart(expandedChart === 'tpm' ? null : 'tpm')} />
               {tpmChartData.length === 0 ? <ChartEmpty height={280} /> : (
-              <ResponsiveContainer width="100%" height={expandedChart === 'tpm' ? window.innerHeight - 140 : 280}>
-                <ComposedChart data={applyZoom(tpmChartData)} {...zoomChartProps}>
+              <ResponsiveContainer width="100%" height={getChartHeight('tpm', 280)}>
+                <ComposedChart data={applyZoom(tpmChartData)} syncId="time-sync" {...zoomChartProps}>
                   <defs>
                     <linearGradient id="gradTpm" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="0%" stopColor={CHART_COLORS.primary} stopOpacity={0.18} />
@@ -1500,14 +1742,16 @@ function App() {
                     </linearGradient>
                   </defs>
                   <CartesianGrid stroke="rgba(120,140,170,0.12)" />
-                  <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} interval="preserveStartEnd" tickLine={false} axisLine={false} />
+                  <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
                   <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatWithCommas(Number(v))} label={{ value: 'TPM', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                  <Tooltip contentStyle={CHART_TOOLTIP_STYLE} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={(value) => (typeof value === 'number' ? formatWithCommas(value) : String(value ?? ''))} />
+                  {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                  <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={((value: any, name: string) => { if (name === 'avg' || name === 'refLine') return [null, null]; return typeof value === 'number' ? formatWithCommas(value) : String(value ?? '') }) as any} />
                   <Legend content={<StaticLegend items={[{ label: 'TPM', color: CHART_COLORS.primary }, { label: 'Avg', color: CHART_COLORS.success }, { label: tpmRefLabel, color: CHART_COLORS.warning }]} />} />
-                  <Area type="monotone" dataKey="tpm" fill="url(#gradTpm)" stroke="none" legendType="none" />
+                  <Area type="monotone" dataKey="tpm" fill="url(#gradTpm)" stroke="none" legendType="none" tooltipType="none" />
                   <Line type="monotone" dataKey="tpm" stroke={CHART_COLORS.primary} dot={false} activeDot={{ r: 4 }} name="TPM" legendType="none" />
                   <Line type="monotone" dataKey="avg" stroke={CHART_COLORS.success} dot={false} activeDot={{ r: 4 }} name="Avg" legendType="none" strokeDasharray="3 3" />
                   <Line type="monotone" dataKey="refLine" stroke={CHART_COLORS.warning} dot={false} activeDot={{ r: 4 }} name={tpmRefLabel} legendType="none" strokeDasharray="5 5" />
+                  {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
                   {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
                 </ComposedChart>
               </ResponsiveContainer>
@@ -1629,7 +1873,7 @@ function App() {
                 <StaticLegend items={[{ label: 'PAYG Cost', color: CHART_COLORS.primary }, { label: 'Hybrid Cost', color: CHART_COLORS.success }]} />
               </div>
               {costCurveData.length === 0 ? <ChartEmpty height={300} /> : (<>
-              <ResponsiveContainer width="100%" height={expandedChart === 'cost' ? window.innerHeight - 140 : 300}>
+              <ResponsiveContainer width="100%" height={getChartHeight('cost', 300)}>
                 <LineChart data={costCurveData} margin={{ top: 10, right: 12, left: 8, bottom: 18 }}>
                   <CartesianGrid stroke="rgba(120,140,170,0.2)" />
                   <XAxis dataKey="baselineTpm" type="number" domain={costCurveDomain} tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatNumber(Number(v))} tickLine={false} axisLine={false} label={{ value: 'Baseline TPM', position: 'insideBottom', fill: '#8f9ec4', fontSize: 10, dy: 10 }} />
@@ -1798,7 +2042,7 @@ function App() {
               document.body
             )}
 
-            <button className="secondary stagger-8" onClick={() => { setExpandedChart(null); setAnalysis(null) }}>
+            <button className="secondary stagger-8" onClick={() => { setExpandedChart(null); setZoomDomain(null); setSelectedTimestamp(null); setBaseAnalysis(null); setAnalysis(null) }}>
               {"\u2190"} Back to Setup
             </button>
           </section>

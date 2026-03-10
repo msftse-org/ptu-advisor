@@ -1163,6 +1163,46 @@ legend {
   40% { opacity: 1; transform: scale(1.15); }
 }
 
+/* ── Thinking overlay (recalculation) ── */
+.thinking-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 18px;
+  background: rgba(14, 17, 23, 0.45);
+  backdrop-filter: blur(2px);
+  border-radius: inherit;
+  animation: thinkingFadeIn 0.18s ease-out;
+}
+
+.thinking-pill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 22px;
+  background: rgba(30, 36, 50, 0.92);
+  border: 1px solid rgba(124, 140, 255, 0.25);
+  border-radius: 24px;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+}
+
+.thinking-spinner {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+}
+
+@keyframes thinkingFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
 /* ── Stagger fade-in animations ── */
 @keyframes fadeInUp {
   from {
@@ -1183,6 +1223,14 @@ legend {
 .stagger-6 { animation: fadeInUp 0.45s ease both 0.36s; }
 .stagger-7 { animation: fadeInUp 0.45s ease both 0.42s; }
 .stagger-8 { animation: fadeInUp 0.45s ease both 0.48s; }
+
+/* animation-fill-mode 'both' keeps transform: translateY(0) applied after
+   completion, which creates a new CSS containing block and breaks
+   position: fixed on expanded chart cards inside stagger parents. */
+[class*="stagger-"]:has(.is-chart-expanded) {
+  animation: none !important;
+  transform: none !important;
+}
 
 /* ── Footer ── */
 .app-footer {
@@ -1809,6 +1857,68 @@ legend {
   border-color: rgba(124, 140, 255, 0.5);
 }
 
+/* ── Zoom pan slider ── */
+.zoom-pan-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  padding: 6px 14px;
+  background: rgba(91, 127, 255, 0.05);
+  border: 1px solid rgba(91, 127, 255, 0.12);
+  border-radius: 8px;
+}
+
+.zoom-pan-label {
+  font-size: 11px;
+  color: #7c8cff;
+  white-space: nowrap;
+  min-width: 62px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.zoom-pan-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(91, 127, 255, 0.15);
+  outline: none;
+  cursor: pointer;
+}
+
+.zoom-pan-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #7c8cff;
+  border: 2px solid rgba(8, 14, 26, 0.6);
+  cursor: grab;
+  transition: box-shadow 0.15s ease;
+}
+
+.zoom-pan-slider::-webkit-slider-thumb:hover {
+  box-shadow: 0 0 0 4px rgba(124, 140, 255, 0.2);
+}
+
+.zoom-pan-slider::-webkit-slider-thumb:active {
+  cursor: grabbing;
+  box-shadow: 0 0 0 6px rgba(124, 140, 255, 0.25);
+}
+
+.zoom-pan-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #7c8cff;
+  border: 2px solid rgba(8, 14, 26, 0.6);
+  cursor: grab;
+}
+
 /* ── Chart expand modal ── */
 .chart-expand-btn {
   display: inline-flex;
@@ -2257,8 +2367,40 @@ legend {
 }
 
 .results-v2 .chart-card.is-chart-expanded {
+  position: fixed !important;
+  top: 24px;
+  left: 24px;
+  right: 24px;
+  bottom: 24px;
+  z-index: 401;
+  overflow: auto;
   border-color: rgba(130, 148, 218, 0.5);
   box-shadow: 0 32px 92px rgba(0, 0, 0, 0.78), 0 0 0 1px rgba(124, 140, 255, 0.26);
+}
+
+.results-v2 .chart-grid-v2 .chart-card.is-chart-expanded,
+.results-v2 .wide-card.chart-card.is-chart-expanded {
+  position: fixed !important;
+  overflow: auto;
+}
+
+.results-v2 .selected-point-card {
+  display: grid;
+  gap: 10px;
+}
+
+.results-v2 .selected-point-time {
+  margin: 0;
+  color: #d6e2ff;
+  font-weight: 600;
+}
+
+.results-v2 .selected-point-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  font-size: 0.86rem;
+  color: #b8c5e8;
 }
 
 .results-v2 .metric-card {

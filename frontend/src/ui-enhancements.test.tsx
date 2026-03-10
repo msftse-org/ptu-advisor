@@ -234,7 +234,8 @@ describe('RecBadge rendering', () => {
     setupMockFetch({ recommendation: 'ptu_recommended' })
     await runDemoAnalysis()
 
-    const badge = await screen.findByText(/PTU Recommended/i)
+    const badges = await screen.findAllByText(/PTU Recommended/i)
+    const badge = badges.find(el => el.classList.contains('rec-badge'))!
     expect(badge).toBeInTheDocument()
     expect(badge).toHaveClass('rec-badge', 'rec-badge-positive')
     // Check for the checkmark character (U+2713)
@@ -401,7 +402,8 @@ describe('Cost winner highlight', () => {
     const paygArticle = paygCard.closest('article')
     expect(paygArticle).toHaveClass('is-winner')
 
-    const hybridCard = screen.getByText('PTU + Spillover')
+    const hybridCards = screen.getAllByText('PTU + Spillover')
+    const hybridCard = hybridCards.find(el => el.closest('article'))!
     const hybridArticle = hybridCard.closest('article')
     expect(hybridArticle).not.toHaveClass('is-winner')
   })
@@ -416,7 +418,8 @@ describe('Cost winner highlight', () => {
     })
     await runDemoAnalysis()
 
-    const hybridCard = await screen.findByText('PTU + Spillover')
+    const hybridCards = await screen.findAllByText('PTU + Spillover')
+    const hybridCard = hybridCards.find(el => el.closest('article'))!
     const hybridArticle = hybridCard.closest('article')
     expect(hybridArticle).toHaveClass('is-winner')
 
@@ -438,7 +441,8 @@ describe('Cost winner highlight', () => {
     const paygCard = await screen.findByText('PAYG Monthly')
     expect(paygCard.closest('article')).toHaveClass('is-winner')
 
-    const hybridCard = screen.getByText('PTU + Spillover')
+    const hybridCards = screen.getAllByText('PTU + Spillover')
+    const hybridCard = hybridCards.find(el => el.closest('article'))!
     expect(hybridCard.closest('article')).toHaveClass('is-winner')
   })
 })
