@@ -123,7 +123,7 @@ class AnalysisConfig:
     business_hours_only: bool = False
     
     # Granularity for metric aggregation
-    aggregation_interval_minutes: int = 60  # Hourly buckets
+    aggregation_interval_minutes: int = 5  # 5-minute buckets
     
     # Output settings
     verbose: bool = False
@@ -142,8 +142,8 @@ class AnalysisConfig:
             raise ValueError("lookback_days must be at least 1")
         if self.lookback_days > 90:
             raise ValueError("lookback_days cannot exceed 90")
-        if self.aggregation_interval_minutes not in [5, 15, 30, 60]:
-            raise ValueError("aggregation_interval_minutes must be 5, 15, 30, or 60")
+        if self.aggregation_interval_minutes not in [1, 5, 15, 30]:
+            raise ValueError("aggregation_interval_minutes must be 1, 5, 15, or 30")
 
 
 # Default configuration instance

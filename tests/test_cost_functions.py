@@ -55,7 +55,7 @@ class TestCalculateSpilloverCost:
         assert result["spillover_pct"] == 0
 
     def test_zero_percentile_uses_minimum_ptu(self):
-        """Baseline percentile 0 → exactly 15 PTU (global min)."""
+        """Cost-optimal sweep picks the cheapest total (PTU + spillover) cost."""
         tpm_values = [50_000.0] * 100
         result = calculate_spillover_cost(
             tpm_values=tpm_values,
@@ -64,7 +64,9 @@ class TestCalculateSpilloverCost:
             ptu_hourly_rate=self.PTU_HOURLY,
             payg_rate_per_1k=self.PAYG_RATE,
         )
-        assert result["baseline_ptu"] == 15
+        # Constant 50K TPM with 2500 TPM/PTU → 20 PTU covers all traffic
+        # sweep picks 20 as it has zero spillover and lower total cost
+        assert result["baseline_ptu"] == 20
 
     def test_high_percentile_low_spillover(self):
         """P95 baseline → very little spillover."""

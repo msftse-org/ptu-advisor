@@ -83,7 +83,7 @@ class TestAnalysisConfig:
             deployment="dep",
         )
         assert config.lookback_days == 14
-        assert config.aggregation_interval_minutes == 60
+        assert config.aggregation_interval_minutes == 5
         assert config.verbose is False
         assert config.enable_llm is False
 
@@ -113,7 +113,7 @@ class TestAnalysisConfig:
         assert c90.lookback_days == 90
 
     def test_invalid_aggregation_interval(self):
-        with pytest.raises(ValueError, match="must be 5, 15, 30, or 60"):
+        with pytest.raises(ValueError, match="must be 1, 5, 15, or 30"):
             AnalysisConfig(
                 resource_group="rg",
                 workspace="ws",
@@ -122,7 +122,7 @@ class TestAnalysisConfig:
             )
 
     def test_valid_aggregation_intervals(self):
-        for interval in [5, 15, 30, 60]:
+        for interval in [1, 5, 15, 30]:
             config = AnalysisConfig(
                 resource_group="rg",
                 workspace="ws",

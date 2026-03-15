@@ -72,21 +72,32 @@ def calculate_spillover_cost(
 
     peak_tpm = float(np.percentile(tpm_values, 95))
 
+    hours_per_month = 24 * 30  # 720
+    effective_discount = reservation_discount if reservation_discount > 0 else 1.0
+
     if baseline_ptu_override is not None:
-        # Slider sends PTU units directly — skip percentile lookup
+        # Slider sends PTU units directly — skip optimization
         baseline_ptu = max(min_ptu, int(
             np.ceil(baseline_ptu_override / ptu_increment) * ptu_increment
         ))
         baseline_tpm = baseline_ptu * ptu_capacity_per_unit
-    elif baseline_percentile == 0:
-        baseline_ptu = min_ptu
-        baseline_tpm = baseline_ptu * ptu_capacity_per_unit
     else:
-        baseline_tpm = float(np.percentile(tpm_values, baseline_percentile))
-        ptu_raw = baseline_tpm / ptu_capacity_per_unit
-        baseline_ptu = max(min_ptu, int(
-            np.ceil(ptu_raw / ptu_increment) * ptu_increment
-        ))
+        # Sweep PTU levels to find cost-optimal baseline (vectorized)
+        # Upper bound: enough PTU to cover P95 with 20% headroom
+        max_ptu = max(min_ptu, int(np.ceil(peak_tpm * 1.2 / ptu_capacity_per_unit / ptu_increment)) * ptu_increment)
+        tpm_arr = np.array(tpm_values)
+        best_ptu = min_ptu
+        best_cost = float('inf')
+        for candidate_ptu in range(min_ptu, max_ptu + ptu_increment, ptu_increment):
+            cap = candidate_ptu * ptu_capacity_per_unit
+            ptu_cost = candidate_ptu * ptu_hourly_rate * hours_per_month * effective_discount
+            spill = float(np.mean(np.maximum(tpm_arr - cap, 0))) * 60 * 24 * 30
+            total = ptu_cost + (spill / 1000) * payg_rate_per_1k
+            if total < best_cost:
+                best_cost = total
+                best_ptu = candidate_ptu
+        baseline_ptu = best_ptu
+        baseline_tpm = baseline_ptu * ptu_capacity_per_unit
 
     ptu_capacity_tpm = baseline_ptu * ptu_capacity_per_unit
 
@@ -100,7 +111,6 @@ def calculate_spillover_cost(
     spillover_minutes = sum(1 for t in spillover_tokens_per_minute if t > 0)
     spillover_pct = (spillover_minutes / len(tpm_values)) * 100 if tpm_values else 0
 
-    hours_per_month = 24 * 30  # 720
     ptu_monthly_full = baseline_ptu * ptu_hourly_rate * hours_per_month
 
     ptu_monthly_cost = (

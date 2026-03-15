@@ -522,7 +522,7 @@ def generate_demo_metrics(
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=lookback_days)
 
-    granularity = granularity_minutes if granularity_minutes in (5, 15, 30, 60) else 60
+    granularity = granularity_minutes if granularity_minutes in (1, 5, 15, 30) else 5
     point_count = max(2, int((lookback_days * 24 * 60) / granularity))
     timestamps = [
         start_time + timedelta(minutes=i * granularity)

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from ptu_advisor.analysis.engine import DecisionEngine
 from ptu_advisor.auth import get_azure_credential
-from ptu_advisor.config import AnalysisConfig
+from ptu_advisor.config import AnalysisConfig, get_model_config
 from ptu_advisor.cost.calculator import (
     calculate_break_even,
     calculate_spillover_cost,
@@ -34,7 +34,7 @@ class AnalyzeRequest(BaseModel):
     mode: Literal["demo", "live"] = "live"
     focus_topic: str = "Cost Reduction"
     lookback_days: int = Field(default=14, ge=1, le=30)
-    granularity_minutes: Literal[5, 15, 30, 60] = 60
+    granularity_minutes: Literal[1, 5, 15, 30] = 5
     window_start: Optional[datetime] = None
     window_end: Optional[datetime] = None
 
@@ -51,6 +51,7 @@ class AnalyzeRequest(BaseModel):
     baseline_ptu: Optional[int] = Field(default=None, ge=0, description="PTU units for slider. When set, overrides baseline_percentile.")
     region: str = "eastus"
     deployment_type: Literal["global", "data_zone", "regional"] = "global"
+    include_throttle: bool = False
 
 
 class AnalyzeResponse(BaseModel):
@@ -200,6 +201,77 @@ def _filter_metrics_by_window(
     return filtered
 
 
+def _build_formula_blocks(
+    *,
+    avg_tpm: float,
+    total_tokens: float,
+    lookback_days: int,
+    avg_daily_tokens: float,
+    payg_input_rate: float,
+    payg_output_rate: float,
+    output_ratio: float,
+    payg_blended_rate: float,
+    payg_base: float,
+    payg_total: float,
+    throttle_rate: float,
+    throttle_rate_pct: float,
+    throttle_impact: float,
+    include_throttle: bool,
+    baseline_ptu: int,
+    ptu_monthly_rate: float,
+    ptu_baseline_cost: float,
+    avg_spillover_tpm: float,
+    spillover_cost: float,
+    hybrid_total: float,
+    effective_mult: float = 1.0,
+    input_tpm_per_ptu: int = 2500,
+    model_output_multiplier: int = 3,
+) -> Dict[str, str]:
+    """Build human-readable formula strings for PAYG and hybrid cost breakdowns."""
+    avg_daily_overflow = avg_spillover_tpm * 1440  # tokens/day
+
+    monthly_tokens = avg_daily_tokens * 30
+    effective_capacity = input_tpm_per_ptu / effective_mult
+
+    # ── PAYG block ──
+    payg_lines = [
+        f"avg_daily_tokens = {avg_tpm:,.0f} TPM × 1,440 min/day = {avg_daily_tokens:,.0f} tokens/day",
+        f"monthly_tokens = {avg_daily_tokens:,.0f} × 30 days = {monthly_tokens:,.0f} tokens/month",
+        f"blended_rate = ${payg_input_rate:.2f} × {(1-output_ratio)*100:.0f}% input + ${payg_output_rate:.2f} × {output_ratio*100:.0f}% output = ${payg_blended_rate:.2f}/1M tokens",
+        f"payg_cost = {monthly_tokens:,.0f} ÷ 1M × ${payg_blended_rate:.2f} = ${payg_base:,.0f}/month",
+    ]
+    if include_throttle:
+        payg_lines.append(f"throttle_rate = {throttle_rate_pct:.1f}%")
+        payg_lines.append(f"throttle_impact = ${throttle_impact:,.0f}/month")
+        payg_lines.append(
+            f"total_payg = ${payg_base:,.0f} + ${throttle_impact:,.0f} = ${payg_total:,.0f}/month"
+        )
+    else:
+        payg_lines.append(f"total_payg = ${payg_total:,.0f}/month")
+
+    # ── Hybrid block ──
+    monthly_overflow = avg_daily_overflow * 30
+    hybrid_lines = [
+        f"effective_mult = {(1-output_ratio)*100:.0f}% input + {output_ratio*100:.0f}% output × {model_output_multiplier} = {effective_mult:.2f}×",
+        f"capacity_per_ptu = {input_tpm_per_ptu:,} ÷ {effective_mult:.2f} = {effective_capacity:,.0f} raw TPM/PTU",
+        f"ptu_cost = {baseline_ptu} PTU × ${ptu_monthly_rate:,.2f}/PTU/month = ${ptu_baseline_cost:,.0f}/month",
+    ]
+    if avg_spillover_tpm > 0:
+        hybrid_lines += [
+            f"avg_daily_overflow = {avg_spillover_tpm:,.0f} TPM × 1,440 min = {avg_daily_overflow:,.0f} tokens/day",
+            f"monthly_overflow = {avg_daily_overflow:,.0f} × 30 days = {monthly_overflow:,.0f} tokens/month",
+            f"spillover_cost = {monthly_overflow:,.0f} ÷ 1M × ${payg_blended_rate:.2f} = ${spillover_cost:,.0f}/month",
+            f"total_hybrid = ${ptu_baseline_cost:,.0f} + ${spillover_cost:,.0f} = ${hybrid_total:,.0f}/month",
+        ]
+    else:
+        hybrid_lines += [
+            f"spillover = none — all traffic fits within {baseline_ptu} PTU",
+            f"total_hybrid = ${ptu_baseline_cost:,.0f}/month",
+        ]
+
+    return {"payg": "\n".join(payg_lines), "hybrid": "\n".join(hybrid_lines)}
+
+
 def _serialize_analysis(
     metrics: DeploymentMetrics,
     analysis: Any,
@@ -210,6 +282,7 @@ def _serialize_analysis(
     region: str,
     deployment_type: str,
     baseline_ptu: Optional[int] = None,
+    include_throttle: bool = False,
 ) -> AnalyzeResponse:
     tpm = metrics.tokens_per_minute
     throttled = metrics.throttled_requests
@@ -225,10 +298,18 @@ def _serialize_analysis(
     peak_tpm = float(tpm.p95) if tpm else 0.0
     throttle_rate_pct = float(metrics.throttling_rate * 100)
 
-    monthly_tokens = avg_tpm * 60 * 24 * 30
+    # Derive daily token volume from TPM (the authoritative throughput rate)
+    avg_daily_tokens = avg_tpm * 1440  # tokens per minute × minutes per day
+    total_tokens = avg_daily_tokens * max(1, lookback_days)
+    monthly_tokens = avg_daily_tokens * 30
+
     payg_input_rate = 2.50
     payg_output_rate = 10.0
-    output_ratio = 0.30
+    # Derive output ratio from actual prompt vs completion data
+    prompt_total = float(prompt.total) if prompt else 0.0
+    completion_total = float(completion.total) if completion else 0.0
+    token_sum = prompt_total + completion_total
+    output_ratio = (completion_total / token_sum) if token_sum > 0 else 0.30
     payg_blended_rate = (payg_input_rate * (1 - output_ratio)) + (payg_output_rate * output_ratio)
     payg_rate_per_1k = payg_blended_rate / 1000
 
@@ -240,9 +321,16 @@ def _serialize_analysis(
         throttle_impact = retry_overhead * opportunity_multiplier
     else:
         throttle_impact = 0.0
-    payg_total = payg_base + throttle_impact
+    payg_total = (payg_base + throttle_impact) if include_throttle else payg_base
 
-    ptu_capacity = 2500
+    # Look up model-specific PTU capacity and output multiplier
+    model_cfg = get_model_config(metrics.model_name)
+    input_tpm_per_ptu = model_cfg.input_tpm_per_ptu if model_cfg else 2500
+    model_output_multiplier = model_cfg.output_ratio if model_cfg else 3
+    # Effective multiplier: output tokens consume more PTU capacity
+    effective_mult = (1 - output_ratio) + output_ratio * model_output_multiplier
+    # Effective raw-TPM capacity per PTU (accounts for output ratio)
+    ptu_capacity = input_tpm_per_ptu / effective_mult
     region_cfg = get_region_config(region)
     deployment_cfg = get_deployment_config(deployment_type)
     deployment_kind = get_deployment_type(deployment_type)
@@ -403,11 +491,7 @@ def _serialize_analysis(
         "weekend_vs_weekday_ratio": float(tpm.weekend_vs_weekday_ratio) if tpm else 0.0,
     }
 
-    total_tokens = 0.0
-    if prompt or completion:
-        total_tokens = float((prompt.total if prompt else 0.0) + (completion.total if completion else 0.0))
-    elif tpm:
-        total_tokens = float(tpm.mean * 60 * 24 * max(1, lookback_days))
+    # total_tokens already computed above from actual fetched data
 
     # ── Default PTU for slider (break-even-guided and recommendation-focused) ──
     if tpm_values:
@@ -700,8 +784,14 @@ def _serialize_analysis(
                 "deployment_type": deployment_kind.value,
                 "deployment_type_label": deployment_cfg.label,
                 "payg_blended_rate_per_million": payg_blended_rate,
+                "payg_input_rate_per_million": payg_input_rate,
+                "payg_output_rate_per_million": payg_output_rate,
+                "output_ratio": round(output_ratio, 4),
                 "ptu_hourly_rate": ptu_hourly,
                 "ptu_capacity_per_unit": ptu_capacity,
+                "input_tpm_per_ptu": input_tpm_per_ptu,
+                "model_output_multiplier": model_output_multiplier,
+                "effective_mult": round(effective_mult, 4),
                 "ptu_increment": ptu_increment,
                 "ptu_minimum": min_ptu,
             },
@@ -737,21 +827,31 @@ def _serialize_analysis(
                 "break_even_tpm": float(break_even_tpm) if break_even_tpm else None,
                 "cheaper_strategy": "PTU + Spillover" if savings > 0 else "PAYG",
             },
-            "formula_blocks": {
-                "payg": (
-                    f"monthly_tokens = {avg_tpm:,.0f} TPM × 43,200 min/month = {monthly_tokens:,.0f} tokens/month\n"
-                    f"payg_base = {monthly_tokens:,.0f} tokens ÷ 1M × ${payg_blended_rate:.2f}/1M tokens = ${payg_base:,.0f}/month\n"
-                    f"throttle_impact = ${throttle_impact:,.0f}/month\n"
-                    f"total_payg = ${payg_total:,.0f}/month"
-                ),
-                "hybrid": (
-                    f"baseline_tpm ({'P' + str(baseline_percentile) if baseline_percentile > 0 else 'min'}) = {baseline_tpm:,.0f} TPM\n"
-                    f"ptu_needed = ⌈{baseline_tpm:,.0f} TPM ÷ {ptu_capacity:,} TPM/PTU⌉ = {baseline_ptu} PTU\n"
-                    f"ptu_cost = {baseline_ptu} PTU × ${ptu_monthly_rate:,.2f}/PTU/month = ${ptu_baseline_cost:,.0f}/month\n"
-                    f"spillover_cost = ${spillover_cost:,.0f}/month\n"
-                    f"total_hybrid = ${hybrid_total:,.0f}/month"
-                ),
-            },
+            "formula_blocks": _build_formula_blocks(
+                avg_tpm=avg_tpm,
+                total_tokens=total_tokens,
+                lookback_days=lookback_days,
+                avg_daily_tokens=avg_daily_tokens,
+                payg_input_rate=payg_input_rate,
+                payg_output_rate=payg_output_rate,
+                output_ratio=output_ratio,
+                payg_blended_rate=payg_blended_rate,
+                payg_base=payg_base,
+                payg_total=payg_total,
+                throttle_rate=throttle_rate,
+                throttle_rate_pct=throttle_rate_pct,
+                throttle_impact=throttle_impact,
+                include_throttle=include_throttle,
+                baseline_ptu=baseline_ptu,
+                ptu_monthly_rate=ptu_monthly_rate,
+                ptu_baseline_cost=ptu_baseline_cost,
+                avg_spillover_tpm=avg_spillover_tpm,
+                spillover_cost=spillover_cost,
+                hybrid_total=hybrid_total,
+                effective_mult=effective_mult,
+                input_tpm_per_ptu=input_tpm_per_ptu,
+                model_output_multiplier=model_output_multiplier,
+            ),
         },
         insights={
             "break_even_message": break_even_message,
@@ -886,6 +986,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             region=normalize_region(payload.region),
             deployment_type=payload.deployment_type,
             baseline_ptu=payload.baseline_ptu,
+            include_throttle=payload.include_throttle,
         )
 
     if not payload.subscription_id or not payload.resource_group or not payload.workspace:
@@ -976,6 +1077,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         region=normalize_region(payload.region),
         deployment_type=payload.deployment_type,
         baseline_ptu=payload.baseline_ptu,
+        include_throttle=payload.include_throttle,
     )
 
 

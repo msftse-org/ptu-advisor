@@ -70,6 +70,7 @@ const CHART_COLORS = {
   danger: '#B35252',
   warning: '#C58A2A',
   neutral: '#9DAAC0',
+  accent: '#A78BFA',
 } as const
 
 const CHART_TOOLTIP_STYLE = {
@@ -440,7 +441,7 @@ function App() {
   const [zoomRight, setZoomRight] = useState<string | null>(null)
   const [zoomDomain, setZoomDomain] = useState<[number, number] | null>(null)
   const [selectedTimestamp, setSelectedTimestamp] = useState<string | null>(null)
-  const [granularityMinutes, setGranularityMinutes] = useState<15 | 30 | 60>(15)
+  const [granularityMinutes, setGranularityMinutes] = useState<1 | 5 | 15 | 30>(5)
   const [baseAnalysis, setBaseAnalysis] = useState<AnalysisResponse | null>(null)
 
   const [lookbackDays, setLookbackDays] = useState(14)
@@ -452,6 +453,7 @@ function App() {
   const [deploymentTypeOptions, setDeploymentTypeOptions] = useState<DeploymentTypeOption[]>([])
   const [selectedRegion, setSelectedRegion] = useState('eastus')
   const [selectedDeploymentType, setSelectedDeploymentType] = useState<'global' | 'data_zone' | 'regional'>('global')
+  const [includeThrottle, setIncludeThrottle] = useState(false)
 
   const [subscriptions, setSubscriptions] = useState<SubscriptionInfo[]>([])
   const [subscriptionId, setSubscriptionId] = useState('')
@@ -586,6 +588,7 @@ function App() {
           reservation_type: reservationType,
           region: selectedRegion,
           deployment_type: selectedDeploymentType,
+          include_throttle: includeThrottle,
           ...windowParams,
           ...ptuParam,
         })
@@ -634,6 +637,7 @@ function App() {
         reservation_type: reservationType,
         region: selectedRegion,
         deployment_type: selectedDeploymentType,
+        include_throttle: includeThrottle,
         ...windowParams,
         ...ptuParam,
       })
@@ -703,7 +707,7 @@ function App() {
         }
       : null
 
-    const currentKey = `${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}|${granularityMinutes}`
+    const currentKey = `${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}|${granularityMinutes}|${includeThrottle}`
     if (!previousAssumptionKey.current) {
       previousAssumptionKey.current = currentKey
       return
@@ -719,7 +723,7 @@ function App() {
     }, 250)
 
     return () => clearTimeout(timer)
-  }, [analysis, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, loading, runAnalysis, zoomDomain])
+  }, [analysis, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, includeThrottle, loading, runAnalysis, zoomDomain])
 
   useEffect(() => {
     if (!expandedChart) return
@@ -1363,12 +1367,13 @@ function App() {
                 Graph Granularity
                 <select
                   value={granularityMinutes}
-                  onChange={(e) => setGranularityMinutes(Number(e.target.value) as 15 | 30 | 60)}
+                  onChange={(e) => setGranularityMinutes(Number(e.target.value) as 1 | 5 | 15 | 30)}
                   data-testid="granularity-select"
                 >
+                  <option value={1}>1 minute</option>
+                  <option value={5}>5 minutes</option>
                   <option value={15}>15 minutes</option>
                   <option value={30}>30 minutes</option>
-                  <option value={60}>60 minutes</option>
                 </select>
               </label>
             </div>
@@ -1572,6 +1577,16 @@ function App() {
                 <span className="glance-value">{formatNumber(analysis.metrics.peak_tpm)}</span>
                 <span className="glance-sub">P95 tokens / min</span>
               </article>
+              <article className="glance-card">
+                <span className="glance-label">Total Tokens <InfoTip text="Total tokens processed (prompt + completion) within the selected timeframe." /></span>
+                <span className="glance-value">{formatNumber(analysis.metrics.total_tokens)}</span>
+                <span className="glance-sub">{analysis.metrics.total_tokens_millions.toFixed(1)}M tokens</span>
+              </article>
+              <article className="glance-card">
+                <span className="glance-label">Daily Avg Tokens <InfoTip text="Average tokens processed per day over the lookback period." /></span>
+                <span className="glance-value">{formatNumber(analysis.metrics.total_tokens / analysis.metrics.lookback_days)}</span>
+                <span className="glance-sub">tokens / day</span>
+              </article>
               <article className={`glance-card${analysis.metrics.throttling_rate_pct > 5 ? ' glance-alert' : ''}`}>
                 <span className="glance-label">Rate-Limit Events <InfoTip text="Percent of requests receiving HTTP 429 rate-limit responses." /></span>
                 <span className="glance-value">{analysis.metrics.throttling_rate_pct.toFixed(2)}%</span>
@@ -1646,12 +1661,13 @@ function App() {
                     <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
                     <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatWithCommas(Number(v))} label={{ value: 'Tokens', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
                     {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={((value: any, name: string) => { if (name === 'total') return [null, null]; return typeof value === 'number' ? formatWithCommas(value) : String(value ?? '') }) as any} />
-                    <Legend content={<StaticLegend items={[{ label: 'Prompt Tokens', color: CHART_COLORS.primary }, { label: 'Completion Tokens', color: CHART_COLORS.secondary }]} />} />
+                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={((value: any) => typeof value === 'number' ? formatWithCommas(value) : String(value ?? '')) as any} />
+                    <Legend content={<StaticLegend items={[{ label: 'Prompt Tokens', color: CHART_COLORS.primary }, { label: 'Completion Tokens', color: CHART_COLORS.secondary }, { label: 'Total', color: CHART_COLORS.accent }]} />} />
                     <Area type="monotone" dataKey="prompt" fill="url(#gradPrompt)" stroke="none" legendType="none" tooltipType="none" />
                     <Area type="monotone" dataKey="completion" fill="url(#gradCompletion)" stroke="none" legendType="none" tooltipType="none" />
                     <Line type="monotone" dataKey="prompt" stroke={CHART_COLORS.primary} dot={false} activeDot={{ r: 4 }} name="Prompt Tokens" legendType="none" />
                     <Line type="monotone" dataKey="completion" stroke={CHART_COLORS.secondary} dot={false} activeDot={{ r: 4 }} name="Completion Tokens" legendType="none" />
+                    <Line type="monotone" dataKey="total" stroke={CHART_COLORS.accent} dot={false} activeDot={{ r: 4 }} name="Total" legendType="none" strokeDasharray="6 3" strokeWidth={1.5} />
                     {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
                     {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
                   </ComposedChart>
@@ -1855,6 +1871,11 @@ function App() {
               <summary>
                 <h3 className="section-title calc-section-title">Calculation Details</h3>
               </summary>
+              <label className="throttle-toggle">
+                <input type="checkbox" checked={includeThrottle} onChange={(e) => setIncludeThrottle(e.target.checked)} />
+                <span>Include throttle impact in PAYG cost</span>
+                <InfoTip text="When enabled, PAYG cost includes estimated retry overhead from throttled requests (429s). This models the hidden cost of retries and queuing under capacity pressure." />
+              </label>
               <div className="formula-grid calc-emphasis">
                 <article className="chart-card">
                   <WidgetHeader title="PAYG Math" tip="Line-by-line PAYG monthly cost derivation from average throughput." />
