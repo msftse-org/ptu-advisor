@@ -1,23 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import {
-  Area,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ComposedChart,
-  Legend,
-  Line,
-  LineChart,
-  ReferenceArea,
-  ReferenceDot,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts'
 import { api } from './api'
+import {
+  TokenVolumeChart,
+  RequestOutcomesChart,
+  DailyCostChart,
+  ThrottleChart,
+  TpmBandChart,
+  CostCurveChart,
+  useChartZoom,
+} from './charts'
 import { ExportReport } from './ExportReport'
 import type {
   AccountInfo,
@@ -65,23 +57,7 @@ const RESULTS_ICON_URLS = {
   rationale: 'https://img.icons8.com/?size=64&id=KODlr2yUL7TT&format=png',
 } as const
 
-const CHART_COLORS = {
-  primary: '#5B7FFF',
-  secondary: '#7B8EAF',
-  success: '#2F9E77',
-  danger: '#B35252',
-  warning: '#C58A2A',
-  neutral: '#9DAAC0',
-  accent: '#A78BFA',
-} as const
 
-const CHART_TOOLTIP_STYLE = {
-  background: 'rgba(8, 14, 26, 0.96)',
-  border: '1px solid rgba(91, 127, 255, 0.32)',
-  borderRadius: '10px',
-  color: '#e8ecf2',
-  fontSize: '12px',
-}
 
 /* ── PTU Calculator model catalog ── */
 const CALC_MODELS = [
@@ -96,44 +72,11 @@ const CALC_MODELS = [
 ] as const
 
 type CalcScenario = { name: string; term: string; cost: number; ptuUnits: number }
-type LegendEntry = { label: string; color: string }
-type CostCurvePoint = { baselineTpm: number; payg: number; hybrid: number; ptuUnits: number }
 type TimeWindow = { start: string; end: string }
 type RunAnalysisOptions = {
   preserveCurrent?: boolean
   timeWindow?: TimeWindow | null
   updateCharts?: boolean
-}
-
-function StaticLegend({ items }: { items: LegendEntry[] }) {
-  return (
-    <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap', fontSize: 11, color: '#b5becc' }}>
-      {items.map((item) => (
-        <span key={item.label} style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ width: 10, height: 2, background: item.color, borderRadius: 999 }} />
-          {item.label}
-        </span>
-      ))}
-    </div>
-  )
-}
-
-function CostCurveTooltip({ active, payload, label }: { active?: boolean; payload?: Array<{ value: number; name: string; color?: string; payload?: CostCurvePoint }>; label?: string | number }) {
-  if (!active || !payload || payload.length === 0) return null
-
-  const point = payload[0]?.payload
-  const baseline = typeof label === 'number' ? formatWithCommas(label) : String(label ?? '')
-  const paygValue = payload.find((entry) => entry.name === 'PAYG')?.value
-  const hybridValue = payload.find((entry) => entry.name === 'PTU + Spillover')?.value
-
-  return (
-    <div style={{ ...CHART_TOOLTIP_STYLE, minWidth: 190 }}>
-      <div style={{ marginBottom: 6, fontWeight: 600 }}>Baseline: {baseline} TPM</div>
-      <div style={{ marginBottom: 4, color: '#cbd7f2' }}>PTU at point: {point?.ptuUnits ?? 0}</div>
-      <div style={{ color: CHART_COLORS.primary }}>PAYG: {typeof paygValue === 'number' ? formatCurrency(paygValue) : '—'}</div>
-      <div style={{ color: CHART_COLORS.success }}>PTU + Spillover: {typeof hybridValue === 'number' ? formatCurrency(hybridValue) : '—'}</div>
-    </div>
-  )
 }
 
 function formatNumber(value: number): string {
@@ -144,11 +87,6 @@ function formatNumber(value: number): string {
     return `${(value / 1_000).toFixed(1)}K`
   }
   return `${Math.round(value)}`
-}
-
-/** Format a number with comma thousand-separators (e.g. 1,234,567). */
-function formatWithCommas(value: number): string {
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value)
 }
 
 function formatCurrency(value: number): string {
@@ -181,16 +119,6 @@ function makeSmartDateFormatter(timestamps: string[]) {
     if (spanHours <= 168 && !dense) return `${mon}/${day} ${hh}:${mm}`
     return `${mon}/${day}`
   }
-}
-
-/** Full date+time formatter for tooltips — always shows date and time regardless of density. */
-function tooltipDateFmt(iso: string): string {
-  const d = new Date(iso)
-  const mon = d.getMonth() + 1
-  const day = d.getDate()
-  const hh = String(d.getHours()).padStart(2, '0')
-  const mm = String(d.getMinutes()).padStart(2, '0')
-  return `${mon}/${day} ${hh}:${mm}`
 }
 
 function formatDeploymentTitle(deployment: DeploymentInfo): string {
@@ -438,10 +366,7 @@ function App() {
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null)
   const [expandedChart, setExpandedChart] = useState<string | null>(null)
 
-  // Chart zoom state — drag-to-zoom across all time-series charts
-  const [zoomLeft, setZoomLeft] = useState<string | null>(null)
-  const [zoomRight, setZoomRight] = useState<string | null>(null)
-  const [zoomDomain, setZoomDomain] = useState<[number, number] | null>(null)
+  // Chart zoom state — ECharts dataZoom
   const [selectedTimestamp, setSelectedTimestamp] = useState<string | null>(null)
   const [granularityMinutes, setGranularityMinutes] = useState<1 | 5 | 15 | 30>(5)
   const [baseAnalysis, setBaseAnalysis] = useState<AnalysisResponse | null>(null)
@@ -477,6 +402,10 @@ function App() {
   const [calcPeakHours, setCalcPeakHours] = useState(4)
   const [calcRegion, setCalcRegion] = useState('eastus')
   const [calcDeployType, setCalcDeployType] = useState<'global' | 'data_zone' | 'regional'>('global')
+
+  // ── ECharts zoom state (replaces old drag-to-zoom) ──
+  const chartTimestamps = useMemo(() => analysis?.charts.tokens.timestamps ?? [], [analysis])
+  const { zoomState, onDataZoom, resetZoom, getReAnalyzeWindow } = useChartZoom(chartTimestamps)
 
   useEffect(() => {
     api.focusTopics()
@@ -574,7 +503,7 @@ function App() {
       setAnalysis(null)
       setBaseAnalysis(null)
       setBaselinePtu(null) // Reset so next analysis picks its own default
-      setZoomDomain(null)
+      resetZoom()
       setSelectedTimestamp(null)
     }
     try {
@@ -694,7 +623,6 @@ function App() {
   ])
 
   const previousAssumptionKey = useRef('')
-  const previousZoomWindowKey = useRef('')
 
   useEffect(() => {
     if (!analysis) {
@@ -702,12 +630,7 @@ function App() {
       return
     }
 
-    const activeZoomWindow = zoomDomain
-      ? {
-          start: analysis.charts.tokens.timestamps[zoomDomain[0]],
-          end: analysis.charts.tokens.timestamps[zoomDomain[1]],
-        }
-      : null
+    const zoomWindow = getReAnalyzeWindow()
 
     const currentKey = `${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}|${granularityMinutes}|${includeThrottle}`
     if (!previousAssumptionKey.current) {
@@ -721,11 +644,11 @@ function App() {
 
     previousAssumptionKey.current = currentKey
     const timer = setTimeout(() => {
-      runAnalysis({ preserveCurrent: true, timeWindow: activeZoomWindow, updateCharts: !activeZoomWindow })
+      runAnalysis({ preserveCurrent: true, timeWindow: zoomWindow ? { start: zoomWindow.window_start, end: zoomWindow.window_end } : null, updateCharts: !zoomWindow })
     }, 250)
 
     return () => clearTimeout(timer)
-  }, [analysis, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, includeThrottle, loading, runAnalysis, zoomDomain])
+  }, [analysis, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, includeThrottle, loading, runAnalysis, getReAnalyzeWindow])
 
   useEffect(() => {
     if (!expandedChart) return
@@ -821,15 +744,6 @@ function App() {
     }))
   }, [analysis])
 
-  /** Explicit X domain for the cost curve so reference lines always fall inside the visible area. */
-  const costCurveDomain = useMemo<[number, number]>(() => {
-    if (!analysis || costCurveData.length === 0) return [0, 100_000]
-    const dataMax = Math.max(...costCurveData.map((d) => d.baselineTpm))
-    const sliderTpm = analysis.charts.cost_curves.slider_baseline_tpm ?? 0
-    const breakEvenTpm = analysis.charts.cost_curves.break_even_tpm ?? 0
-    return [0, Math.max(dataMax, sliderTpm * 1.15, breakEvenTpm * 1.15)]
-  }, [analysis, costCurveData])
-
   const breakEvenPtuUnits = useMemo(() => {
     if (!analysis?.charts.cost_curves.break_even_tpm || costCurveData.length === 0) return null
     const be = analysis.charts.cost_curves.break_even_tpm
@@ -841,130 +755,23 @@ function App() {
     return closest.ptuUnits
   }, [analysis, costCurveData])
 
-  // ── Drag-to-zoom helpers (shared across all time charts) ──
-  const applyZoom = useCallback(<T extends { time: string }>(data: T[]): T[] => {
-    if (!zoomDomain) return data
-    return data.slice(zoomDomain[0], zoomDomain[1] + 1)
-  }, [zoomDomain])
-
-  const fullTimeLabels = useMemo(() => tokenChartData.map((d) => d.time), [tokenChartData])
-
+  // ── Auto re-analyze when zoom window changes (debounced) ──
+  const previousZoomKey = useRef('')
   useEffect(() => {
-    if (!selectedTimestamp) return
-    const existsInCurrentData = fullTimeLabels.includes(selectedTimestamp)
-    if (!existsInCurrentData) {
-      setSelectedTimestamp(null)
-    }
-  }, [selectedTimestamp, fullTimeLabels])
-
-  const zoomWindow = useMemo<TimeWindow | null>(() => {
-    if (!analysis || !zoomDomain) return null
-    const timestamps = analysis.charts.tokens.timestamps
-    const start = timestamps[zoomDomain[0]]
-    const end = timestamps[zoomDomain[1]]
-    if (!start || !end) return null
-    return { start, end }
-  }, [analysis, zoomDomain])
-
-  const selectedPointDetails = useMemo(() => {
-    if (!selectedTimestamp) return null
-
-    const tokenPoint = tokenChartData.find((point) => point.time === selectedTimestamp)
-    const requestPoint = requestsChartData.find((point) => point.time === selectedTimestamp)
-    const dailyCostPoint = dailyCostChartData.find((point) => point.time === selectedTimestamp)
-    const throttlePoint = throttleChartData.find((point) => point.time === selectedTimestamp)
-    const tpmPoint = tpmChartData.find((point) => point.time === selectedTimestamp)
-
-    if (!tokenPoint && !requestPoint && !dailyCostPoint && !throttlePoint && !tpmPoint) {
-      return null
-    }
-
-    return {
-      time: selectedTimestamp,
-      tokenPoint,
-      requestPoint,
-      dailyCostPoint,
-      throttlePoint,
-      tpmPoint,
-    }
-  }, [selectedTimestamp, tokenChartData, requestsChartData, dailyCostChartData, throttleChartData, tpmChartData])
-
-  const handleZoomMouseDown = useCallback((e: { activeLabel?: string | number } | null) => {
-    if (e?.activeLabel != null) setZoomLeft(String(e.activeLabel))
-  }, [])
-
-  const handleZoomMouseMove = useCallback((e: { activeLabel?: string | number } | null) => {
-    if (zoomLeft && e?.activeLabel != null) setZoomRight(String(e.activeLabel))
-  }, [zoomLeft])
-
-  const handlePointSelect = useCallback((e: { activeLabel?: string | number } | null) => {
-    if (e?.activeLabel != null) {
-      setSelectedTimestamp(String(e.activeLabel))
-    }
-  }, [])
-
-  const handleZoomMouseUp = useCallback(() => {
-    if (!zoomLeft || !zoomRight) {
-      setZoomLeft(null)
-      setZoomRight(null)
+    if (!analysis || !zoomState.isDirty) {
+      previousZoomKey.current = ''
       return
     }
-    const leftIdx = fullTimeLabels.indexOf(zoomLeft)
-    const rightIdx = fullTimeLabels.indexOf(zoomRight)
-    if (leftIdx < 0 || rightIdx < 0) {
-      setZoomLeft(null)
-      setZoomRight(null)
-      return
-    }
-    const lo = Math.min(leftIdx, rightIdx)
-    const hi = Math.max(leftIdx, rightIdx)
-    if (hi - lo >= 1) {
-      setZoomDomain([lo, hi])
-    }
-    setZoomLeft(null)
-    setZoomRight(null)
-  }, [zoomLeft, zoomRight, fullTimeLabels])
-
-  const resetZoom = useCallback(() => {
-    setZoomDomain(null)
-    if (baseAnalysis) {
-      setAnalysis(baseAnalysis)
-    }
-  }, [baseAnalysis])
-
-  useEffect(() => {
-    if (!analysis) {
-      previousZoomWindowKey.current = ''
-      return
-    }
-
-    if (!zoomWindow) {
-      previousZoomWindowKey.current = ''
-      if (baseAnalysis && analysis !== baseAnalysis) {
-        setAnalysis(baseAnalysis)
-      }
-      return
-    }
-
-    const currentKey = `${zoomWindow.start}|${zoomWindow.end}|${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}|${granularityMinutes}`
-    if (previousZoomWindowKey.current === currentKey || loading) {
-      return
-    }
-
-    previousZoomWindowKey.current = currentKey
+    const win = getReAnalyzeWindow()
+    if (!win) return
+    const key = `${win.window_start}|${win.window_end}`
+    if (previousZoomKey.current === key || loading) return
+    previousZoomKey.current = key
     const timer = setTimeout(() => {
-      runAnalysis({ preserveCurrent: true, timeWindow: zoomWindow, updateCharts: false })
-    }, 250)
-
+      runAnalysis({ preserveCurrent: true, timeWindow: { start: win.window_start, end: win.window_end }, updateCharts: false })
+    }, 500)
     return () => clearTimeout(timer)
-  }, [analysis, baseAnalysis, zoomWindow, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, loading, runAnalysis])
-
-  const zoomChartProps = useMemo(() => ({
-    onMouseDown: handleZoomMouseDown,
-    onMouseMove: handleZoomMouseMove,
-    onMouseUp: handleZoomMouseUp,
-    onClick: handlePointSelect,
-  }), [handleZoomMouseDown, handleZoomMouseMove, handleZoomMouseUp, handlePointSelect])
+  }, [analysis, zoomState, loading, getReAnalyzeWindow, runAnalysis])
 
   const getChartHeight = useCallback((chartKey: string, baseHeight: number) => {
     if (expandedChart !== chartKey) return baseHeight
@@ -1558,7 +1365,7 @@ function App() {
               <div className="result-banner-top">
                 <RecBadge recommendation={analysis.recommendation} />
                 <p className="confidence">Confidence score: {(analysis.confidence * 100).toFixed(1)}%</p>
-                <ExportReport analysis={analysis} baseAnalysis={baseAnalysis} isZoomed={zoomDomain !== null} />
+                <ExportReport analysis={analysis} baseAnalysis={baseAnalysis} isZoomed={zoomState.isDirty} />
               </div>
               <h2 className="result-banner-title">{recommendationTitle}</h2>
               <p className="result-banner-summary">{recommendationSummary}</p>
@@ -1599,155 +1406,78 @@ function App() {
             </div>
 
             <h3 className="section-title section-title-with-icon stagger-3"><img src={RESULTS_ICON_URLS.evidence} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-3">Evidence</span></h3>
-            {zoomDomain && (<>
+            {zoomState.isDirty && (
               <div className="zoom-indicator stagger-3">
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="4.5"/><path d="M13 13l-3.5-3.5"/><path d="M6 4v4M4 6h4"/></svg>
-                <span>Zoomed to {zoomDomain[1] - zoomDomain[0] + 1} of {tokenChartData.length} points</span>
+                <span>Zoomed to custom window{zoomState.windowStart && zoomState.windowEnd ? `: ${smartDateFmt(zoomState.windowStart)} — ${smartDateFmt(zoomState.windowEnd)}` : ''}</span>
                 <button className="zoom-reset-btn" onClick={resetZoom}>Reset Zoom</button>
+                {loading && <span className="zoom-reanalyze-status">Updating…</span>}
               </div>
-              <div className="zoom-pan-bar stagger-3">
-                <span className="zoom-pan-label">{tooltipDateFmt(fullTimeLabels[zoomDomain[0]] ?? '')}</span>
-                <input
-                  type="range"
-                  className="zoom-pan-slider"
-                  min={0}
-                  max={Math.max(0, tokenChartData.length - 1 - (zoomDomain[1] - zoomDomain[0]))}
-                  value={zoomDomain[0]}
-                  onChange={(e) => {
-                    const newStart = Number(e.target.value)
-                    const width = zoomDomain[1] - zoomDomain[0]
-                    setZoomDomain([newStart, newStart + width])
-                  }}
-                />
-                <span className="zoom-pan-label">{tooltipDateFmt(fullTimeLabels[zoomDomain[1]] ?? '')}</span>
-              </div>
-            </>)}
-            {zoomWindow && (
-              <p className="zoom-hint stagger-3" data-testid="zoom-window-label">
-                Recommendation context: {smartDateFmt(zoomWindow.start)} to {smartDateFmt(zoomWindow.end)}
-              </p>
             )}
-            {!zoomDomain && (
-              <p className="zoom-hint stagger-3">Drag across any chart to zoom in</p>
-            )}
-            {selectedPointDetails && (
-              <article className="chart-card selected-point-card" data-testid="selected-point-card">
-                <WidgetHeader title="Selected Time Snapshot" tip="Click any chart point to pin one timestamp across all charts." />
-                <p className="selected-point-time">{smartDateFmt(selectedPointDetails.time)}</p>
-                <div className="selected-point-grid">
-                  <span>TPM: {selectedPointDetails.tpmPoint ? formatWithCommas(selectedPointDetails.tpmPoint.tpm) : 'N/A'}</span>
-                  <span>Prompt: {selectedPointDetails.tokenPoint ? formatWithCommas(selectedPointDetails.tokenPoint.prompt) : 'N/A'}</span>
-                  <span>Completion: {selectedPointDetails.tokenPoint ? formatWithCommas(selectedPointDetails.tokenPoint.completion) : 'N/A'}</span>
-                  <span>Requests: {selectedPointDetails.requestPoint ? formatWithCommas(selectedPointDetails.requestPoint.total) : 'N/A'}</span>
-                  <span>HTTP 429: {selectedPointDetails.throttlePoint ? formatWithCommas(selectedPointDetails.throttlePoint.throttled) : 'N/A'}</span>
-                  <span>Daily Cost: {selectedPointDetails.dailyCostPoint ? `$${formatWithCommas(selectedPointDetails.dailyCostPoint.total_cost)}` : 'N/A'}</span>
-                </div>
-                <button className="zoom-reset-btn" onClick={() => setSelectedTimestamp(null)}>Clear Point</button>
-              </article>
+            {!zoomState.isDirty && (
+              <p className="zoom-hint stagger-3">Use the slider below each chart or scroll-wheel to zoom in</p>
             )}
             <div className="chart-grid chart-grid-v2 stagger-4">
               <article className={`chart-card${expandedChart === 'tokens' ? ' is-chart-expanded' : ''}`}>
                 <WidgetHeader title="Token Volume Over Time" tip="Hover to inspect exact values by interval." onExpand={() => setExpandedChart(expandedChart === 'tokens' ? null : 'tokens')} />
                 {tokenChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <ResponsiveContainer width="100%" height={getChartHeight('tokens', 240)}>
-                  <ComposedChart data={applyZoom(tokenChartData)} syncId="time-sync" {...zoomChartProps}>
-                    <defs>
-                      <linearGradient id="gradPrompt" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={CHART_COLORS.primary} stopOpacity={0.24} />
-                        <stop offset="100%" stopColor={CHART_COLORS.primary} stopOpacity={0.02} />
-                      </linearGradient>
-                      <linearGradient id="gradCompletion" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={CHART_COLORS.secondary} stopOpacity={0.22} />
-                        <stop offset="100%" stopColor={CHART_COLORS.secondary} stopOpacity={0.02} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid stroke="rgba(120,140,170,0.12)" />
-                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
-                    <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatWithCommas(Number(v))} label={{ value: 'Tokens', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={((value: any) => typeof value === 'number' ? formatWithCommas(value) : String(value ?? '')) as any} />
-                    <Legend content={<StaticLegend items={[{ label: 'Prompt Tokens', color: CHART_COLORS.primary }, { label: 'Completion Tokens', color: CHART_COLORS.secondary }, { label: 'Total', color: CHART_COLORS.accent }]} />} />
-                    <Area type="monotone" dataKey="prompt" fill="url(#gradPrompt)" stroke="none" legendType="none" tooltipType="none" />
-                    <Area type="monotone" dataKey="completion" fill="url(#gradCompletion)" stroke="none" legendType="none" tooltipType="none" />
-                    <Line type="monotone" dataKey="prompt" stroke={CHART_COLORS.primary} dot={false} activeDot={{ r: 4 }} name="Prompt Tokens" legendType="none" />
-                    <Line type="monotone" dataKey="completion" stroke={CHART_COLORS.secondary} dot={false} activeDot={{ r: 4 }} name="Completion Tokens" legendType="none" />
-                    <Line type="monotone" dataKey="total" stroke={CHART_COLORS.accent} dot={false} activeDot={{ r: 4 }} name="Total" legendType="none" strokeDasharray="6 3" strokeWidth={1.5} />
-                    {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
-                    {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
-                  </ComposedChart>
-                </ResponsiveContainer>
+                <TokenVolumeChart
+                  timestamps={analysis!.charts.tokens.timestamps}
+                  prompt={analysis!.charts.tokens.prompt}
+                  completion={analysis!.charts.tokens.completion}
+                  total={analysis!.charts.tokens.total}
+                  height={getChartHeight('tokens', 240)}
+                  zoomState={zoomState}
+                  onDataZoom={onDataZoom}
+                  selectedTimestamp={selectedTimestamp}
+                  groupId="time-sync"
+                />
                 )}
               </article>
 
               <article className={`chart-card${expandedChart === 'requests' ? ' is-chart-expanded' : ''}`}>
                 <WidgetHeader title="Request Outcomes" tip="Hover to inspect exact values by interval." onExpand={() => setExpandedChart(expandedChart === 'requests' ? null : 'requests')} />
                 {requestsChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <ResponsiveContainer width="100%" height={getChartHeight('requests', 240)}>
-                  <ComposedChart data={applyZoom(requestsChartData)} syncId="time-sync" {...zoomChartProps}>
-                    <defs>
-                      <linearGradient id="gradSuccess" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={CHART_COLORS.success} stopOpacity={0.2} />
-                        <stop offset="100%" stopColor={CHART_COLORS.success} stopOpacity={0.02} />
-                      </linearGradient>
-                      <linearGradient id="gradThrottled" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={CHART_COLORS.danger} stopOpacity={0.2} />
-                        <stop offset="100%" stopColor={CHART_COLORS.danger} stopOpacity={0.02} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid stroke="rgba(120,140,170,0.12)" />
-                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
-                    <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatWithCommas(Number(v))} label={{ value: 'Requests', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={((value: any, name: string) => { if (name === 'total') return [null, null]; return typeof value === 'number' ? formatWithCommas(value) : String(value ?? '') }) as any} />
-                    <Legend content={<StaticLegend items={[{ label: 'Successful', color: CHART_COLORS.success }, { label: 'HTTP 429', color: CHART_COLORS.danger }]} />} />
-                    <Area type="monotone" dataKey="successful" fill="url(#gradSuccess)" stroke="none" legendType="none" tooltipType="none" />
-                    <Area type="monotone" dataKey="throttled" fill="url(#gradThrottled)" stroke="none" legendType="none" tooltipType="none" />
-                    <Line type="monotone" dataKey="successful" stroke={CHART_COLORS.success} dot={false} activeDot={{ r: 4 }} name="Successful" legendType="none" />
-                    <Line type="monotone" dataKey="throttled" stroke={CHART_COLORS.danger} dot={false} activeDot={{ r: 4 }} name="HTTP 429" legendType="none" />
-                    {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
-                    {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
-                  </ComposedChart>
-                </ResponsiveContainer>
+                <RequestOutcomesChart
+                  timestamps={analysis!.charts.requests.timestamps}
+                  successful={analysis!.charts.requests.successful}
+                  throttled={analysis!.charts.requests.throttled}
+                  height={getChartHeight('requests', 240)}
+                  zoomState={zoomState}
+                  onDataZoom={onDataZoom}
+                  selectedTimestamp={selectedTimestamp}
+                />
                 )}
               </article>
 
               <article className={`chart-card${expandedChart === 'dailyCost' ? ' is-chart-expanded' : ''}`}>
                 <WidgetHeader title="Daily Deployment Cost" tip="Actual daily cost derived from token consumption metrics at current pricing rates." onExpand={() => setExpandedChart(expandedChart === 'dailyCost' ? null : 'dailyCost')} />
                 {dailyCostChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <ResponsiveContainer width="100%" height={getChartHeight('dailyCost', 240)}>
-                  <BarChart data={applyZoom(dailyCostChartData)} syncId="time-sync" {...zoomChartProps}>
-                    <CartesianGrid stroke="rgba(120,140,170,0.2)" />
-                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
-                    <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => `$${formatWithCommas(Number(v))}`} label={{ value: 'USD', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ fill: 'rgba(124,140,255,0.08)' }} formatter={((value: any, name: string) => { if (name === 'Avg Daily' || name === 'PTU Daily') return [null, null]; return typeof value === 'number' ? `$${formatWithCommas(value)}` : String(value ?? '') }) as any} />
-                    <Legend content={<StaticLegend items={[{ label: 'Input Cost', color: CHART_COLORS.primary }, { label: 'Output Cost', color: CHART_COLORS.secondary }, { label: 'Avg Daily', color: CHART_COLORS.neutral }, { label: 'PTU Daily', color: CHART_COLORS.danger }]} />} />
-                    <Bar dataKey="input_cost" stackId="cost" fill={CHART_COLORS.primary} name="Input Cost" />
-                    <Bar dataKey="output_cost" stackId="cost" fill={CHART_COLORS.secondary} name="Output Cost" radius={[3, 3, 0, 0]} />
-                    <ReferenceLine y={dailyCostChartData[0]?.avg ?? 0} stroke={CHART_COLORS.neutral} strokeDasharray="6 3" name="Avg Daily" />
-                    <ReferenceLine y={dailyCostChartData[0]?.ptu_ref ?? 0} stroke={CHART_COLORS.danger} strokeDasharray="4 3" name="PTU Daily" />
-                    {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
-                    {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
-                  </BarChart>
-                </ResponsiveContainer>
+                <DailyCostChart
+                  timestamps={analysis!.charts.daily_cost.dates}
+                  inputCost={analysis!.charts.daily_cost.input_cost}
+                  outputCost={analysis!.charts.daily_cost.output_cost}
+                  avgDailyCost={analysis!.charts.daily_cost.avg_daily_cost}
+                  ptuDailyCost={analysis!.charts.daily_cost.ptu_daily_cost}
+                  height={getChartHeight('dailyCost', 240)}
+                  zoomState={zoomState}
+                  onDataZoom={onDataZoom}
+                  selectedTimestamp={selectedTimestamp}
+                />
                 )}
               </article>
 
               <article className={`chart-card${expandedChart === 'throttle' ? ' is-chart-expanded' : ''}`}>
                 <WidgetHeader title="Rate-Limit Events (429)" tip="Hover to inspect exact values by interval." onExpand={() => setExpandedChart(expandedChart === 'throttle' ? null : 'throttle')} />
                 {throttleChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <ResponsiveContainer width="100%" height={getChartHeight('throttle', 240)}>
-                  <LineChart data={applyZoom(throttleChartData)} syncId="time-sync" {...zoomChartProps}>
-                    <CartesianGrid stroke="rgba(120,140,170,0.2)" />
-                    <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
-                    <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatWithCommas(Number(v))} label={{ value: '429 Events', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={(value: number | string | undefined) => (typeof value === 'number' ? formatWithCommas(value) : String(value ?? ''))} />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                    <Line type="monotone" dataKey="throttled" stroke={CHART_COLORS.warning} dot={false} activeDot={{ r: 4 }} name="Rate Limited" />
-                    {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
-                    {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
-                  </LineChart>
-                </ResponsiveContainer>
+                <ThrottleChart
+                  timestamps={analysis!.charts.throttling.timestamps}
+                  throttled={analysis!.charts.throttling.values}
+                  height={getChartHeight('throttle', 240)}
+                  zoomState={zoomState}
+                  onDataZoom={onDataZoom}
+                  selectedTimestamp={selectedTimestamp}
+                />
                 )}
               </article>
             </div>
@@ -1755,28 +1485,17 @@ function App() {
             <article className={`chart-card wide-card${expandedChart === 'tpm' ? ' is-chart-expanded' : ''}`}>
               <WidgetHeader title={`Throughput Band (TPM vs Avg/${tpmRefLabel})`} tip={`Shows raw TPM against average and ${tpmRefLabel} throughput levels.`} onExpand={() => setExpandedChart(expandedChart === 'tpm' ? null : 'tpm')} />
               {tpmChartData.length === 0 ? <ChartEmpty height={280} /> : (
-              <ResponsiveContainer width="100%" height={getChartHeight('tpm', 280)}>
-                <ComposedChart data={applyZoom(tpmChartData)} syncId="time-sync" {...zoomChartProps}>
-                  <defs>
-                    <linearGradient id="gradTpm" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={CHART_COLORS.primary} stopOpacity={0.18} />
-                      <stop offset="100%" stopColor={CHART_COLORS.primary} stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid stroke="rgba(120,140,170,0.12)" />
-                  <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
-                  <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatWithCommas(Number(v))} label={{ value: 'TPM', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                  {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
-                  <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={((value: any, name: string) => { if (name === 'avg' || name === 'refLine') return [null, null]; return typeof value === 'number' ? formatWithCommas(value) : String(value ?? '') }) as any} />
-                  <Legend content={<StaticLegend items={[{ label: 'TPM', color: CHART_COLORS.primary }, { label: 'Avg', color: CHART_COLORS.success }, { label: tpmRefLabel, color: CHART_COLORS.warning }]} />} />
-                  <Area type="monotone" dataKey="tpm" fill="url(#gradTpm)" stroke="none" legendType="none" tooltipType="none" />
-                  <Line type="monotone" dataKey="tpm" stroke={CHART_COLORS.primary} dot={false} activeDot={{ r: 4 }} name="TPM" legendType="none" />
-                  <Line type="monotone" dataKey="avg" stroke={CHART_COLORS.success} dot={false} activeDot={{ r: 4 }} name="Avg" legendType="none" strokeDasharray="3 3" />
-                  <Line type="monotone" dataKey="refLine" stroke={CHART_COLORS.warning} dot={false} activeDot={{ r: 4 }} name={tpmRefLabel} legendType="none" strokeDasharray="5 5" />
-                  {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
-                  {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
-                </ComposedChart>
-              </ResponsiveContainer>
+              <TpmBandChart
+                timestamps={analysis!.charts.tpm.timestamps}
+                tpm={analysis!.charts.tpm.values}
+                avg={analysis!.charts.tpm.avg}
+                refLine={analysis!.charts.cost_curves.break_even_tpm ?? analysis!.charts.tpm.p25}
+                refLabel={tpmRefLabel}
+                height={getChartHeight('tpm', 280)}
+                zoomState={zoomState}
+                onDataZoom={onDataZoom}
+                selectedTimestamp={selectedTimestamp}
+              />
               )}
             </article>
 
@@ -1896,62 +1615,20 @@ function App() {
 
             <article className={`chart-card wide-card${expandedChart === 'cost' ? ' is-chart-expanded' : ''}`}>
               <WidgetHeader title="Break-even Curve (PAYG vs PTU + Spillover)" tip="Hover to inspect monthly PAYG vs PTU + spillover cost points by baseline TPM." onExpand={() => setExpandedChart(expandedChart === 'cost' ? null : 'cost')} />
-              <div className="chart-inline-legend">
-                <StaticLegend items={[{ label: 'PAYG Cost', color: CHART_COLORS.primary }, { label: 'Hybrid Cost', color: CHART_COLORS.success }]} />
-              </div>
               {costCurveData.length === 0 ? <ChartEmpty height={300} /> : (<>
-              <ResponsiveContainer width="100%" height={getChartHeight('cost', 300)}>
-                <LineChart data={costCurveData} margin={{ top: 10, right: 12, left: 8, bottom: 18 }}>
-                  <CartesianGrid stroke="rgba(120,140,170,0.2)" />
-                  <XAxis dataKey="baselineTpm" type="number" domain={costCurveDomain} tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatNumber(Number(v))} tickLine={false} axisLine={false} label={{ value: 'Baseline TPM', position: 'insideBottom', fill: '#8f9ec4', fontSize: 10, dy: 10 }} />
-                  <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatCurrency(Number(v))} label={{ value: '$/month', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                  <Tooltip content={<CostCurveTooltip />} cursor={{ stroke: '#7c8cff', strokeWidth: 1 }} />
-                  {analysis.charts.cost_curves.break_even_tpm && (
-                    <ReferenceLine
-                      x={analysis.charts.cost_curves.break_even_tpm}
-                      stroke="#FFB900"
-                      strokeDasharray="6 4"
-                      strokeWidth={2}
-                      label={{
-                        value: `Break-even ${formatNumber(analysis.charts.cost_curves.break_even_tpm)}${breakEvenPtuUnits ? ` · ${breakEvenPtuUnits} PTU` : ''}`,
-                        position: 'insideTopRight',
-                        fill: '#FFB900',
-                        fontSize: 12,
-                      }}
-                    />
-                  )}
-                  <ReferenceLine
-                    x={analysis.charts.cost_curves.slider_baseline_tpm}
-                    stroke="#00d4aa"
-                    strokeWidth={2}
-                    strokeDasharray="4 2"
-                    label={{
-                      value: `Baseline ${formatNumber(analysis.charts.cost_curves.slider_baseline_tpm)} · ${analysis.cost_analysis.hybrid.baseline_ptu} PTU`,
-                      position: 'insideTopLeft',
-                      fill: '#00d4aa',
-                      fontSize: 12,
-                    }}
-                  />
-                  <Line type="monotone" dataKey="payg" stroke="#0078D4" dot={false} activeDot={{ r: 4 }} name="PAYG" strokeDasharray="5 4" />
-                  <Line type="monotone" dataKey="hybrid" stroke="#00d4aa" dot={false} activeDot={{ r: 4 }} name="PTU + Spillover" />
-                  <ReferenceDot
-                    x={analysis.charts.cost_curves.slider_baseline_tpm}
-                    y={analysis.charts.cost_curves.payg_at_slider}
-                    r={4}
-                    fill="#0078D4"
-                    stroke="#dce7ff"
-                    strokeWidth={1}
-                  />
-                  <ReferenceDot
-                    x={analysis.charts.cost_curves.slider_baseline_tpm}
-                    y={analysis.charts.cost_curves.hybrid_at_slider}
-                    r={4}
-                    fill="#00d4aa"
-                    stroke="#dce7ff"
-                    strokeWidth={1}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+              <CostCurveChart
+                baselineTpm={analysis!.charts.cost_curves.baseline_tpm}
+                payg={analysis!.charts.cost_curves.payg_monthly}
+                hybrid={analysis!.charts.cost_curves.ptu_spill_monthly}
+                ptuUnits={analysis!.charts.cost_curves.ptu_units}
+                breakEvenTpm={analysis!.charts.cost_curves.break_even_tpm ?? null}
+                breakEvenPtuUnits={breakEvenPtuUnits ?? null}
+                sliderBaselineTpm={analysis!.charts.cost_curves.slider_baseline_tpm}
+                sliderPtu={analysis!.cost_analysis.hybrid.baseline_ptu}
+                paygAtSlider={analysis!.charts.cost_curves.payg_at_slider}
+                hybridAtSlider={analysis!.charts.cost_curves.hybrid_at_slider}
+                height={getChartHeight('cost', 300)}
+              />
               {breakEvenStatus && (
                 <div className={`break-even-callout tone-${breakEvenStatus.tone}`}>
                   {breakEvenStatus.text}
@@ -2069,7 +1746,7 @@ function App() {
               document.body
             )}
 
-            <button className="secondary stagger-8" onClick={() => { setExpandedChart(null); setZoomDomain(null); setSelectedTimestamp(null); setBaseAnalysis(null); setAnalysis(null) }}>
+            <button className="secondary stagger-8" onClick={() => { setExpandedChart(null); resetZoom(); setSelectedTimestamp(null); setBaseAnalysis(null); setAnalysis(null) }}>
               {"\u2190"} Back to Setup
             </button>
           </section>

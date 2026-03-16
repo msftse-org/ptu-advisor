@@ -184,15 +184,15 @@ test('demo flow renders second page with expected controls and context', async (
   await page.getByRole('button', { name: 'Demo Mode' }).click()
   await page.getByRole('button', { name: 'Run Analysis' }).click()
 
-  await expect(page.getByText('PTU RECOMMENDED')).toBeVisible()
+  await expect(page.getByText('PTU RECOMMENDED').first()).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Assumptions' })).toBeVisible()
   await expect(page.locator('label').filter({ hasText: 'PTU Pricing Term' }).first()).toBeVisible()
   await expect(page.getByText(/PTU Baseline Coverage/)).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Recommendation Rationale' })).toBeVisible()
-  await expect(page.getByText('Why this recommendation')).toBeVisible()
-  await expect(page.getByText('Drag across any chart to zoom in')).toBeVisible()
+  await expect(page.getByText('Why this recommendation').first()).toBeVisible()
+  await expect(page.getByText('Use the slider below each chart or scroll-wheel to zoom in')).toBeVisible()
   expect(capturedAnalyzeRequests.length).toBeGreaterThan(0)
-  expect(capturedAnalyzeRequests[0].granularity_minutes).toBe(15)
+  expect(capturedAnalyzeRequests[0].granularity_minutes).toBe(5)
 })
 
 test('expand button opens token chart in fixed modal mode', async ({ page }) => {
