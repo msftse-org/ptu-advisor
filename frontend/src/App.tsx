@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { createPortal } from 'react-dom'
 import {
   Area,
+  Bar,
+  BarChart,
   CartesianGrid,
   ComposedChart,
   Legend,
@@ -768,14 +770,16 @@ function App() {
     }))
   }, [analysis])
 
-  const latencyChartData = useMemo(() => {
+  const dailyCostChartData = useMemo(() => {
     if (!analysis) return []
-    const series = analysis.charts.latency
-    return series.timestamps.map((ts, idx) => ({
-      time: ts,
-      p50: series.p50[idx] ?? 0,
-      p95: series.p95[idx] ?? 0,
-      p99: series.p99[idx] ?? 0,
+    const dc = analysis.charts.daily_cost
+    return dc.dates.map((date, idx) => ({
+      time: date,
+      input_cost: dc.input_cost[idx] ?? 0,
+      output_cost: dc.output_cost[idx] ?? 0,
+      total_cost: dc.total_cost[idx] ?? 0,
+      avg: dc.avg_daily_cost,
+      ptu_ref: dc.ptu_daily_cost,
     }))
   }, [analysis])
 
@@ -867,11 +871,11 @@ function App() {
 
     const tokenPoint = tokenChartData.find((point) => point.time === selectedTimestamp)
     const requestPoint = requestsChartData.find((point) => point.time === selectedTimestamp)
-    const latencyPoint = latencyChartData.find((point) => point.time === selectedTimestamp)
+    const dailyCostPoint = dailyCostChartData.find((point) => point.time === selectedTimestamp)
     const throttlePoint = throttleChartData.find((point) => point.time === selectedTimestamp)
     const tpmPoint = tpmChartData.find((point) => point.time === selectedTimestamp)
 
-    if (!tokenPoint && !requestPoint && !latencyPoint && !throttlePoint && !tpmPoint) {
+    if (!tokenPoint && !requestPoint && !dailyCostPoint && !throttlePoint && !tpmPoint) {
       return null
     }
 
@@ -879,11 +883,11 @@ function App() {
       time: selectedTimestamp,
       tokenPoint,
       requestPoint,
-      latencyPoint,
+      dailyCostPoint,
       throttlePoint,
       tpmPoint,
     }
-  }, [selectedTimestamp, tokenChartData, requestsChartData, latencyChartData, throttleChartData, tpmChartData])
+  }, [selectedTimestamp, tokenChartData, requestsChartData, dailyCostChartData, throttleChartData, tpmChartData])
 
   const handleZoomMouseDown = useCallback((e: { activeLabel?: string | number } | null) => {
     if (e?.activeLabel != null) setZoomLeft(String(e.activeLabel))
@@ -1636,7 +1640,7 @@ function App() {
                   <span>Completion: {selectedPointDetails.tokenPoint ? formatWithCommas(selectedPointDetails.tokenPoint.completion) : 'N/A'}</span>
                   <span>Requests: {selectedPointDetails.requestPoint ? formatWithCommas(selectedPointDetails.requestPoint.total) : 'N/A'}</span>
                   <span>HTTP 429: {selectedPointDetails.throttlePoint ? formatWithCommas(selectedPointDetails.throttlePoint.throttled) : 'N/A'}</span>
-                  <span>P95 Latency: {selectedPointDetails.latencyPoint ? `${formatWithCommas(selectedPointDetails.latencyPoint.p95)} ms` : 'N/A'}</span>
+                  <span>Daily Cost: {selectedPointDetails.dailyCostPoint ? `$${formatWithCommas(selectedPointDetails.dailyCostPoint.total_cost)}` : 'N/A'}</span>
                 </div>
                 <button className="zoom-reset-btn" onClick={() => setSelectedTimestamp(null)}>Clear Point</button>
               </article>
@@ -1707,22 +1711,24 @@ function App() {
                 )}
               </article>
 
-              <article className={`chart-card${expandedChart === 'latency' ? ' is-chart-expanded' : ''}`}>
-                <WidgetHeader title="Response Time Stability" tip="Hover to inspect exact latency levels by interval." onExpand={() => setExpandedChart(expandedChart === 'latency' ? null : 'latency')} />
-                {latencyChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <ResponsiveContainer width="100%" height={getChartHeight('latency', 240)}>
-                  <LineChart data={applyZoom(latencyChartData)} syncId="time-sync" {...zoomChartProps}>
+              <article className={`chart-card${expandedChart === 'dailyCost' ? ' is-chart-expanded' : ''}`}>
+                <WidgetHeader title="Daily Deployment Cost" tip="Actual daily cost derived from token consumption metrics at current pricing rates." onExpand={() => setExpandedChart(expandedChart === 'dailyCost' ? null : 'dailyCost')} />
+                {dailyCostChartData.length === 0 ? <ChartEmpty height={240} /> : (
+                <ResponsiveContainer width="100%" height={getChartHeight('dailyCost', 240)}>
+                  <BarChart data={applyZoom(dailyCostChartData)} syncId="time-sync" {...zoomChartProps}>
                     <CartesianGrid stroke="rgba(120,140,170,0.2)" />
                     <XAxis dataKey="time" tick={{ fill: '#8f9ec4', fontSize: 11 }} tickFormatter={smartDateFmt} interval="preserveStartEnd" tickLine={false} axisLine={false} />
-                    <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => formatWithCommas(Number(v))} label={{ value: 'ms', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
-                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ stroke: CHART_COLORS.primary, strokeWidth: 1 }} formatter={(value: number | string | undefined) => (typeof value === 'number' ? `${formatWithCommas(value)} ms` : String(value ?? ''))} />
-                    <Legend wrapperStyle={{ fontSize: 11 }} />
-                    <Line type="monotone" dataKey="p50" stroke={CHART_COLORS.primary} strokeWidth={2} dot={false} activeDot={{ r: 4 }} name="P50" connectNulls />
-                    <Line type="monotone" dataKey="p95" stroke={CHART_COLORS.secondary} strokeWidth={2} dot={false} activeDot={{ r: 4 }} name="P95" connectNulls />
-                    <Line type="monotone" dataKey="p99" stroke={CHART_COLORS.warning} strokeWidth={2} dot={false} activeDot={{ r: 4 }} name="P99" connectNulls />
+                    <YAxis tick={{ fill: '#8f9ec4', fontSize: 10 }} tickFormatter={(v) => `$${formatWithCommas(Number(v))}`} label={{ value: 'USD', angle: -90, position: 'insideLeft', fill: '#8f9ec4', fontSize: 10, dx: -4 }} />
+                    {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                    <Tooltip contentStyle={CHART_TOOLTIP_STYLE} labelFormatter={(value) => tooltipDateFmt(String(value ?? ''))} cursor={{ fill: 'rgba(124,140,255,0.08)' }} formatter={((value: any, name: string) => { if (name === 'Avg Daily' || name === 'PTU Daily') return [null, null]; return typeof value === 'number' ? `$${formatWithCommas(value)}` : String(value ?? '') }) as any} />
+                    <Legend content={<StaticLegend items={[{ label: 'Input Cost', color: CHART_COLORS.primary }, { label: 'Output Cost', color: CHART_COLORS.secondary }, { label: 'Avg Daily', color: CHART_COLORS.neutral }, { label: 'PTU Daily', color: CHART_COLORS.danger }]} />} />
+                    <Bar dataKey="input_cost" stackId="cost" fill={CHART_COLORS.primary} name="Input Cost" />
+                    <Bar dataKey="output_cost" stackId="cost" fill={CHART_COLORS.secondary} name="Output Cost" radius={[3, 3, 0, 0]} />
+                    <ReferenceLine y={dailyCostChartData[0]?.avg ?? 0} stroke={CHART_COLORS.neutral} strokeDasharray="6 3" name="Avg Daily" />
+                    <ReferenceLine y={dailyCostChartData[0]?.ptu_ref ?? 0} stroke={CHART_COLORS.danger} strokeDasharray="4 3" name="PTU Daily" />
                     {selectedTimestamp && <ReferenceLine x={selectedTimestamp} stroke="rgba(215, 225, 255, 0.7)" strokeDasharray="4 3" />}
                     {zoomLeft && zoomRight && <ReferenceArea x1={zoomLeft} x2={zoomRight} strokeOpacity={0.3} fill="rgba(124,140,255,0.15)" />}
-                  </LineChart>
+                  </BarChart>
                 </ResponsiveContainer>
                 )}
               </article>

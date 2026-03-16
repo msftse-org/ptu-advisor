@@ -103,11 +103,13 @@ export type AnalysisResponse = {
       throttled: number[]
       total: number[]
     }
-    latency: {
-      timestamps: string[]
-      p50: number[]
-      p95: number[]
-      p99: number[]
+    daily_cost: {
+      dates: string[]
+      input_cost: number[]
+      output_cost: number[]
+      total_cost: number[]
+      avg_daily_cost: number
+      ptu_daily_cost: number
     }
     tpm: {
       timestamps: string[]

@@ -57,7 +57,7 @@ def test_demo_analyze_returns_expected_shape():
 
     assert "tokens" in payload["charts"]
     assert "requests" in payload["charts"]
-    assert "latency" in payload["charts"]
+    assert "daily_cost" in payload["charts"]
     assert "cost_curves" in payload["charts"]
     assert "payg" in payload["cost_analysis"]
     assert "hybrid" in payload["cost_analysis"]

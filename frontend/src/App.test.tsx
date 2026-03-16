@@ -64,11 +64,13 @@ const mockAnalysisResponse = {
       throttled: [15, 22],
       total: [1015, 1122],
     },
-    latency: {
-      timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T01:00:00Z'],
-      p50: [390, 430],
-      p95: [880, 930],
-      p99: [1400, 1480],
+    daily_cost: {
+      dates: ['2026-02-01'],
+      input_cost: [16.5],
+      output_cost: [28.0],
+      total_cost: [44.5],
+      avg_daily_cost: 44.5,
+      ptu_daily_cost: 173.33,
     },
     tpm: {
       timestamps: ['2026-02-01T00:00:00Z', '2026-02-01T01:00:00Z'],

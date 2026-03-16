@@ -201,6 +201,39 @@ def _filter_metrics_by_window(
     return filtered
 
 
+def _aggregate_daily_costs(
+    timestamps: List[str],
+    prompt_values: List[float],
+    completion_values: List[float],
+    payg_input_rate: float,
+    payg_output_rate: float,
+) -> Dict[str, Any]:
+    """Aggregate interval-level token data into daily cost bars."""
+    from collections import defaultdict
+
+    daily_input: Dict[str, float] = defaultdict(float)
+    daily_output: Dict[str, float] = defaultdict(float)
+
+    for ts, p_tok, c_tok in zip(timestamps, prompt_values, completion_values):
+        day = ts[:10]  # "2026-03-01T14:00:00Z" -> "2026-03-01"
+        daily_input[day] += p_tok
+        daily_output[day] += c_tok
+
+    dates = sorted(daily_input.keys())
+    input_costs = [(daily_input[d] / 1_000_000) * payg_input_rate for d in dates]
+    output_costs = [(daily_output[d] / 1_000_000) * payg_output_rate for d in dates]
+    total_costs = [ic + oc for ic, oc in zip(input_costs, output_costs)]
+    avg_daily = sum(total_costs) / len(total_costs) if total_costs else 0.0
+
+    return {
+        "dates": dates,
+        "input_cost": [round(v, 2) for v in input_costs],
+        "output_cost": [round(v, 2) for v in output_costs],
+        "total_cost": [round(v, 2) for v in total_costs],
+        "avg_daily_cost": round(avg_daily, 2),
+    }
+
+
 def _build_formula_blocks(
     *,
     avg_tpm: float,
@@ -294,6 +327,7 @@ def _serialize_analysis(
     p95 = metrics.time_to_first_byte_p95
     p99 = metrics.time_to_first_byte_p99
 
+    lookback_days = max(1, lookback_days)
     avg_tpm = float(tpm.mean) if tpm else 0.0
     peak_tpm = float(tpm.p95) if tpm else 0.0
     throttle_rate_pct = float(metrics.throttling_rate * 100)
@@ -462,12 +496,6 @@ def _serialize_analysis(
         request_total_values = [float(s + t) for s, t in zip(successful.values, throttled.values)]
     elif requests:
         request_total_values = [float(v) for v in requests.values]
-
-    latency_timestamps = (
-        [ts.isoformat() for ts in p50.timestamps]
-        if p50 and p50.timestamps
-        else ([ts.isoformat() for ts in p95.timestamps] if p95 and p95.timestamps else [])
-    )
 
     dimensions = []
     for dim in analysis.dimensions.all_dimensions:
@@ -745,11 +773,15 @@ def _serialize_analysis(
                 "throttled": [float(v) for v in throttled.values] if throttled else [],
                 "total": request_total_values,
             },
-            "latency": {
-                "timestamps": latency_timestamps,
-                "p50": [float(v) for v in p50.values] if p50 else [],
-                "p95": [float(v) for v in p95.values] if p95 else [],
-                "p99": [float(v) for v in p99.values] if p99 else [],
+            "daily_cost": {
+                **_aggregate_daily_costs(
+                    timestamps=token_timestamps,
+                    prompt_values=[float(v) for v in prompt.values] if prompt else [],
+                    completion_values=[float(v) for v in completion.values] if completion else [],
+                    payg_input_rate=payg_input_rate,
+                    payg_output_rate=payg_output_rate,
+                ),
+                "ptu_daily_cost": round(ptu_baseline_cost / 30, 2),
             },
             "tpm": {
                 "timestamps": [ts.isoformat() for ts in (tpm.timestamps if tpm else [])],

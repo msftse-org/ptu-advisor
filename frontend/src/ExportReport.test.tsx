@@ -44,7 +44,7 @@ function buildAnalysis(overrides: Partial<AnalysisResponse> = {}): AnalysisRespo
     charts: {
       tokens: { timestamps: [], prompt: [], completion: [], total: [] },
       requests: { timestamps: [], successful: [], throttled: [], total: [] },
-      latency: { timestamps: [], p50: [], p95: [], p99: [] },
+      daily_cost: { dates: [], input_cost: [], output_cost: [], total_cost: [], avg_daily_cost: 0, ptu_daily_cost: 0 },
       tpm: { timestamps: [], values: [], avg: 42300, p25: 30000, p95: 78500 },
       throttling: { timestamps: [], values: [] },
       cost_curves: {
