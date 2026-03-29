@@ -1,9 +1,11 @@
-# PRD: Interactive Break-Even Slider
+# PRD: Break-Even Cost Explorer
 
-> **Version**: 2.0  
-> **Date**: March 16, 2026  
+> **Version**: 3.4 (Final Audit Fixes)  
+> **Date**: March 28, 2026  
 > **Author**: PTU Advisor Team  
-> **Replaces**: v1.0 break-even slider (Feb 2026) and original "PTU Baseline Sizing" dropdown
+> **Status**: ✅ Implemented  
+> **Replaces**: v1.0 break-even slider, v2.0 interactive break-even slider  
+> **Key change (v3.4)**: Distinct "PTU always cheaper" / "always more expensive" break-even messages, break-even annotation shows monthly cost, `max_search_tpm` param, avg TPM visual reference help text, CV > 1.5 spiky usage warning
 
 ---
 
@@ -25,8 +27,14 @@ Flip the chart's semantics: **X-axis = actual sustained TPM (traffic), PTU commi
 - **PTU + Spillover line**: fixed PTU cost for the selected slider value + PAYG overflow for traffic above PTU capacity (flat then rising).
 - **Break-even marker**: the traffic level where PTU pays for itself.
 - **"Your avg TPM" marker**: where the user's actual traffic sits relative to break-even.
+- **Commitment safety signal**: an operational-fit summary based on full time-series behavior, not only average TPM. It captures how often traffic fits inside PTU capacity, how much workload spills to PAYG, and whether the monthly savings margin is large enough to justify commitment risk.
 
 When the user moves the PTU slider, the PTU+Spillover line shifts (higher fixed cost, but later onset of spillover), and break-even moves right. This gives an intuitive, interactive answer to: "If I buy X PTU, do I have enough traffic to justify it?"
+
+The recommendation should therefore be read in **two layers**:
+
+1. **Economic break-even** — does the selected PTU save money versus PAYG?
+2. **Operational fit** — is that saving robust enough given spillover, burstiness, and margin above break-even?
 
 ### Success Criteria
 
@@ -37,6 +45,7 @@ When the user moves the PTU slider, the PTU+Spillover line shifts (higher fixed 
 | Break-even TPM matches manual calculation | ± 2% tolerance |
 | Time to answer "does my traffic justify this PTU commitment?" | < 10 seconds (usability target) |
 | Users correctly interpret the flat→rising PTU+Spillover shape | ≥ 90% in usability review |
+| Users can distinguish "PTU saves money" from "PTU is a safe commitment" | ≥ 90% in usability review |
 
 ---
 
@@ -97,7 +106,7 @@ This matches the real-world decision flow: you commit to a fixed PTU amount, the
 
 ### 2.4 Component Breakdown
 
-The control has **4 layers** stacked vertically:
+The control has **5 layers** stacked vertically:
 
 #### Layer A: The Cost Curve Chart
 
@@ -109,7 +118,7 @@ Two lines plotted against **"Sustained TPM"** (actual traffic) on the X-axis:
 
 2. **PTU + Spillover line** (green, solid) — Has a **distinctive two-phase shape**:
    - **Flat phase** (left): When sustained TPM ≤ PTU capacity, all traffic fits within the committed PTU. Cost = PTU fixed cost only. The line is horizontal.
-   - **Rising phase** (right): When sustained TPM > PTU capacity, excess traffic spills to PAYG. Cost = PTU fixed + overflow × PAYG rate. The line rises, but with a shallower slope than PAYG (since the base load is already covered).
+    - **Rising phase** (right): When sustained TPM > PTU capacity, excess traffic spills to PAYG. Cost = PTU fixed + overflow × PAYG rate. The line rises with the **same marginal slope as PAYG** because every incremental token above PTU capacity is charged at the same PAYG rate.
    - **Inflection point**: Where the line transitions from flat to rising = the PTU capacity in TPM.
 
 3. **Break-even marker** — A vertical dashed line where the two lines cross. This answers: **"At what traffic level does my selected PTU commitment start saving money vs pure PAYG?"**
@@ -124,9 +133,10 @@ A slider below the chart controlling **PTU units** directly (not percentile):
 
 - **Range**: min PTU (deployment type minimum) to a computed max (P99 × 1.3 worth of PTU)
 - **Step**: deployment type increment (5 for Global/Data Zone, 50 for Regional)
-- **Default**: the cost-optimal PTU level that maximizes savings above 5%, guided by break-even
+- **Default**: the **lowest-cost viable** PTU level that still saves > 5%, so the first view starts from the clearest economic baseline
 - **Display**: Shows PTU units and the corresponding TPM capacity  
   e.g., "50 PTU → 125,000 TPM capacity"
+- **Headroom helper**: when a larger PTU level still clears the savings floor, show a compact secondary helper such as `Explore headroom: up to 45 PTU still saves > 5%`, with a one-click action to jump there. If the user is exploring a non-default baseline, show a `Reset to recommended` action.
 
 When the slider moves:
 1. PTU+Spillover line redraws (flat level shifts, inflection point moves)
@@ -162,6 +172,28 @@ A contextual banner showing the user's position relative to break-even:
 
 The callout explicitly names the selected PTU amount so the user sees the direct connection between their slider choice and the traffic threshold.
 
+The callout is intentionally **directional**, not the whole recommendation. Average TPM is useful for orientation on the chart, but the final decision should be grounded in the full monthly workload shape, realized hybrid cost, and commitment-safety metrics. The banner should therefore use language like **"economic signal favors PTU"** or **"economic signal favors PAYG"**, not present itself as the final recommendation by itself.
+
+#### Layer E: Commitment Safety Strip
+
+Below the break-even callout, add a compact strip that answers: **"Even if PTU saves money, how safe is this commitment?"**
+
+Recommended fields:
+
+| Savings Margin | Spillover % | Capacity Coverage | Safety Verdict |
+|---|---|---|---|
+| 12% | 8% | 91% of intervals fit in PTU | Safe |
+
+- **Savings Margin**: `(payg_monthly - hybrid_monthly) / payg_monthly`
+- **Spillover %**: percent of intervals with traffic above PTU capacity, or percent of monthly tokens that spill over
+- **Capacity Coverage**: percent of observed intervals where `tpm ≤ ptu_capacity_tpm`
+- **Safety Verdict**:
+    - **Safe**: strong savings and low spillover
+    - **Efficient but Risky**: savings exist, but margin is thin or spillover is high
+    - **Not Justified**: PTU does not save money at the selected commitment
+
+This makes the explorer more profound than a pure break-even chart: it separates **"economically favorable"** from **"operationally robust."**
+
 ### 2.5 User Stories
 
 #### US-1: Understand If Selected PTU Is Justified by Traffic
@@ -194,7 +226,18 @@ The callout explicitly names the selected PTU amount so the user sees the direct
 - [ ] Color coding: green (traffic above break-even → PTU justified), yellow (near → marginal), blue (below → over-committed)
 - [ ] If traffic is below break-even, callout explicitly says "PAYG is cheaper at your current traffic for X PTU"
 
-#### US-4: Compare Reservation Terms Effect on Break-Even
+#### US-4: Distinguish Savings From Commitment Safety
+
+> As a **FinOps engineer or platform owner**, I want PTU Advisor to show not only whether PTU saves money, but also whether the commitment is operationally safe for my workload shape, so I can avoid over-committing based on a misleading monthly average.
+
+**Acceptance Criteria:**
+- [ ] Recommendation is based on full monthly hybrid cost, not solely on the avg TPM marker
+- [ ] A separate safety strip shows savings margin, spillover %, and capacity coverage for the selected PTU
+- [ ] The UI can express three distinct states: `Safe`, `Efficient but Risky`, `Not Justified`
+- [ ] A workload can be shown as economically favorable but operationally risky when savings are positive but spillover or volatility remain high
+- [ ] Help text explains that avg TPM is a visual reference, not the sole decision variable
+
+#### US-5: Compare Reservation Terms Effect on Break-Even
 
 > As a **FinOps engineer**, I want to see how break-even shifts between on-demand, monthly, and 1-year reservation terms so that I can evaluate commitment risk vs savings.
 
@@ -204,7 +247,7 @@ The callout explicitly names the selected PTU amount so the user sees the direct
 - [ ] Break-even annotation updates to show the new crossover traffic level
 - [ ] Lower discount = higher PTU fixed cost = break-even moves right (need more traffic to justify)
 
-#### US-5: Visual Understanding of the Flat→Rising PTU Shape
+#### US-6: Visual Understanding of the Flat→Rising PTU Shape
 
 > As any user, I want to intuitively understand why the PTU+Spillover line has a flat portion and then rises so that the chart makes sense without reading documentation.
 
@@ -224,7 +267,7 @@ The callout explicitly names the selected PTU amount so the user sees the direct
 
 ## 3. Technical Specifications
 
-### 3.1 Break-Even Calculation (v2 — Fixed PTU, Varying Traffic)
+### 3.1 Economic Break-Even Calculation (v2 — Fixed PTU, Varying Traffic)
 
 The break-even point is the sustained TPM where:  
 `PAYG_cost(tpm) = PTU_fixed_cost(selected_ptu) + spillover_cost(tpm, selected_ptu)`
@@ -296,6 +339,40 @@ def calculate_break_even_for_fixed_ptu(
 - If the break-even TPM exceeds PTU capacity, the lines never cross and PTU is always more expensive for that commitment level. The user should reduce PTU or the selected PTU is oversized.
 
 This is much simpler than v1.0's step-function sweep and gives an **exact analytical solution**.
+
+### 3.1.1 Operational Fit / Commitment Safety
+
+The break-even formula above should remain the economic core. However, the final recommendation must not be reduced to:
+
+> `avg_tpm > break_even_tpm`
+
+That comparison is useful for orientation, but it hides workload volatility. The tool already computes hybrid cost from the full observed TPM series, so the recommendation layer should use additional metrics derived from the same series.
+
+Suggested operational-fit metrics:
+
+```python
+capacity_coverage_pct = 100 * count(tpm <= ptu_capacity_tpm) / count(tpm_values)
+spillover_interval_pct = 100 * count(tpm > ptu_capacity_tpm) / count(tpm_values)
+savings_margin_pct = 100 * (payg_total - hybrid_total) / payg_total
+```
+
+Suggested safety classification:
+
+```python
+if savings_margin_pct <= 0:
+    safety_verdict = "not_justified"
+elif savings_margin_pct < 5 or spillover_interval_pct > 25 or capacity_coverage_pct < 75:
+    safety_verdict = "efficient_but_risky"
+else:
+    safety_verdict = "safe"
+```
+
+These thresholds are product defaults, not hard finance rules. The important design point is that the explorer presents **two truths at once**:
+
+- **Economic truth**: where fixed PTU breaks even versus PAYG
+- **Operational truth**: how reliably the selected PTU covers the actual workload
+
+This keeps the chart mathematically simple while making the recommendation materially stronger.
 
 ### 3.2 Cost Curve Data Generation (v2)
 
@@ -393,26 +470,56 @@ PTU Commitment:  ═══════════●═════════
 
 - **Range**: min_ptu to max_ptu (P99 × 1.3 / capacity_per_ptu, rounded up)
 - **Step**: deployment type increment (5 for Global/Data Zone, 50 for Regional)
-- **Default**: the PTU level that maximizes savings % above 5% (same logic as v1.0)
+- **Default**: **recommendation-aware** (see §3.5)
 - **Display**: Shows both PTU units and the resulting TPM capacity
 
-### 3.5 Smart Default
+### 3.5 Recommendation-Aware Default PTU
 
-Instead of defaulting to P75, auto-compute the optimal starting position:
+The slider's initial position is designed to answer the user's most natural question based on the analysis outcome:
+
+| Recommendation | Default PTU | Rationale |
+|---|---|---|
+| **PTU Recommended** | **Lowest-cost PTU baseline** that still saves > 5% | Shows the most economically defensible starting point before users explore larger commitments |
+| **Borderline** | **Lowest-cost PTU baseline** that still saves > 5%, if one exists; otherwise minimum PTU | Starts at the clearest economic option rather than the largest still-viable commitment |
+| **PTU NOT Recommended** | **Minimum** PTU (e.g., 15 for Global) | Shows the break-even threshold for the smallest commitment, so users see what traffic increase would justify PTU |
+
+**Why "lowest-cost viable" not "maximum viable"?**  
+The "maximum PTU that still saves > 5%" policy is useful for headroom exploration, but it is not the clearest first view. Users first need to understand the economically sensible baseline for their current workload. Starting from the **lowest-cost viable** commitment makes the initial explorer state easier to explain and keeps the chart, cost summary, and recommendation aligned. Users can still move the slider upward to explore headroom.
+
+The backend should expose both the **recommended default baseline** and the **maximum viable baseline** so the UI can present this headroom helper without recomputing sweep logic client-side.
+
+**Why min PTU when not recommended?**  
+When PTU isn't justified, starting at min PTU produces the most useful break-even chart: the PAYG line and PTU+Spillover line with the smallest possible commitment. The break-even marker shows exactly how much more traffic is needed before even the cheapest PTU makes sense. This directly answers: "what would it take for PTU to be worth it?"
+
+#### Algorithm
 
 ```python
-# Set default slider to the percentile just above break-even
-if break_even_tpm is not None:
-    # Find which percentile of the TPM distribution corresponds to break-even
-    for p in range(0, 100, 5):
-        if np.percentile(tpm_values, p) >= break_even_tpm:
-            default_baseline = p
-            break
-    else:
-        default_baseline = 75  # fallback
-else:
-    default_baseline = 0 if payg_total < hybrid_total else 75
+# Sweep from min_ptu to P99 × 1.3 ceiling
+default_baseline_ptu = min_ptu  # fallback (PTU not recommended)
+
+if payg_total > 0 and tpm_values:
+    sweep_ceiling = ceil(percentile(tpm_values, 99) * 1.3 / ptu_capacity)
+    sweep_ceiling = snap_up(sweep_ceiling, ptu_increment)
+    
+    best_positive_ptu = None
+    best_positive_hybrid = inf
+    for candidate_ptu in range(min_ptu, sweep_ceiling + 1, ptu_increment):
+        savings_pct = compute_savings(candidate_ptu, ...)
+        hybrid_cost = compute_hybrid_cost(candidate_ptu, ...)
+        if savings_pct > 5 and hybrid_cost < best_positive_hybrid:
+            best_positive_ptu = candidate_ptu
+            best_positive_hybrid = hybrid_cost
+    
+    if best_positive_ptu is not None:
+        default_baseline_ptu = best_positive_ptu
+    # else: no PTU saves > 5% → keep min_ptu
 ```
+
+**Key properties:**
+- Single linear sweep (no break-even dependency for the default)
+- Always converges (bounded by P99 × 1.3)
+- Monotonic: as PTU increases, savings % eventually drops below 5%, so the last > 5% candidate is the max viable PTU
+- Works for all recommendation outcomes without branching on recommendation state
 
 ---
 
@@ -470,29 +577,53 @@ tpm_values (from metrics)
 
 ---
 
-## 7. Rollout
+## 7. Implementation Status
 
-| Phase | Scope | Effort |
+All core functionality is implemented in the React frontend + FastAPI backend.
+
+### ✅ Implemented (v3.0)
+
+| Feature | Location |
+|---|---|
+| `calculate_break_even_for_fixed_ptu()` — analytical break-even | `ptu_advisor/cost/calculator.py` |
+| `generate_cost_curves_fixed_ptu()` — PAYG vs PTU+Spillover curve data | `ptu_advisor/cost/calculator.py` |
+| ECharts `CostCurveChart` — 2-line chart + break-even + avg TPM markers | `frontend/src/charts/CostCurveChart.tsx` |
+| PTU slider (range input, min/max/step from API) | `frontend/src/App.tsx` |
+| Cost summary strip (PAYG / PTU+Spill / Verdict) | `frontend/src/App.tsx` |
+| Break-even callout banner (green/yellow/blue) | `frontend/src/App.tsx` |
+| Recommendation-aware default PTU selection | `ptu_advisor/api/server.py` |
+| PTU Calculator (standalone, client-side) | `frontend/src/App.tsx` |
+
+### ✅ Implemented (v3.2 — Gap Fixes)
+
+| Feature | Location | Gap # |
 |---|---|---|
-| **MVP** | Break-even calc + slider + 2-line chart + summary strip + callout | 1-2 days |
-| **v1.1** | Green savings fill zone between lines, "You are here" marker | 0.5 day |
-| **v1.2** | Multi-term overlay (show all 3 reservation terms as faded lines) | 0.5 day |
-| **v2.0** | Integrate with `cost/engine.py` module when it's built (from main PRD) | Depends on main PRD |
+| Unit tests for v2 fixed-PTU functions (26 tests with REQ-* traceability) | `tests/test_cost_calculator.py` | Gap 1 |
+| Safety verdict thresholds aligned to PRD (`savings < 5%`, `spillover > 25%`, `coverage < 75%`) | `ptu_advisor/api/server.py:636-641` | Gap 2 |
+| Safety verdict strings aligned to PRD snake_case format (`safe`, `efficient_but_risky`, `not_justified`) | `ptu_advisor/api/server.py`, `frontend/src/types.ts`, `frontend/src/App.tsx` | Audit Gap 2 |
+| Savings fill zone (green shaded area between PAYG and PTU lines where PTU is cheaper) | `frontend/src/charts/CostCurveChart.tsx` (custom series), `frontend/src/charts/echarts-setup.ts` | Gap 3 |
+| Help icon `[?]` with collapsible hybrid model explanation | `frontend/src/App.tsx` (WidgetHeader `helpContent` prop), `frontend/src/styles.css` | Gap 4 |
+| Observability events (`assumption_changed`, `cost_recalculated`, `break_even_marker_rendered`, `break_even_unavailable`) | `frontend/src/telemetry.ts`, `frontend/src/App.tsx` | Gap 5 |
 
-### MVP Scope (implement first)
+### ✅ Implemented (v3.4 — Final Audit Fixes)
 
-1. `calculate_break_even()` function  
-2. `generate_cost_curves()` function  
-3. Plotly chart with 2 lines + break-even vline  
-4. `st.slider` replacing the dropdown  
-5. Summary strip (PAYG / PTU+Spill / Verdict)  
-6. Break-even callout banner  
+| Feature | Location | Gap # |
+|---|---|---|
+| Avg TPM marker white (not purple) | `frontend/src/charts/CostCurveChart.tsx` | P1 |
+| Cost summary savings % alongside amount | `frontend/src/App.tsx` (differenceSummary) | P2 |
+| Break-even annotation shows monthly cost | `frontend/src/charts/CostCurveChart.tsx` (breakEvenCost prop), `frontend/src/App.tsx` | P3 |
+| Rising-portion tooltip expanded to PRD US-6 wording | `frontend/src/charts/CostCurveChart.tsx` | P4 |
+| Distinct "PTU always cheaper" vs "always more expensive" messages | `ptu_advisor/api/server.py`, `frontend/src/App.tsx`, `frontend/src/types.ts` (break_even_reason field) | P5/M2 |
+| "Break-even doesn't exist" wording aligned to PRD §5 | `ptu_advisor/api/server.py`, `frontend/src/App.tsx` | P6 |
+| `max_search_tpm` param added to `calculate_break_even_for_fixed_ptu()` | `ptu_advisor/cost/calculator.py` | P7 |
+| 4 metric cards (PAYG, PTU+Spill, Difference with %, Break-even TPM) — extends PRD's 3-card spec with useful 4th card | `frontend/src/App.tsx` | P8 |
+| "Avg TPM is a visual reference" added to help panel | `frontend/src/App.tsx` (WidgetHeader helpContent) | M1 |
+| "Very spiky usage" (CV > 1.5) warning in break-even context | `ptu_advisor/api/server.py`, `frontend/src/App.tsx` | M3 |
 
-### Deferred
+### Future Enhancements
 
-- Savings fill zone  
-- "You are here" marker (nice-to-have since the summary strip already shows the user's costs)
-- Multi-reservation-term overlay
+- Multi-reservation-term overlay (show all 3 terms as faded lines)
+- Custom pricing overrides integration (from PRD-live-pricing-fetch)
 
 ---
 
@@ -500,11 +631,11 @@ tpm_values (from metrics)
 
 | Requirement ID | Description | Primary Files | Test Coverage | KPI |
 |---|---|---|---|---|
-| `REQ-UX-101` | Break-even marker visible and interpretable | `dashboard/app.py`, `frontend/src/App.tsx` | `test_dashboard_frontend.py::test_breakeven_marker` | Time-to-understand |
-| `REQ-COST-102` | Break-even TPM correctness within tolerance | `cost/engine.py` | `test_cost_engine.py::test_break_even_accuracy` | Accuracy |
-| `REQ-UX-103` | Slider updates cost outputs in near real-time | `dashboard/app.py` / frontend | `test_frontend_comprehensive.py::test_slider_recalc` | Recalc latency |
-| `REQ-OBS-104` | Slider interaction telemetry emitted | UI layer | telemetry validation test | Interaction analytics |
-| `REQ-UX-105` | Position-vs-break-even callout clarity | UI layer | visual/e2e assertion | Usability |
+| `REQ-UX-101` | Break-even marker visible and interpretable | `frontend/src/charts/CostCurveChart.tsx`, `frontend/src/App.tsx` | `tests/test_cost_calculator.py::TestBreakEvenForFixedPtu` | Time-to-understand |
+| `REQ-COST-102` | Break-even TPM correctness within tolerance | `ptu_advisor/cost/calculator.py` | `tests/test_cost_calculator.py::TestBreakEvenForFixedPtu` (12 tests) | Accuracy |
+| `REQ-UX-103` | Slider updates cost outputs in near real-time | `frontend/src/App.tsx` | `frontend/src/ui-enhancements.test.tsx` | Recalc latency |
+| `REQ-OBS-104` | Slider interaction telemetry emitted | `frontend/src/telemetry.ts`, `frontend/src/App.tsx` | Telemetry events verified in test console output | Interaction analytics |
+| `REQ-UX-105` | Position-vs-break-even callout clarity | `frontend/src/App.tsx` | `frontend/src/ui-enhancements.test.tsx::Break-even callout` | Usability |
 
 ## 9. Performance Budgets
 
@@ -515,25 +646,32 @@ tpm_values (from metrics)
 
 ## 10. Observability Plan
 
-Required events:
+> **Status**: ✅ Implemented in `frontend/src/telemetry.ts` (v3.2)
 
-- `assumption_changed` (includes term + baseline percentile)
-- `cost_recalculated`
-- `break_even_marker_rendered`
-- `break_even_unavailable`
+Events are emitted as `ptu:telemetry` CustomEvents on `window` and logged to `console.debug` in dev mode. External analytics (Application Insights, PostHog, etc.) can subscribe via `window.addEventListener('ptu:telemetry', handler)`.
 
-Required dimensions:
+Required events (all implemented):
 
-- `policy_version`
-- `recommendation`
-- `model_name`
-- `deployment_type`
+- `assumption_changed` — emitted when reservation term, PTU slider, region, deployment type, granularity, or throttle toggle changes. Includes `changed_field`, `old_value`, `new_value`, `reservation_term`, `baseline_ptu`.
+- `cost_recalculated` — emitted after each analysis response. Includes `payg_monthly`, `hybrid_monthly`, `savings`, `savings_pct`, `baseline_ptu`, `reservation_term`.
+- `break_even_marker_rendered` — emitted when break-even exists. Includes `break_even_tpm`, `avg_tpm`, `distance_pct`, `tone`.
+- `break_even_unavailable` — emitted when break-even is null. Includes `selected_ptu`, `reason`.
+
+Required dimensions (all attached to every event):
+
+- `policy_version` — currently `"v3.1"` (cost model version)
+- `recommendation` — `"ptu_recommended"` | `"ptu_not_recommended"` | `"borderline"`
+- `model_name` — e.g. `"gpt-4o"`
+- `deployment_type` — `"global"` | `"data_zone"` | `"regional"`
 
 ## 11. Definition of Done (Feature)
 
-- [ ] `REQ-*` requirements mapped to automated tests
-- [ ] Break-even correctness validated against manual baseline cases
+- [x] `REQ-*` requirements mapped to automated tests (Gap 1: 26 tests in `test_cost_calculator.py`)
+- [x] Break-even correctness validated against manual baseline cases (12 unit tests with edge cases)
 - [ ] Interaction latency budgets recorded (p50/p95)
-- [ ] Tooltip and copy reviewed for plain-language clarity
-- [ ] No markdown formatting artifacts in rendered narrative text
+- [x] Tooltip and copy reviewed for plain-language clarity (Gap 4: help panel added)
+- [x] No markdown formatting artifacts in rendered narrative text
 - [ ] Rollback path documented (fallback to static baseline mode)
+- [x] Safety verdict thresholds match PRD spec: `savings < 5%`, `spillover > 25%`, `coverage < 75%` (Gap 2)
+- [x] Savings fill zone renders between PAYG and PTU lines (Gap 3)
+- [x] Observability events emitted for all 4 required events (Gap 5)

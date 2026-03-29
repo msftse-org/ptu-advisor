@@ -1,6 +1,6 @@
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from './echarts-setup'
-import { CHART_COLORS, PTU_CHART_THEME } from './theme'
+import { CHART_COLORS, PTU_CHART_THEME, fmtTooltipDay } from './theme'
 import type { ZoomState } from './use-chart-zoom'
 
 type Props = {
@@ -22,16 +22,16 @@ export function DailyCostChart({ timestamps, inputCost, outputCost, avgDailyCost
       ...PTU_CHART_THEME.tooltip,
       trigger: 'axis' as const,
       axisPointer: { type: 'shadow' as const },
+      appendTo: () => document.body,
       formatter: (params: Array<{ seriesName: string; value: number; marker: string }>) => {
         if (!Array.isArray(params)) return ''
-        const label = params[0]?.seriesName ? '' : ''
-        let result = `<div style="font-weight:600;margin-bottom:4px">${(params as unknown as { axisValueLabel?: string }[])
-          ?.[0]?.axisValueLabel ?? ''}</div>`
+        const axisLabel = (params as unknown as { axisValueLabel?: string }[])?.[0]?.axisValueLabel ?? ''
+        let result = `<div style="font-weight:600;margin-bottom:4px">${fmtTooltipDay(axisLabel)}</div>`
         for (const p of params) {
           if (p.seriesName === 'Avg Daily' || p.seriesName === 'PTU Daily') continue
-          result += `<div>${p.marker} ${p.seriesName}: $${typeof p.value === 'number' ? p.value.toLocaleString(undefined, { maximumFractionDigits: 0 }) : p.value}</div>`
+          result += `<div>${p.marker} ${p.seriesName}: $${typeof p.value === 'number' ? Math.round(p.value).toLocaleString() : p.value}</div>`
         }
-        return result + label
+        return result
       },
     },
     legend: {
@@ -44,6 +44,7 @@ export function DailyCostChart({ timestamps, inputCost, outputCost, avgDailyCost
       type: 'category' as const,
       data: timestamps,
       ...PTU_CHART_THEME.categoryAxis,
+      axisLabel: { ...PTU_CHART_THEME.categoryAxis.axisLabel, formatter: (iso: string) => { const d = new Date(iso); return `${d.getMonth() + 1}/${d.getDate()}` } },
     },
     yAxis: {
       type: 'value' as const,

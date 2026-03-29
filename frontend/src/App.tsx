@@ -20,6 +20,12 @@ import type {
   PricingRegion,
   SubscriptionInfo,
 } from './types'
+import {
+  emitAssumptionChanged,
+  emitCostRecalculated,
+  emitBreakEvenMarkerRendered,
+  emitBreakEvenUnavailable,
+} from './telemetry'
 
 type Mode = 'demo' | 'live'
 
@@ -40,6 +46,15 @@ const FALLBACK_DEPLOYMENT_TYPES: DeploymentTypeOption[] = [
 ]
 
 const APP_ICON_URL = 'https://cdn-icons-png.flaticon.com/512/1864/1864521.png'
+
+/** Human-readable labels for snake_case safety verdicts */
+const VERDICT_LABELS: Record<string, string> = {
+  safe: 'Safe',
+  efficient_but_risky: 'Efficient but Risky',
+  not_justified: 'Not Justified',
+}
+/** Convert snake_case verdict to CSS class suffix (underscores → hyphens) */
+const verdictCssClass = (v: string) => v.replace(/_/g, '-')
 
 const LANDING_ICON_URLS = {
   usageAssessment: 'https://img.icons8.com/?size=96&id=0wd1lFcg9niE&format=png',
@@ -70,6 +85,9 @@ const CALC_MODELS = [
   { id: 'o3-mini', label: 'o3-mini', tpmPerPtu: 14900, inputPer1M: 1.10, outputPer1M: 4.40, outputRatio: 4, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
   { id: 'o4-mini', label: 'o4-mini', tpmPerPtu: 5400, inputPer1M: 1.10, outputPer1M: 4.40, outputRatio: 4, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
 ] as const
+
+/** Current cost-model policy version — surfaces in telemetry (PRD §10). */
+const POLICY_VERSION = 'v3.1'
 
 type CalcScenario = { name: string; term: string; cost: number; ptuUnits: number }
 type TimeWindow = { start: string; end: string }
@@ -279,21 +297,40 @@ function InfoTip({ text }: { text: string }) {
   )
 }
 
-function WidgetHeader({ title, tip, onExpand }: { title: string; tip: string; onExpand?: () => void }) {
+function WidgetHeader({ title, tip, onExpand, helpContent }: { title: string; tip: string; onExpand?: () => void; helpContent?: string }) {
+  const [showHelp, setShowHelp] = useState(false)
   return (
-    <h4 className="widget-header">
-      <span>{title}</span>
-      <span className="widget-header-actions">
-        {onExpand && (
-          <button className="chart-expand-btn" onClick={onExpand} aria-label={`Expand ${title}`} title="Expand chart">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9" />
-            </svg>
-          </button>
-        )}
-        <InfoTip text={tip} />
-      </span>
-    </h4>
+    <>
+      <h4 className="widget-header" aria-label={`Hover to inspect exact values for ${title}`}>
+        <span>{title}</span>
+        <span className="widget-header-actions">
+          {helpContent && (
+            <button
+              className="chart-help-btn"
+              onClick={() => setShowHelp(!showHelp)}
+              aria-label="Help: hybrid model explanation"
+              aria-expanded={showHelp}
+              title="How the hybrid model works"
+            >
+              ?
+            </button>
+          )}
+          {onExpand && (
+            <button className="chart-expand-btn" onClick={onExpand} aria-label={`Expand ${title}`} title="Expand chart">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9" />
+              </svg>
+            </button>
+          )}
+          <InfoTip text={tip} />
+        </span>
+      </h4>
+      {helpContent && showHelp && (
+        <div className="hybrid-help-panel" role="region" aria-label="Hybrid model explanation">
+          <p>{helpContent}</p>
+        </div>
+      )}
+    </>
   )
 }
 
@@ -546,6 +583,10 @@ function App() {
               metrics: result.metrics,
               cost_analysis: result.cost_analysis,
               insights: result.insights,
+              charts: {
+                ...current.charts,
+                daily_cost: result.charts.daily_cost,
+              },
             }
           })
         }
@@ -623,18 +664,29 @@ function App() {
   ])
 
   const previousAssumptionKey = useRef('')
+  const previousAssumptionParts = useRef<Record<string, string | number>>({})
 
   useEffect(() => {
     if (!analysis) {
       previousAssumptionKey.current = ''
+      previousAssumptionParts.current = {}
       return
     }
 
     const zoomWindow = getReAnalyzeWindow()
 
+    const parts: Record<string, string | number> = {
+      reservationType,
+      baselinePtu: baselinePtu ?? analysis.cost_analysis.hybrid.default_baseline_ptu,
+      selectedRegion,
+      selectedDeploymentType,
+      granularityMinutes,
+      includeThrottle: includeThrottle ? 1 : 0,
+    }
     const currentKey = `${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}|${granularityMinutes}|${includeThrottle}`
     if (!previousAssumptionKey.current) {
       previousAssumptionKey.current = currentKey
+      previousAssumptionParts.current = parts
       return
     }
 
@@ -642,13 +694,55 @@ function App() {
       return
     }
 
+    // Detect which field(s) changed and emit telemetry
+    const prev = previousAssumptionParts.current
+    for (const field of Object.keys(parts)) {
+      if (prev[field] !== parts[field]) {
+        emitAssumptionChanged({
+          policy_version: POLICY_VERSION,
+          recommendation: analysis.recommendation,
+          model_name: analysis.metrics.model_name,
+          deployment_type: selectedDeploymentType,
+          changed_field: field,
+          old_value: prev[field] ?? '',
+          new_value: parts[field],
+          reservation_term: reservationType,
+          baseline_ptu: baselinePtu ?? analysis.cost_analysis.hybrid.default_baseline_ptu,
+        })
+      }
+    }
+
     previousAssumptionKey.current = currentKey
+    previousAssumptionParts.current = parts
     const timer = setTimeout(() => {
       runAnalysis({ preserveCurrent: true, timeWindow: zoomWindow ? { start: zoomWindow.window_start, end: zoomWindow.window_end } : null, updateCharts: !zoomWindow })
     }, 250)
 
     return () => clearTimeout(timer)
   }, [analysis, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, includeThrottle, loading, runAnalysis, getReAnalyzeWindow])
+
+  // ── Telemetry: cost_recalculated ──
+  const previousCostKey = useRef('')
+  useEffect(() => {
+    if (!analysis || loading) return
+    const ca = analysis.cost_analysis
+    const costKey = `${ca.payg.payg_total}|${ca.hybrid.hybrid_total}|${ca.comparison.savings}|${ca.hybrid.baseline_ptu}`
+    if (previousCostKey.current === costKey) return
+    previousCostKey.current = costKey
+
+    emitCostRecalculated({
+      policy_version: POLICY_VERSION,
+      recommendation: analysis.recommendation,
+      model_name: analysis.metrics.model_name,
+      deployment_type: ca.pricing.deployment_type,
+      payg_monthly: ca.payg.payg_total,
+      hybrid_monthly: ca.hybrid.hybrid_total,
+      savings: ca.comparison.savings,
+      savings_pct: ca.comparison.savings_pct,
+      baseline_ptu: ca.hybrid.baseline_ptu,
+      reservation_term: ca.pricing.reservation_type,
+    })
+  }, [analysis, loading])
 
   useEffect(() => {
     if (!expandedChart) return
@@ -736,24 +830,12 @@ function App() {
   const costCurveData = useMemo(() => {
     if (!analysis) return []
     const c = analysis.charts.cost_curves
-    return c.baseline_tpm.map((x, idx) => ({
-      baselineTpm: x,
+    return c.sustained_tpm.map((x, idx) => ({
+      sustainedTpm: x,
       payg: c.payg_monthly[idx] ?? 0,
       hybrid: c.ptu_spill_monthly[idx] ?? 0,
-      ptuUnits: c.ptu_units[idx] ?? 0,
     }))
   }, [analysis])
-
-  const breakEvenPtuUnits = useMemo(() => {
-    if (!analysis?.charts.cost_curves.break_even_tpm || costCurveData.length === 0) return null
-    const be = analysis.charts.cost_curves.break_even_tpm
-    const closest = costCurveData.reduce((prev, curr) => {
-      const prevDist = Math.abs(prev.baselineTpm - be)
-      const currDist = Math.abs(curr.baselineTpm - be)
-      return currDist < prevDist ? curr : prev
-    })
-    return closest.ptuUnits
-  }, [analysis, costCurveData])
 
   // ── Auto re-analyze when zoom window changes (debounced) ──
   const previousZoomKey = useRef('')
@@ -805,20 +887,76 @@ function App() {
   }, [deploymentTypeOptions, selectedDeploymentType])
 
   const breakEvenStatus = useMemo(() => {
-    if (!analysis || !analysis.cost_analysis.comparison.break_even_tpm || analysis.metrics.avg_tpm <= 0) {
-      return null
+    if (!analysis) return null
+    const cc = analysis.charts.cost_curves
+    const selectedPtu = cc.selected_ptu
+    const avgTpm = analysis.metrics.avg_tpm
+    const safetyVerdict = analysis.cost_analysis.commitment_safety?.safety_verdict
+    const safetyLabel = safetyVerdict ? (VERDICT_LABELS[safetyVerdict] ?? safetyVerdict) : 'unknown'
+    const reason = cc.break_even_reason
+
+    if (!cc.break_even_tpm || avgTpm <= 0) {
+      if (reason === 'ptu_always_cheaper') {
+        return { tone: 'positive' as const, breakEvenTpm: null as number | null, avgTpm, distancePct: 0, selectedPtu, text: `PTU is cheaper than PAYG at all usage levels for ${selectedPtu} PTU. Safety verdict: ${safetyLabel}.` }
+      }
+      return { tone: 'negative' as const, breakEvenTpm: null as number | null, avgTpm, distancePct: 0, selectedPtu, text: `No economic break-even exists for ${selectedPtu} PTU in the no-spillover range. At your usage level, PAYG is more cost-effective for this commitment size. Safety verdict: ${safetyLabel}.` }
     }
 
-    const breakEven = analysis.cost_analysis.comparison.break_even_tpm
-    const distancePct = ((analysis.metrics.avg_tpm - breakEven) / breakEven) * 100
+    const breakEven = cc.break_even_tpm
+    const distancePct = ((avgTpm - breakEven) / breakEven) * 100
     if (distancePct > 10) {
-      return { tone: 'positive', text: `Your average TPM is ${distancePct.toFixed(0)}% above break-even.` }
+      return { tone: 'positive' as const, breakEvenTpm: breakEven, avgTpm, distancePct, selectedPtu, text: `Economic break-even for ${selectedPtu} PTU: ${breakEven.toLocaleString(undefined, { maximumFractionDigits: 0 })} TPM. Your avg TPM is ${distancePct.toFixed(0)}% above that threshold, so the economic signal favors PTU. Safety verdict: ${safetyLabel}.` }
     }
     if (distancePct >= -10) {
-      return { tone: 'neutral', text: 'Your average TPM is near break-even (within ±10%).' }
+      return { tone: 'neutral' as const, breakEvenTpm: breakEven, avgTpm, distancePct, selectedPtu, text: `Economic break-even for ${selectedPtu} PTU: ${breakEven.toLocaleString(undefined, { maximumFractionDigits: 0 })} TPM. Your avg TPM is near that threshold, so the economic signal is marginal. Safety verdict: ${safetyLabel}.` }
     }
-    return { tone: 'negative', text: `Your average TPM is ${Math.abs(distancePct).toFixed(0)}% below break-even.` }
+    return { tone: 'negative' as const, breakEvenTpm: breakEven, avgTpm, distancePct, selectedPtu, text: `Economic break-even for ${selectedPtu} PTU: ${breakEven.toLocaleString(undefined, { maximumFractionDigits: 0 })} TPM. Your avg TPM is ${Math.abs(distancePct).toFixed(0)}% below that threshold, so the economic signal favors PAYG. Safety verdict: ${safetyLabel}.` }
   }, [analysis])
+
+  // ── Telemetry: break_even_marker_rendered / break_even_unavailable ──
+  useEffect(() => {
+    if (!breakEvenStatus || !analysis) return
+    const dims = {
+      policy_version: POLICY_VERSION,
+      recommendation: analysis.recommendation,
+      model_name: analysis.metrics.model_name,
+      deployment_type: analysis.cost_analysis.pricing.deployment_type,
+    }
+    if (breakEvenStatus.breakEvenTpm != null) {
+      emitBreakEvenMarkerRendered({
+        ...dims,
+        break_even_tpm: breakEvenStatus.breakEvenTpm,
+        avg_tpm: breakEvenStatus.avgTpm,
+        distance_pct: breakEvenStatus.distancePct,
+        tone: breakEvenStatus.tone as 'positive' | 'neutral' | 'negative',
+      })
+    } else {
+      emitBreakEvenUnavailable({
+        ...dims,
+        selected_ptu: breakEvenStatus.selectedPtu,
+        reason: 'break_even_exceeds_ptu_capacity',
+      })
+    }
+  }, [breakEvenStatus, analysis])
+
+  const differenceSummary = useMemo(() => {
+    if (!analysis) return ''
+    const savings = analysis.cost_analysis.comparison.savings
+    const savingsPct = analysis.cost_analysis.comparison.savings_pct
+    if (savings > 0) {
+      return `PTU saves ${formatCurrency(Math.abs(savings))} (${savingsPct.toFixed(1)}%)`
+    }
+    if (savings < 0) {
+      return `PTU costs ${formatCurrency(Math.abs(savings))} more (${Math.abs(savingsPct).toFixed(1)}%)`
+    }
+    return 'No material cost difference'
+  }, [analysis])
+
+  const currentBaselinePtu = analysis?.cost_analysis.hybrid.baseline_ptu ?? null
+  const recommendedBaselinePtu = analysis?.cost_analysis.hybrid.default_baseline_ptu ?? null
+  const maxViableBaselinePtu = analysis?.cost_analysis.hybrid.max_viable_baseline_ptu ?? null
+  const showHeadroomAction = !!analysis && !!maxViableBaselinePtu && !!recommendedBaselinePtu && maxViableBaselinePtu > recommendedBaselinePtu
+  const exploringHeadroom = !!analysis && !!currentBaselinePtu && !!recommendedBaselinePtu && currentBaselinePtu !== recommendedBaselinePtu
 
   // ── PTU Calculator computation ──
   const calcResult = useMemo(() => {
@@ -874,21 +1012,17 @@ function App() {
     const hybrid1Year = hybridBase * 0.75 + overflowCost
     const hybrid3Year = hybridBase * 0.55 + overflowCost
 
-    // Break-even: find sustained TPM where PAYG = PTU On-Demand
+    // Break-even: analytical fixed-PTU formula (v3 model)
+    // In the flat phase: PAYG = tpm × 43200 / 1M × rate, PTU = ptu_fixed
+    // Cross: tpm = ptu_fixed × 1M / (43200 × rate)
     let breakEvenTpm: number | null = null
-    const step = Math.max(100, calcPeakTpm / 500)
-    let prevDiff = -Infinity
-    for (let tpm = step; tpm <= calcPeakTpm * 3; tpm += step) {
-      const paygCost = (tpm * MINUTES_PER_MONTH / 1_000_000) * blendedRate
-      const effTpm = tpm * effectiveMult
-      const ptu = Math.max(minPtu, Math.ceil(effTpm / model.tpmPerPtu / increment) * increment)
-      const ptuCost = ptu * baseRate * regionMult * HOURS_PER_MONTH
-      const diff = paygCost - ptuCost
-      if (prevDiff < 0 && diff >= 0) {
-        breakEvenTpm = tpm - step * (diff / (diff - prevDiff))
-        break
+    const ptuFixed = ptuBase * baseRate * regionMult * HOURS_PER_MONTH
+    if (blendedRate > 0) {
+      const flatBreakEven = (ptuFixed * 1_000_000) / (MINUTES_PER_MONTH * blendedRate)
+      if (flatBreakEven <= ptuCapacityRaw) {
+        breakEvenTpm = flatBreakEven
       }
-      prevDiff = diff
+      // Rising phase has the same per-TPM slope → lines are parallel → no cross.
     }
 
     const scenarios: CalcScenario[] = [
@@ -1419,7 +1553,7 @@ function App() {
             )}
             <div className="chart-grid chart-grid-v2 stagger-4">
               <article className={`chart-card${expandedChart === 'tokens' ? ' is-chart-expanded' : ''}`}>
-                <WidgetHeader title="Token Volume Over Time" tip="Hover to inspect exact values by interval." onExpand={() => setExpandedChart(expandedChart === 'tokens' ? null : 'tokens')} />
+                <WidgetHeader title="Token Volume Over Time" tip="Shows prompt tokens (input) and completion tokens (output) consumed per interval. Spikes indicate bursts of usage. A flat, high line suggests steady workload — a good PTU candidate." onExpand={() => setExpandedChart(expandedChart === 'tokens' ? null : 'tokens')} />
                 {tokenChartData.length === 0 ? <ChartEmpty height={240} /> : (
                 <TokenVolumeChart
                   timestamps={analysis!.charts.tokens.timestamps}
@@ -1436,7 +1570,7 @@ function App() {
               </article>
 
               <article className={`chart-card${expandedChart === 'requests' ? ' is-chart-expanded' : ''}`}>
-                <WidgetHeader title="Request Outcomes" tip="Hover to inspect exact values by interval." onExpand={() => setExpandedChart(expandedChart === 'requests' ? null : 'requests')} />
+                <WidgetHeader title="Request Outcomes" tip="Displays successful API calls vs HTTP 429 (rate-limited) responses per interval. High 429 counts signal capacity pressure — PTU eliminates these by reserving dedicated throughput." onExpand={() => setExpandedChart(expandedChart === 'requests' ? null : 'requests')} />
                 {requestsChartData.length === 0 ? <ChartEmpty height={240} /> : (
                 <RequestOutcomesChart
                   timestamps={analysis!.charts.requests.timestamps}
@@ -1451,7 +1585,15 @@ function App() {
               </article>
 
               <article className={`chart-card${expandedChart === 'dailyCost' ? ' is-chart-expanded' : ''}`}>
-                <WidgetHeader title="Daily Deployment Cost" tip="Actual daily cost derived from token consumption metrics at current pricing rates." onExpand={() => setExpandedChart(expandedChart === 'dailyCost' ? null : 'dailyCost')} />
+                <h4 className="widget-header">
+                  <span>Daily Deployment Cost{dailyCostChartData.length > 0 && <span className="cost-total-tag">Total: ${analysis!.charts.daily_cost.total_cost.reduce((a, b) => a + b, 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>}</span>
+                  <span className="widget-header-actions">
+                    <button className="chart-expand-btn" onClick={() => setExpandedChart(expandedChart === 'dailyCost' ? null : 'dailyCost')} aria-label="Expand Daily Deployment Cost" title="Expand chart">
+                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9" /></svg>
+                    </button>
+                    <InfoTip text="Stacked bars show daily input and output token costs at PAYG rates. The dashed lines mark average daily spend and what a PTU baseline would cost per day — compare bars to lines to see if PTU saves money." />
+                  </span>
+                </h4>
                 {dailyCostChartData.length === 0 ? <ChartEmpty height={240} /> : (
                 <DailyCostChart
                   timestamps={analysis!.charts.daily_cost.dates}
@@ -1468,7 +1610,7 @@ function App() {
               </article>
 
               <article className={`chart-card${expandedChart === 'throttle' ? ' is-chart-expanded' : ''}`}>
-                <WidgetHeader title="Rate-Limit Events (429)" tip="Hover to inspect exact values by interval." onExpand={() => setExpandedChart(expandedChart === 'throttle' ? null : 'throttle')} />
+                <WidgetHeader title="Rate-Limit Events (429)" tip="Shows the count of HTTP 429 rate-limit responses per interval. Frequent spikes mean your traffic regularly exceeds PAYG quota, causing retries and latency. PTU provisioning removes this bottleneck." onExpand={() => setExpandedChart(expandedChart === 'throttle' ? null : 'throttle')} />
                 {throttleChartData.length === 0 ? <ChartEmpty height={240} /> : (
                 <ThrottleChart
                   timestamps={analysis!.charts.throttling.timestamps}
@@ -1483,7 +1625,7 @@ function App() {
             </div>
 
             <article className={`chart-card wide-card${expandedChart === 'tpm' ? ' is-chart-expanded' : ''}`}>
-              <WidgetHeader title={`Throughput Band (TPM vs Avg/${tpmRefLabel})`} tip={`Shows raw TPM against average and ${tpmRefLabel} throughput levels.`} onExpand={() => setExpandedChart(expandedChart === 'tpm' ? null : 'tpm')} />
+              <WidgetHeader title={`Throughput Band (TPM vs Avg/${tpmRefLabel})`} tip={`Shows actual tokens-per-minute over time against the average (dashed green) and ${tpmRefLabel} reference (dashed orange). When the blue area stays consistently above the ${tpmRefLabel} line, your workload is large enough to benefit from PTU.`} onExpand={() => setExpandedChart(expandedChart === 'tpm' ? null : 'tpm')} />
               {tpmChartData.length === 0 ? <ChartEmpty height={280} /> : (
               <TpmBandChart
                 timestamps={analysis!.charts.tpm.timestamps}
@@ -1586,6 +1728,38 @@ function App() {
                   </span>
                 </div>
 
+                {(showHeadroomAction || exploringHeadroom) && (
+                  <div className="baseline-helper-row">
+                    <span className="baseline-helper-text">
+                      {exploringHeadroom
+                        ? `Exploring ${currentBaselinePtu} PTU instead of the recommended ${recommendedBaselinePtu} PTU baseline.`
+                        : `Explore headroom: up to ${maxViableBaselinePtu} PTU still saves more than 5%.`}
+                    </span>
+                    <div className="baseline-helper-actions">
+                      {showHeadroomAction && currentBaselinePtu !== maxViableBaselinePtu && (
+                        <button
+                          type="button"
+                          className="secondary baseline-helper-button"
+                          onClick={() => setBaselinePtu(maxViableBaselinePtu)}
+                          disabled={loading}
+                        >
+                          Explore headroom
+                        </button>
+                      )}
+                      {exploringHeadroom && currentBaselinePtu !== recommendedBaselinePtu && (
+                        <button
+                          type="button"
+                          className="secondary baseline-helper-button"
+                          onClick={() => setBaselinePtu(recommendedBaselinePtu)}
+                          disabled={loading}
+                        >
+                          Reset to recommended
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 <div className="assumption-status" aria-live="polite">
                   {loading ? 'Updating calculations…' : 'Changes apply automatically after each adjustment'}
                 </div>
@@ -1614,19 +1788,19 @@ function App() {
             </details>
 
             <article className={`chart-card wide-card${expandedChart === 'cost' ? ' is-chart-expanded' : ''}`}>
-              <WidgetHeader title="Break-even Curve (PAYG vs PTU + Spillover)" tip="Hover to inspect monthly PAYG vs PTU + spillover cost points by baseline TPM." onExpand={() => setExpandedChart(expandedChart === 'cost' ? null : 'cost')} />
+              <WidgetHeader title={`Cost Explorer — Does my traffic justify ${analysis!.charts.cost_curves.selected_ptu} PTU?`} tip="X-axis shows sustained traffic (TPM). The PTU+Spillover line is flat while traffic fits within PTU, then rises as overflow spills to PAYG." onExpand={() => setExpandedChart(expandedChart === 'cost' ? null : 'cost')} helpContent="The hybrid PTU + Spillover model commits a fixed number of Provisioned Throughput Units (PTU) to cover your baseline traffic at a predictable monthly cost. When traffic stays within PTU capacity, the cost is flat regardless of how much of that capacity you use. When traffic spikes above PTU capacity, the excess tokens automatically spill over to standard pay-as-you-go (PAYG) pricing. This means you get cost predictability for steady-state traffic while still handling bursts without throttling. The break-even point is where the fixed PTU commitment starts saving money compared to running everything on PAYG. Note: the 'Your avg TPM' marker is a visual reference for orientation on the chart. The final recommendation is based on the full monthly workload shape, realized hybrid cost, and commitment-safety metrics — not solely on the average." />
               {costCurveData.length === 0 ? <ChartEmpty height={300} /> : (<>
               <CostCurveChart
-                baselineTpm={analysis!.charts.cost_curves.baseline_tpm}
+                sustainedTpm={analysis!.charts.cost_curves.sustained_tpm}
                 payg={analysis!.charts.cost_curves.payg_monthly}
                 hybrid={analysis!.charts.cost_curves.ptu_spill_monthly}
-                ptuUnits={analysis!.charts.cost_curves.ptu_units}
                 breakEvenTpm={analysis!.charts.cost_curves.break_even_tpm ?? null}
-                breakEvenPtuUnits={breakEvenPtuUnits ?? null}
-                sliderBaselineTpm={analysis!.charts.cost_curves.slider_baseline_tpm}
-                sliderPtu={analysis!.cost_analysis.hybrid.baseline_ptu}
-                paygAtSlider={analysis!.charts.cost_curves.payg_at_slider}
-                hybridAtSlider={analysis!.charts.cost_curves.hybrid_at_slider}
+                breakEvenCost={analysis!.charts.cost_curves.break_even_tpm != null ? analysis!.cost_analysis.hybrid.ptu_baseline_cost : null}
+                ptuCapacityTpm={analysis!.charts.cost_curves.ptu_capacity_tpm}
+                avgTpm={analysis!.charts.cost_curves.avg_tpm}
+                selectedPtu={analysis!.charts.cost_curves.selected_ptu}
+                paygAtAvg={analysis!.charts.cost_curves.payg_at_avg}
+                hybridAtAvg={analysis!.charts.cost_curves.hybrid_at_avg}
                 height={getChartHeight('cost', 300)}
               />
               {breakEvenStatus && (
@@ -1636,6 +1810,30 @@ function App() {
               )}
               </>)}
             </article>
+
+            {/* Layer E: Commitment Safety Strip */}
+            {analysis.cost_analysis.commitment_safety && (
+            <div className={`commitment-safety-strip safety-${verdictCssClass(analysis.cost_analysis.commitment_safety.safety_verdict)}`}>
+              <div className="safety-strip-items">
+                <div className="safety-strip-item">
+                  <span className="safety-strip-label">Savings Margin <InfoTip text="Percentage saved vs PAYG at current workload. Higher is better." /></span>
+                  <strong>{analysis.cost_analysis.commitment_safety.savings_margin_pct.toFixed(1)}%</strong>
+                </div>
+                <div className="safety-strip-item">
+                  <span className="safety-strip-label">Spillover <InfoTip text="Percentage of observed intervals where traffic exceeds PTU capacity." /></span>
+                  <strong>{analysis.cost_analysis.commitment_safety.spillover_pct.toFixed(1)}%</strong>
+                </div>
+                <div className="safety-strip-item">
+                  <span className="safety-strip-label">Capacity Coverage <InfoTip text="Percentage of intervals where all traffic fits within PTU commitment." /></span>
+                  <strong>{analysis.cost_analysis.commitment_safety.capacity_coverage_pct.toFixed(1)}%</strong>
+                </div>
+                <div className="safety-strip-item safety-verdict-item">
+                  <span className="safety-strip-label">Safety Verdict</span>
+                  <strong>{VERDICT_LABELS[analysis.cost_analysis.commitment_safety.safety_verdict] ?? analysis.cost_analysis.commitment_safety.safety_verdict}</strong>
+                </div>
+              </div>
+            </div>
+            )}
 
             <div className="metrics-grid">
               <article className={`metric-card${analysis.cost_analysis.payg.payg_total <= analysis.cost_analysis.hybrid.hybrid_total ? ' is-winner' : ''}`}>
@@ -1648,7 +1846,7 @@ function App() {
               </article>
               <article className="metric-card">
                 <h3>Difference <InfoTip text="Absolute monthly delta between PAYG and PTU+spillover strategies." /></h3>
-                <p>{formatCurrency(Math.abs(analysis.cost_analysis.comparison.savings))}</p>
+                <p>{differenceSummary}</p>
               </article>
               <article className="metric-card">
                 <h3>Break-even TPM <InfoTip text="Sustained TPM level where PTU+spillover and PAYG costs are equal." /></h3>

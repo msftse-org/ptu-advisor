@@ -77,17 +77,20 @@ def calculate_spillover_cost(
 
     if baseline_ptu_override is not None:
         # Slider sends PTU units directly — skip optimization
-        baseline_ptu = max(min_ptu, int(
-            np.ceil(baseline_ptu_override / ptu_increment) * ptu_increment
-        ))
+        baseline_ptu = max(
+            min_ptu, int(np.ceil(baseline_ptu_override / ptu_increment) * ptu_increment)
+        )
         baseline_tpm = baseline_ptu * ptu_capacity_per_unit
     else:
         # Sweep PTU levels to find cost-optimal baseline (vectorized)
         # Upper bound: enough PTU to cover P95 with 20% headroom
-        max_ptu = max(min_ptu, int(np.ceil(peak_tpm * 1.2 / ptu_capacity_per_unit / ptu_increment)) * ptu_increment)
+        max_ptu = max(
+            min_ptu,
+            int(np.ceil(peak_tpm * 1.2 / ptu_capacity_per_unit / ptu_increment)) * ptu_increment,
+        )
         tpm_arr = np.array(tpm_values)
         best_ptu = min_ptu
-        best_cost = float('inf')
+        best_cost = float("inf")
         for candidate_ptu in range(min_ptu, max_ptu + ptu_increment, ptu_increment):
             cap = candidate_ptu * ptu_capacity_per_unit
             ptu_cost = candidate_ptu * ptu_hourly_rate * hours_per_month * effective_discount
@@ -101,9 +104,7 @@ def calculate_spillover_cost(
 
     ptu_capacity_tpm = baseline_ptu * ptu_capacity_per_unit
 
-    spillover_tokens_per_minute = [
-        max(0.0, tpm - ptu_capacity_tpm) for tpm in tpm_values
-    ]
+    spillover_tokens_per_minute = [max(0.0, tpm - ptu_capacity_tpm) for tpm in tpm_values]
 
     avg_spillover_tpm = float(np.mean(spillover_tokens_per_minute))
     spillover_tokens_monthly = avg_spillover_tpm * 60 * 24 * 30
@@ -114,9 +115,7 @@ def calculate_spillover_cost(
     ptu_monthly_full = baseline_ptu * ptu_hourly_rate * hours_per_month
 
     ptu_monthly_cost = (
-        ptu_monthly_full * reservation_discount
-        if reservation_discount > 0
-        else ptu_monthly_full
+        ptu_monthly_full * reservation_discount if reservation_discount > 0 else ptu_monthly_full
     )
 
     spillover_cost = (spillover_tokens_monthly / 1000) * payg_rate_per_1k
@@ -247,6 +246,100 @@ def generate_cost_curves(
     return pd.DataFrame(rows)
 
 
+# ---------------------------------------------------------------------------
+# v2 Break-Even: Fixed PTU commitment, varying traffic on X-axis
+# ---------------------------------------------------------------------------
+
+
+def calculate_break_even_for_fixed_ptu(
+    selected_ptu: int,
+    ptu_capacity_per_unit: float,
+    ptu_hourly_rate: float,
+    payg_blended_rate: float,
+    reservation_discount: float = 1.0,
+    max_search_tpm: float = 200_000,
+) -> Optional[float]:
+    """
+    Find the sustained TPM where PTU+spillover cost equals PAYG cost,
+    for a FIXED PTU commitment.
+
+    Break-even can only occur in the flat phase (traffic ≤ PTU capacity).
+    Once spillover starts both lines have the same slope (parallel) and
+    never cross.
+
+    Args:
+        selected_ptu: Number of PTU units committed.
+        ptu_capacity_per_unit: TPM capacity per PTU unit.
+        ptu_hourly_rate: Hourly cost per PTU.
+        payg_blended_rate: Blended PAYG rate per 1M tokens.
+        reservation_discount: Discount factor for reservation term.
+        max_search_tpm: Upper bound for search (unused — break-even is
+            analytical, but included for PRD API compatibility).
+
+    Returns the break-even TPM, or ``None`` if lines don't cross.
+    """
+    if payg_blended_rate <= 0:
+        return None
+
+    discount = reservation_discount if reservation_discount < 1.0 else 1.0
+    ptu_fixed = selected_ptu * ptu_hourly_rate * 720 * discount
+    ptu_capacity_tpm = selected_ptu * ptu_capacity_per_unit
+    minutes_per_month = 43_200
+
+    # In the flat phase: PAYG = tpm × 43200 / 1M × rate,  PTU = ptu_fixed
+    # Cross: tpm = ptu_fixed × 1M / (43200 × rate)
+    flat_break_even = ptu_fixed * 1_000_000 / (minutes_per_month * payg_blended_rate)
+
+    if flat_break_even <= ptu_capacity_tpm:
+        return flat_break_even
+
+    # Rising phase has the same per-TPM slope → lines are parallel → no cross.
+    return None
+
+
+def generate_cost_curves_fixed_ptu(
+    selected_ptu: int,
+    ptu_capacity_per_unit: float,
+    ptu_hourly_rate: float,
+    payg_blended_rate: float,
+    reservation_discount: float = 1.0,
+    max_tpm: float = 200_000,
+    num_points: int = 200,
+) -> pd.DataFrame:
+    """
+    Generate PAYG and PTU+Spillover cost curves for a FIXED PTU commitment.
+
+    X-axis is sustained TPM (traffic level, NOT PTU size).
+
+    Returns DataFrame with columns:
+        sustained_tpm, payg_monthly, ptu_spill_monthly
+    """
+    discount = reservation_discount if reservation_discount < 1.0 else 1.0
+    ptu_fixed = selected_ptu * ptu_hourly_rate * 720 * discount
+    ptu_capacity_tpm = selected_ptu * ptu_capacity_per_unit
+    minutes_per_month = 43_200
+    rate_per_token = payg_blended_rate / 1_000_000
+
+    sample_tpms = np.linspace(0, max_tpm, num_points)
+
+    rows: list[dict] = []
+    for tpm in sample_tpms:
+        payg = tpm * minutes_per_month * rate_per_token
+        overflow_tpm = max(0.0, tpm - ptu_capacity_tpm)
+        spillover = overflow_tpm * minutes_per_month * rate_per_token
+        hybrid = ptu_fixed + spillover
+
+        rows.append(
+            {
+                "sustained_tpm": tpm,
+                "payg_monthly": payg,
+                "ptu_spill_monthly": hybrid,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
 def calculate_ptu_costs(
     peak_tpm: float,
     model: str,
@@ -257,8 +350,18 @@ def calculate_ptu_costs(
         "gpt-5": {"tpm_per_ptu": 3400, "output_ratio": 8, "global_min": 15, "regional_min": 50},
         "gpt-4.1": {"tpm_per_ptu": 4750, "output_ratio": 4, "global_min": 15, "regional_min": 50},
         "gpt-4o": {"tpm_per_ptu": 2500, "output_ratio": 3, "global_min": 15, "regional_min": 50},
-        "gpt-4o-mini": {"tpm_per_ptu": 37000, "output_ratio": 3, "global_min": 15, "regional_min": 25},
-        "gpt-3.5-turbo": {"tpm_per_ptu": 37000, "output_ratio": 3, "global_min": 15, "regional_min": 25},
+        "gpt-4o-mini": {
+            "tpm_per_ptu": 37000,
+            "output_ratio": 3,
+            "global_min": 15,
+            "regional_min": 25,
+        },
+        "gpt-3.5-turbo": {
+            "tpm_per_ptu": 37000,
+            "output_ratio": 3,
+            "global_min": 15,
+            "regional_min": 25,
+        },
     }
 
     config = ptu_configs.get(model.lower(), ptu_configs["gpt-4o"])

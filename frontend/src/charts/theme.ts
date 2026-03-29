@@ -1,4 +1,49 @@
 /** Dark theme configuration for PTU Advisor ECharts. */
+
+/** Format a timestamp for tooltip headers: M/D HH:mm */
+export function fmtTooltipDate(iso: string): string {
+  const d = new Date(iso)
+  const mon = d.getMonth() + 1
+  const day = d.getDate()
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  return `${mon}/${day} ${hh}:${mm}`
+}
+
+/** Format a date-only string for daily chart tooltips: M/D */
+export function fmtTooltipDay(iso: string): string {
+  const d = new Date(iso)
+  return `${d.getMonth() + 1}/${d.getDate()}`
+}
+
+/** Format a numeric value as a rounded integer with locale separators. */
+export function fmtNum(v: number | undefined | null): string {
+  if (v == null || isNaN(v)) return '—'
+  return Math.round(v).toLocaleString()
+}
+
+/** Build an adaptive X-axis label formatter based on timestamp span/density. */
+export function makeAxisDateFormatter(timestamps: string[]): (iso: string) => string {
+  if (timestamps.length === 0) return (iso) => {
+    const d = new Date(iso); return `${d.getMonth() + 1}/${d.getDate()}`
+  }
+  const first = new Date(timestamps[0]).getTime()
+  const last = new Date(timestamps[timestamps.length - 1]).getTime()
+  const spanHours = (last - first) / (1000 * 60 * 60)
+  const dense = timestamps.length > 80
+
+  return (iso: string) => {
+    const d = new Date(iso)
+    const mon = d.getMonth() + 1
+    const day = d.getDate()
+    const hh = String(d.getHours()).padStart(2, '0')
+    const mm = String(d.getMinutes()).padStart(2, '0')
+    if (spanHours <= 24) return `${hh}:${mm}`
+    if (spanHours <= 168 && !dense) return `${mon}/${day} ${hh}:${mm}`
+    return `${mon}/${day}`
+  }
+}
+
 export const CHART_COLORS = {
   primary: '#5B7FFF',
   secondary: '#7B8EAF',
@@ -63,6 +108,6 @@ export const PTU_CHART_THEME = {
     borderColor: 'rgba(91, 127, 255, 0.32)',
     borderWidth: 1,
     textStyle: { color: '#e8ecf2', fontSize: 12 },
-    extraCssText: 'border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);',
+    extraCssText: 'border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); z-index: 9999; pointer-events: none;',
   },
 } as const

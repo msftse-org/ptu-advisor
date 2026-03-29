@@ -1,10 +1,12 @@
 # PRD: Chart Overhaul — Timeframe Selection & Visualization Upgrade
 
-> **Version**: 1.0  
-> **Date**: March 16, 2026  
+> **Version**: 2.0  
+> **Date**: March 17, 2026  
 > **Author**: PTU Advisor Team  
 > **Priority**: P1 — UX-critical regression  
-> **Status**: Draft
+> **Status**: Implemented (v2.0 polish in progress)
+
+> **Consolidated**: This PRD now includes the **Daily Cost Chart** feature (previously `PRD-daily-cost-chart.md`).
 
 ---
 
@@ -551,3 +553,112 @@ Run against both **current Recharts** (baseline) and **new ECharts** (comparison
 | 3 | When re-analyzing a zoom window, should we show a loading skeleton or keep stale data? | **Keep stale data** with a subtle "Updating…" indicator in the analysis cards. Avoids layout shifts. |
 | 4 | Should the toolbox (save PNG, data view) be visible by default or on hover? | **On hover** — keeps the UI clean but discoverable. |
 | 5 | Should we evaluate `lightweight-charts` (TradingView) as an alternative for time-series? | **Not for v1.** It's excellent for financial charts but lacks stacked area/bar, reference lines, and the general-purpose flexibility we need. Consider for a dedicated "traffic pattern" view in the future. |
+
+---
+
+## 10. Implementation Status (v1.0 → v2.0)
+
+### Completed (v1.0)
+
+| Item | Status |
+|------|--------|
+| ECharts migration (all 6 chart types) | ✅ Shipped |
+| `dataZoom` slider + inside-chart zoom | ✅ Shipped |
+| `echarts.connect()` synced zoom/crosshair | ✅ Shipped |
+| Auto re-analysis on zoom (500ms debounce) | ✅ Shipped |
+| Chart info tooltips with descriptions | ✅ Shipped |
+| Floating zoom indicator with reset button | ✅ Shipped |
+| ECharts tooltip `appendTo: () => document.body` | ✅ Shipped |
+| Info tooltip z-index fix (widget-header stacking) | ✅ Shipped |
+| Recharts fully removed | ✅ Shipped |
+| E2E Playwright tests (3/3 passing) | ✅ Shipped |
+
+### Completed (v1.5 — Daily Cost Chart, consolidated from PRD-daily-cost-chart.md)
+
+| Item | Status |
+|------|--------|
+| Daily cost bar chart replaces Response Time Stability | ✅ Shipped |
+| Stacked bars: input cost + output cost | ✅ Shipped |
+| Avg Daily Cost reference line (dashed, neutral) | ✅ Shipped |
+| PTU Daily Cost reference line (dashed, red) | ✅ Shipped |
+| Total cost badge in chart header | ✅ Shipped |
+| Backend `_aggregate_daily_costs()` in server.py | ✅ Shipped |
+| Demo mode generates realistic daily cost data | ✅ Shipped |
+| Zoom, expand, tooltip sync, reference lines — full parity | ✅ Shipped |
+
+---
+
+## 11. v2.0 Polish — Date/Time Formatting & Tooltip Improvements
+
+### 11.1 Problem Statement
+
+Post-migration user feedback identified several tooltip and axis formatting issues:
+
+| Issue | Impact |
+|---|---|
+| **Tooltip date/time too long** | ISO timestamps shown in tooltip headers are unreadable (e.g., `2026-03-15T14:30:00.000Z`). Need short `M/D HH:mm` format. |
+| **Axis date labels inconsistent** | Some charts show raw ISO timestamps on the X-axis instead of short date labels. Daily Cost chart has good formatting — other charts should match. |
+| **Tooltip numbers too precise** | Large numbers like `123456.789` shown with full decimal precision. Need integer/abbreviated display (e.g., `123,457` or `123.5K`). |
+| **TPM Band tooltip missing values** | The Throughput Band chart sometimes shows empty tooltip rows — the `Avg` and reference line series are filtered out but no values appear when the TPM data point is null/undefined. |
+| **TPM Band missing reference line labels** | The Avg and Break-even horizontal lines have no visible value labels on the chart, making it hard to read what they represent. |
+| **TPM Band reference values not updating on zoom** | When the timeframe changes via zoom + re-analysis, the Avg and Break-even reference line values should reflect the new window's data. |
+
+### 11.2 Requirements
+
+#### R1: Short Date/Time in Tooltips
+
+All chart tooltips must show the timestamp header in short format:
+- **Time-series charts** (Token Volume, Request Outcomes, Throttle, TPM Band): `M/D HH:mm` (e.g., `3/15 14:30`)
+- **Daily Cost chart**: `M/D` (e.g., `3/15`) since it's daily granularity
+- Use the existing `makeSmartDateFormatter()` logic adapted for tooltip context
+
+#### R2: Short Date on Axes
+
+X-axis labels on all time-series charts must use the `smartDateFmt` style:
+- `≤24h` span → `HH:mm`
+- `≤168h` & not dense → `M/D HH:mm`
+- Otherwise → `M/D`
+
+The Daily Cost chart already uses `M/D` style dates — other charts should use the xAxis formatter from `makeSmartDateFormatter`.
+
+#### R3: Absolute/Rounded Tooltip Numbers
+
+All numeric values in tooltips must be displayed as rounded integers with locale comma separators:
+- Values < 1000: show as-is (e.g., `42`)
+- Values ≥ 1000: use `toLocaleString()` with `maximumFractionDigits: 0` (e.g., `1,234,567`)
+- Currency values: `$1,234` (no decimals)
+
+#### R4: TPM Band Tooltip Fix
+
+The TPM Band formatter filters out `Avg` and reference label series correctly, but sometimes the main `TPM` series value is missing because the param's `value` is undefined at certain data points. Fix: add a null check and show `—` for missing values.
+
+#### R5: TPM Band Reference Line Labels with Values
+
+Add visible value labels on the Avg and Break-even/P25 horizontal lines directly on the chart:
+- Avg line: show label like `Avg: 45,230 TPM` at the end of the line
+- Break-even line: show label like `Break-even: 62,100 TPM` at the end of the line
+- Labels update when the analysis is re-run with a new zoom window (they come from `analysis.charts.tpm.avg` and `cost_curves.break_even_tpm`)
+
+### 11.3 Acceptance Criteria
+
+- [ ] All time-series chart tooltips show `M/D HH:mm` as the header timestamp
+- [ ] Daily Cost chart tooltip shows `M/D` as the header date
+- [ ] X-axis labels use `smartDateFmt` across all time-series charts
+- [ ] All tooltip numeric values are rounded integers with locale separators
+- [ ] TPM Band tooltip always shows the TPM value (or `—` if missing)
+- [ ] TPM Band chart shows labeled horizontal lines with actual values for Avg and Break-even
+- [ ] Reference line labels update after zoom-triggered re-analysis
+
+### 11.4 Bug Fix — Daily Cost Total Badge Not Updating on Timeframe Change
+
+**Bug**: The "Total: $X" badge in the Daily Deployment Cost chart header does not update when the user zooms into a sub-window. It always shows the full-range total from the original analysis.
+
+**Root cause**: When zoom-triggered re-analysis fires with `updateCharts: false`, the frontend merge logic preserves the original `charts` object (to avoid chart flicker). This means `analysis.charts.daily_cost` stays stale even though the backend returns correct windowed daily cost data.
+
+**Fix**: In the `updateCharts: false` merge path, also update `charts.daily_cost` from the new result. This ensures the total badge, avg daily cost, and PTU daily cost reference line all reflect the selected timeframe. Other chart series (tokens, requests, throttling, tpm) remain preserved to avoid visual disruption during zoom.
+
+**Acceptance criteria**:
+- [ ] "Total: $X" badge updates to reflect only the daily costs within the zoomed window
+- [ ] Avg Daily Cost reference line updates to the windowed average
+- [ ] PTU Daily Cost reference line updates to the windowed PTU daily cost
+- [ ] Resetting zoom restores the full-range total

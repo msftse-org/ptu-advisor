@@ -123,14 +123,16 @@ export type AnalysisResponse = {
       values: number[]
     }
     cost_curves: {
-      baseline_tpm: number[]
+      sustained_tpm: number[]
       payg_monthly: number[]
       ptu_spill_monthly: number[]
-      ptu_units: number[]
       break_even_tpm: number | null
-      slider_baseline_tpm: number
-      payg_at_slider: number
-      hybrid_at_slider: number
+      break_even_reason: 'exists' | 'ptu_always_more_expensive' | 'ptu_always_cheaper'
+      ptu_capacity_tpm: number
+      avg_tpm: number
+      selected_ptu: number
+      payg_at_avg: number
+      hybrid_at_avg: number
     }
   }
   cost_analysis: {
@@ -144,10 +146,16 @@ export type AnalysisResponse = {
       deployment_type: 'global' | 'data_zone' | 'regional'
       deployment_type_label: string
       payg_blended_rate_per_million: number
+      payg_input_rate_per_million: number
+      payg_output_rate_per_million: number
+      output_ratio: number
       ptu_hourly_rate: number
       ptu_capacity_per_unit: number
       ptu_increment: number
       ptu_minimum: number
+      pricing_source: 'live' | 'cached' | 'fallback' | 'manual'
+      pricing_as_of: string
+      pricing_currency: string
     }
     payg: {
       monthly_tokens: number
@@ -161,6 +169,7 @@ export type AnalysisResponse = {
       baseline_tpm: number
       baseline_ptu: number
       default_baseline_ptu: number
+      max_viable_baseline_ptu: number | null
       max_baseline_ptu: number
       ptu_capacity_tpm: number
       avg_spillover_tpm: number
@@ -180,6 +189,12 @@ export type AnalysisResponse = {
       savings_pct: number
       break_even_tpm: number | null
       cheaper_strategy: string
+    }
+    commitment_safety: {
+      savings_margin_pct: number
+      spillover_pct: number
+      capacity_coverage_pct: number
+      safety_verdict: 'safe' | 'efficient_but_risky' | 'not_justified'
     }
     formula_blocks: {
       payg: string

@@ -1,6 +1,6 @@
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from './echarts-setup'
-import { CHART_COLORS, PTU_CHART_THEME } from './theme'
+import { CHART_COLORS, PTU_CHART_THEME, fmtTooltipDate, fmtNum, makeAxisDateFormatter } from './theme'
 import type { ZoomState } from './use-chart-zoom'
 
 type Props = {
@@ -22,14 +22,20 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, 
       ...PTU_CHART_THEME.tooltip,
       trigger: 'axis' as const,
       axisPointer: { type: 'cross' as const, lineStyle: { color: CHART_COLORS.primary, width: 1 } },
-      formatter: (params: Array<{ seriesName: string; value: number; marker: string }>) => {
+      appendTo: () => document.body,
+      formatter: (params: Array<{ seriesName: string; value: number; marker: string; axisValue?: string }>) => {
         if (!Array.isArray(params)) return ''
-        let result = `<div style="font-weight:600;margin-bottom:4px">${(params as unknown as { axisValueLabel?: string }[])
-          ?.[0]?.axisValueLabel ?? ''}</div>`
+        const ts = params[0]?.axisValue ?? ''
+        let result = `<div style="font-weight:600;margin-bottom:4px">${fmtTooltipDate(ts)}</div>`
         for (const p of params) {
           if (p.seriesName === 'Avg' || p.seriesName === refLabel) continue
-          result += `<div>${p.marker} ${p.seriesName}: ${typeof p.value === 'number' ? p.value.toLocaleString() : p.value}</div>`
+          const val = typeof p.value === 'number' && !isNaN(p.value) ? fmtNum(p.value) : '\u2014'
+          result += `<div>${p.marker} ${p.seriesName}: ${val}</div>`
         }
+        result += `<div style="margin-top:4px;border-top:1px solid rgba(255,255,255,0.1);padding-top:4px">`
+        result += `<span style="color:${CHART_COLORS.success}">Avg: ${fmtNum(avg)}</span>`
+        result += ` &nbsp;·&nbsp; <span style="color:${CHART_COLORS.warning}">${refLabel}: ${fmtNum(refLine)}</span>`
+        result += `</div>`
         return result
       },
     },
@@ -44,6 +50,7 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, 
       data: timestamps,
       ...PTU_CHART_THEME.categoryAxis,
       boundaryGap: false,
+      axisLabel: { ...PTU_CHART_THEME.categoryAxis.axisLabel, formatter: makeAxisDateFormatter(timestamps) },
     },
     yAxis: {
       type: 'value' as const,
@@ -80,6 +87,15 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, 
         symbol: 'none',
         lineStyle: { color: CHART_COLORS.success, width: 1, type: 'dashed' as const },
         silent: true,
+        markLine: {
+          silent: true,
+          symbol: 'none',
+          data: [{
+            yAxis: avg,
+            lineStyle: { color: 'transparent', width: 0 },
+            label: { show: true, formatter: `Avg: ${fmtNum(avg)} TPM`, color: CHART_COLORS.success, fontSize: 10, position: 'insideEndTop' as const },
+          }],
+        },
       },
       {
         name: refLabel,
@@ -89,13 +105,22 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, 
         symbol: 'none',
         lineStyle: { color: CHART_COLORS.warning, width: 1, type: 'dashed' as const },
         silent: true,
-        markLine: selectedTimestamp && timestamps.includes(selectedTimestamp) ? {
+        markLine: {
           silent: true,
           symbol: 'none',
-          lineStyle: { color: 'rgba(215, 225, 255, 0.7)', type: 'dashed', width: 1 },
-          data: [{ xAxis: selectedTimestamp }],
-          label: { show: false },
-        } : undefined,
+          data: [
+            {
+              yAxis: refLine,
+              lineStyle: { color: 'transparent', width: 0 },
+              label: { show: true, formatter: `${refLabel}: ${fmtNum(refLine)} TPM`, color: CHART_COLORS.warning, fontSize: 10, position: 'insideEndBottom' as const },
+            },
+            ...(selectedTimestamp && timestamps.includes(selectedTimestamp) ? [{
+              xAxis: selectedTimestamp,
+              lineStyle: { color: 'rgba(215, 225, 255, 0.7)', type: 'dashed' as const, width: 1 },
+              label: { show: false },
+            }] : []),
+          ],
+        },
       },
     ],
   }

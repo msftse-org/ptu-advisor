@@ -108,6 +108,17 @@ Replace the "Response Time Stability" chart with a **"Daily Deployment Cost"** b
 - [ ] `DemoScenario.BORDERLINE` → moderate costs (~$100–200/day) with some spikes
 - [ ] Cost data is derived from the existing demo token metric generation (not separately hardcoded)
 
+#### US-6: Total Cost Label for Selected Timeframe
+
+> As a **FinOps Engineer**, I want to see the total PAYG cost for the visible timeframe displayed as a prominent tag next to the chart title, so I can instantly know the aggregate spend without manually summing bars.
+
+**Acceptance Criteria:**
+- [x] A tag/badge is displayed next to the "Daily Deployment Cost" header showing the total PAYG cost for the period (sum of all daily `total_cost` values)
+- [x] The tag is formatted as USD with a "Total:" prefix: `Total: $12,345`
+- [x] When the user zooms into a sub-range (triggering a re-analysis with a narrower window), the total updates to reflect only the visible/windowed data
+- [x] The tag uses a visually distinct pill/badge style consistent with the tool's design language
+- [x] If no data is available, the tag is not shown
+
 ### Non-Goals
 
 - **Azure Cost Management API integration** — we derive costs from token metrics × pricing rates, not from the billing API directly. The billing API requires different permissions (Cost Management Reader), has multi-hour data delay, and doesn't filter by deployment name reliably.

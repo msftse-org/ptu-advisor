@@ -172,33 +172,34 @@ function TpmChart({ charts }: { charts: AnalysisResponse['charts'] }) {
   )
 }
 
-/** Cost curve chart: PAYG vs PTU+Spillover with break-even. */
-function CostCurveChart({ charts, cost }: { charts: AnalysisResponse['charts']; cost: AnalysisResponse['cost_analysis'] }) {
+/** Cost curve chart: PAYG vs PTU+Spillover with break-even (v2: fixed PTU, varying traffic). */
+function CostCurveChart({ charts }: { charts: AnalysisResponse['charts'] }) {
   const cc = charts.cost_curves
-  if (!cc.baseline_tpm.length) return null
+  if (!cc.sustained_tpm.length) return null
 
-  const xMin = Math.min(...cc.baseline_tpm)
-  const xMax = Math.max(...cc.baseline_tpm)
+  const xMin = Math.min(...cc.sustained_tpm)
+  const xMax = Math.max(...cc.sustained_tpm)
   const allY = [...cc.payg_monthly, ...cc.ptu_spill_monthly]
   const yMax = Math.max(...allY) * 1.08
 
   const xScale = makeScale([xMin, xMax], [PAD.left, PAD.left + PLOT_W])
   const yScale = makeScale([0, yMax], [PAD.top + PLOT_H, PAD.top])
 
-  const paygPx = cc.baseline_tpm.map(v => xScale(v))
+  const paygPx = cc.sustained_tpm.map(v => xScale(v))
   const paygPy = cc.payg_monthly.map(v => yScale(v))
   const hybPx = paygPx
   const hybPy = cc.ptu_spill_monthly.map(v => yScale(v))
 
   const yTicks = niceYTicks(0, yMax)
-  const xLabels = pickXLabels(cc.baseline_tpm.length)
+  const xLabels = pickXLabels(cc.sustained_tpm.length)
 
   const beX = cc.break_even_tpm != null ? xScale(cc.break_even_tpm) : null
-  const sliderX = xScale(cc.slider_baseline_tpm)
+  const avgX = cc.avg_tpm > 0 ? xScale(cc.avg_tpm) : null
+  const capX = xScale(cc.ptu_capacity_tpm)
 
   return (
     <div className="report-chart">
-      <h3 className="report-chart-title">Break-even Curve (PAYG vs PTU + Spillover)</h3>
+      <h3 className="report-chart-title">Cost Explorer — Does traffic justify {cc.selected_ptu} PTU?</h3>
       <svg viewBox={`0 0 ${SVG_W} ${SVG_H}`} xmlns="http://www.w3.org/2000/svg" className="report-chart-svg">
         {yTicks.map(t => (
           <g key={t}>
@@ -213,22 +214,31 @@ function CostCurveChart({ charts, cost }: { charts: AnalysisResponse['charts']; 
             <text x={beX} y={PAD.top - 4} textAnchor="middle" fontSize="9" fill="#d83b01">Break-even</text>
           </>
         )}
-        {/* selected baseline vertical */}
-        <line x1={sliderX} x2={sliderX} y1={PAD.top} y2={PAD.top + PLOT_H} stroke="#107c10" strokeDasharray="3 2" strokeWidth="1" />
-        <text x={sliderX} y={PAD.top + PLOT_H + 26} textAnchor="middle" fontSize="9" fill="#107c10">{cost.hybrid.baseline_ptu} PTU</text>
+        {/* PTU capacity vertical (inflection point) */}
+        <line x1={capX} x2={capX} y1={PAD.top} y2={PAD.top + PLOT_H} stroke="#107c10" strokeDasharray="2 2" strokeWidth="1" />
+        <text x={capX} y={PAD.top + PLOT_H + 26} textAnchor="middle" fontSize="9" fill="#107c10">{cc.selected_ptu} PTU capacity</text>
+        {/* Your avg TPM vertical */}
+        {avgX != null && (
+          <>
+            <line x1={avgX} x2={avgX} y1={PAD.top} y2={PAD.top + PLOT_H} stroke="#8b5cf6" strokeDasharray="4 2" strokeWidth="1" />
+            <text x={avgX} y={PAD.top - 4} textAnchor="middle" fontSize="9" fill="#8b5cf6">Your avg TPM</text>
+          </>
+        )}
         {/* PAYG line */}
         <polyline points={polyline(paygPx, paygPy)} fill="none" stroke="#0078d4" strokeWidth="1.5" strokeDasharray="5 4" />
         {/* Hybrid line */}
         <polyline points={polyline(hybPx, hybPy)} fill="none" stroke="#107c10" strokeWidth="1.5" />
         {/* X labels */}
         {xLabels.map(i => (
-          <text key={i} x={xScale(cc.baseline_tpm[i])} y={PAD.top + PLOT_H + 16} textAnchor="middle" fontSize="10" fill="#605e5c">{fmtAxisVal(cc.baseline_tpm[i])}</text>
+          <text key={i} x={xScale(cc.sustained_tpm[i])} y={PAD.top + PLOT_H + 16} textAnchor="middle" fontSize="10" fill="#605e5c">{fmtAxisVal(cc.sustained_tpm[i])}</text>
         ))}
         {/* legend */}
         <line x1={PAD.left + 8} x2={PAD.left + 28} y1={PAD.top + 6} y2={PAD.top + 6} stroke="#0078d4" strokeDasharray="5 4" strokeWidth="1.5" />
         <text x={PAD.left + 32} y={PAD.top + 10} fontSize="10" fill="#605e5c">PAYG</text>
         <line x1={PAD.left + 78} x2={PAD.left + 98} y1={PAD.top + 6} y2={PAD.top + 6} stroke="#107c10" strokeWidth="1.5" />
         <text x={PAD.left + 102} y={PAD.top + 10} fontSize="10" fill="#605e5c">PTU + Spillover</text>
+        {/* X axis label */}
+        <text x={PAD.left + PLOT_W / 2} y={PAD.top + PLOT_H + 36} textAnchor="middle" fontSize="10" fill="#605e5c">Sustained TPM</text>
         {/* Y axis label */}
         <text x={12} y={PAD.top + PLOT_H / 2} textAnchor="middle" fontSize="10" fill="#605e5c" transform={`rotate(-90, 12, ${PAD.top + PLOT_H / 2})`}>$/month</text>
       </svg>
@@ -364,7 +374,7 @@ function ReportContent({ analysis, baseAnalysis, isZoomed }: ExportReportProps) 
         <p className="report-assumptions">
           {cost.pricing.reservation_type} · {cost.pricing.region_display_name} ({cost.pricing.region_multiplier}x) · {cost.pricing.deployment_type_label} · {cost.hybrid.baseline_ptu} PTU baseline
         </p>
-        <CostCurveChart charts={analysis.charts} cost={analysis.cost_analysis} />
+        <CostCurveChart charts={analysis.charts} />
       </section>
 
       {/* 4 — Why This Recommendation */}

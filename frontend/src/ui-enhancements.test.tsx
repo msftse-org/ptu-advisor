@@ -106,14 +106,16 @@ function buildMockResponse(overrides: Record<string, unknown> = {}) {
         values: [15, 22],
       },
       cost_curves: {
-        baseline_tpm: [5000, 10000],
+        sustained_tpm: [5000, 10000],
         payg_monthly: [1800, 3600],
         ptu_spill_monthly: [1700, 2900],
-        ptu_units: [15, 20],
         break_even_tpm: 8200,
-        slider_baseline_tpm: 10000,
-        payg_at_slider: 3600,
-        hybrid_at_slider: 2900,
+        break_even_reason: 'exists' as const,
+        ptu_capacity_tpm: 37500,
+        avg_tpm: 10000,
+        selected_ptu: 15,
+        payg_at_avg: 3600,
+        hybrid_at_avg: 2900,
       },
     },
     cost_analysis: {
@@ -142,6 +144,7 @@ function buildMockResponse(overrides: Record<string, unknown> = {}) {
         baseline_tpm: 10000,
         baseline_ptu: 20,
         default_baseline_ptu: 20,
+        max_viable_baseline_ptu: 45,
         max_baseline_ptu: 100,
         ptu_capacity_tpm: 50000,
         avg_spillover_tpm: 800,
@@ -161,6 +164,12 @@ function buildMockResponse(overrides: Record<string, unknown> = {}) {
         savings_pct: 12.1,
         break_even_tpm: 8200,
         cheaper_strategy: 'PTU + Spillover',
+      },
+      commitment_safety: {
+        savings_margin_pct: 12.1,
+        spillover_pct: 15.0,
+        capacity_coverage_pct: 85.0,
+        safety_verdict: 'safe' as const,
       },
       formula_blocks: {
         payg: 'payg formula block',
@@ -547,18 +556,19 @@ describe('Result banner recommendation class', () => {
    ──────────────────────────────────────────────────── */
 
 describe('Break-even callout', () => {
-  it('shows tone-positive when avg TPM is well above break-even', async () => {
+  it('shows directional economic message when avg TPM is well above break-even', async () => {
     setupMockFetch()
     // Default mock: avg_tpm=12345, break_even_tpm=8200 → ~50% above → positive
     await runDemoAnalysis()
 
-    const callouts = await screen.findAllByText(/above break-even/i)
+    const callouts = await screen.findAllByText(/economic signal favors PTU/i)
     const callout = callouts.find(el => el.classList.contains('break-even-callout'))!
     expect(callout).toBeInTheDocument()
     expect(callout).toHaveClass('tone-positive')
+    expect(callout.textContent).toContain('Safety verdict: Safe')
   })
 
-  it('shows tone-negative when avg TPM is below break-even', async () => {
+  it('shows directional economic message when avg TPM is below break-even', async () => {
     setupMockFetch({
       metrics: {
         ...buildMockResponse().metrics,
@@ -574,9 +584,50 @@ describe('Break-even callout', () => {
     })
     await runDemoAnalysis()
 
-    const callouts = await screen.findAllByText(/below break-even/i)
+    const callouts = await screen.findAllByText(/economic signal favors PAYG/i)
     const callout = callouts.find(el => el.classList.contains('break-even-callout'))!
     expect(callout).toBeInTheDocument()
     expect(callout).toHaveClass('tone-negative')
+  })
+})
+
+describe('Difference summary', () => {
+  it('renders directional savings copy instead of absolute delta only', async () => {
+    setupMockFetch()
+    await runDemoAnalysis()
+
+    expect(await screen.findByText(/PTU saves \$740/i)).toBeInTheDocument()
+  })
+})
+
+describe('Baseline headroom helper', () => {
+  it('shows an explore headroom action when a higher viable PTU exists', async () => {
+    setupMockFetch()
+    await runDemoAnalysis()
+
+    expect(await screen.findByText(/up to 45 PTU still saves more than 5%/i)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /explore headroom/i })).toBeInTheDocument()
+  })
+})
+
+describe('Daily cost total badge', () => {
+  it('renders total from daily_cost data', async () => {
+    setupMockFetch({
+      charts: {
+        ...buildMockResponse().charts,
+        daily_cost: {
+          dates: ['2026-02-01', '2026-02-02', '2026-02-03'],
+          input_cost: [10, 20, 30],
+          output_cost: [5, 10, 15],
+          total_cost: [15, 30, 45],
+          avg_daily_cost: 30,
+          ptu_daily_cost: 100,
+        },
+      },
+    })
+    await runDemoAnalysis()
+
+    const badge = await screen.findByText(/Total: \$90/)
+    expect(badge).toBeInTheDocument()
   })
 })

@@ -1,6 +1,6 @@
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from './echarts-setup'
-import { CHART_COLORS, PTU_CHART_THEME } from './theme'
+import { CHART_COLORS, PTU_CHART_THEME, fmtTooltipDate, fmtNum, makeAxisDateFormatter } from './theme'
 import type { ZoomState } from './use-chart-zoom'
 
 type Props = {
@@ -19,7 +19,17 @@ export function ThrottleChart({ timestamps, throttled, height, zoomState, onData
       ...PTU_CHART_THEME.tooltip,
       trigger: 'axis' as const,
       axisPointer: { type: 'cross' as const, lineStyle: { color: CHART_COLORS.primary, width: 1 } },
-    },
+      appendTo: () => document.body,
+      formatter: (params: Array<{ seriesName: string; value: number; marker: string; axisValue?: string }>) => {
+        if (!Array.isArray(params)) return ''
+        const ts = params[0]?.axisValue ?? ''
+        let result = `<div style="font-weight:600;margin-bottom:4px">${fmtTooltipDate(ts)}</div>`
+        for (const p of params) {
+          result += `<div>${p.marker} ${p.seriesName}: ${fmtNum(p.value)}</div>`
+        }
+        return result
+      },
+    } as Record<string, unknown>,
     legend: {
       ...PTU_CHART_THEME.legend,
       bottom: 36,
@@ -31,6 +41,7 @@ export function ThrottleChart({ timestamps, throttled, height, zoomState, onData
       data: timestamps,
       ...PTU_CHART_THEME.categoryAxis,
       boundaryGap: false,
+      axisLabel: { ...PTU_CHART_THEME.categoryAxis.axisLabel, formatter: makeAxisDateFormatter(timestamps) },
     },
     yAxis: {
       type: 'value' as const,

@@ -13,8 +13,10 @@ from ptu_advisor.auth import get_azure_credential
 from ptu_advisor.config import AnalysisConfig, get_model_config
 from ptu_advisor.cost.calculator import (
     calculate_break_even,
+    calculate_break_even_for_fixed_ptu,
     calculate_spillover_cost,
     generate_cost_curves,
+    generate_cost_curves_fixed_ptu,
 )
 from ptu_advisor.cost.pricing import (
     DEPLOYMENT_TYPE_CONFIGS,
@@ -24,6 +26,7 @@ from ptu_advisor.cost.pricing import (
     get_region_config,
     normalize_region,
 )
+from ptu_advisor.cost.price_resolver import PricingResolver, get_pricing_resolver
 from ptu_advisor.demo import DemoScenario, FOCUS_TOPICS, generate_demo_metrics
 from ptu_advisor.discovery import list_ai_accounts, list_deployments, list_subscriptions
 from ptu_advisor.metrics.collector import MetricsCollector
@@ -48,10 +51,25 @@ class AnalyzeRequest(BaseModel):
         "1-Year Commitment (Estimated 69% off)",
     ] = "Monthly Commitment (Estimated 64% off)"
     baseline_percentile: int = Field(default=75, ge=0, le=95)
-    baseline_ptu: Optional[int] = Field(default=None, ge=0, description="PTU units for slider. When set, overrides baseline_percentile.")
+    baseline_ptu: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="PTU units for slider. When set, overrides baseline_percentile.",
+    )
     region: str = "eastus"
     deployment_type: Literal["global", "data_zone", "regional"] = "global"
     include_throttle: bool = False
+
+    # Pricing overrides (optional — takes highest priority over live/cached/fallback)
+    payg_input_rate_override: Optional[float] = Field(
+        default=None, ge=0, description="Custom PAYG input rate ($ per 1M tokens)"
+    )
+    payg_output_rate_override: Optional[float] = Field(
+        default=None, ge=0, description="Custom PAYG output rate ($ per 1M tokens)"
+    )
+    ptu_hourly_rate_override: Optional[float] = Field(
+        default=None, ge=0, description="Custom PTU hourly rate"
+    )
 
 
 class AnalyzeResponse(BaseModel):
@@ -188,7 +206,9 @@ def _filter_metrics_by_window(
         "ptu_utilization",
     ]:
         series = getattr(metrics, attr_name)
-        setattr(filtered, attr_name, _filter_series_by_window(series, normalized_start, normalized_end))
+        setattr(
+            filtered, attr_name, _filter_series_by_window(series, normalized_start, normalized_end)
+        )
 
     # Prefer token timestamps first, then request timestamps if tokens are unavailable.
     timeline = filtered.tokens_per_minute or filtered.requests_per_minute
@@ -270,7 +290,7 @@ def _build_formula_blocks(
     payg_lines = [
         f"avg_daily_tokens = {avg_tpm:,.0f} TPM × 1,440 min/day = {avg_daily_tokens:,.0f} tokens/day",
         f"monthly_tokens = {avg_daily_tokens:,.0f} × 30 days = {monthly_tokens:,.0f} tokens/month",
-        f"blended_rate = ${payg_input_rate:.2f} × {(1-output_ratio)*100:.0f}% input + ${payg_output_rate:.2f} × {output_ratio*100:.0f}% output = ${payg_blended_rate:.2f}/1M tokens",
+        f"blended_rate = ${payg_input_rate:.2f} × {(1 - output_ratio) * 100:.0f}% input + ${payg_output_rate:.2f} × {output_ratio * 100:.0f}% output = ${payg_blended_rate:.2f}/1M tokens",
         f"payg_cost = {monthly_tokens:,.0f} ÷ 1M × ${payg_blended_rate:.2f} = ${payg_base:,.0f}/month",
     ]
     if include_throttle:
@@ -285,7 +305,7 @@ def _build_formula_blocks(
     # ── Hybrid block ──
     monthly_overflow = avg_daily_overflow * 30
     hybrid_lines = [
-        f"effective_mult = {(1-output_ratio)*100:.0f}% input + {output_ratio*100:.0f}% output × {model_output_multiplier} = {effective_mult:.2f}×",
+        f"effective_mult = {(1 - output_ratio) * 100:.0f}% input + {output_ratio * 100:.0f}% output × {model_output_multiplier} = {effective_mult:.2f}×",
         f"capacity_per_ptu = {input_tpm_per_ptu:,} ÷ {effective_mult:.2f} = {effective_capacity:,.0f} raw TPM/PTU",
         f"ptu_cost = {baseline_ptu} PTU × ${ptu_monthly_rate:,.2f}/PTU/month = ${ptu_baseline_cost:,.0f}/month",
     ]
@@ -316,6 +336,9 @@ def _serialize_analysis(
     deployment_type: str,
     baseline_ptu: Optional[int] = None,
     include_throttle: bool = False,
+    payg_input_rate_override: Optional[float] = None,
+    payg_output_rate_override: Optional[float] = None,
+    ptu_hourly_rate_override: Optional[float] = None,
 ) -> AnalyzeResponse:
     tpm = metrics.tokens_per_minute
     throttled = metrics.throttled_requests
@@ -337,8 +360,18 @@ def _serialize_analysis(
     total_tokens = avg_daily_tokens * max(1, lookback_days)
     monthly_tokens = avg_daily_tokens * 30
 
-    payg_input_rate = 2.50
-    payg_output_rate = 10.0
+    # ── Resolve pricing via layered strategy ─────────────────────────────
+    resolver = get_pricing_resolver()
+    pricing = resolver.resolve(
+        model_name=metrics.model_name,
+        region=region,
+        deployment_type=deployment_type,
+        payg_input_override=payg_input_rate_override,
+        payg_output_override=payg_output_rate_override,
+        ptu_hourly_override=ptu_hourly_rate_override,
+    )
+    payg_input_rate = pricing.payg_input_rate
+    payg_output_rate = pricing.payg_output_rate
     # Derive output ratio from actual prompt vs completion data
     prompt_total = float(prompt.total) if prompt else 0.0
     completion_total = float(completion.total) if completion else 0.0
@@ -368,7 +401,9 @@ def _serialize_analysis(
     region_cfg = get_region_config(region)
     deployment_cfg = get_deployment_config(deployment_type)
     deployment_kind = get_deployment_type(deployment_type)
-    ptu_hourly = deployment_cfg.base_hourly_rate * region_cfg.multiplier
+    # Use the resolved PTU hourly rate (live/cached/fallback/manual)
+    # instead of the old base_hourly_rate * multiplier formula
+    ptu_hourly = pricing.ptu_hourly_rate
     ptu_increment = deployment_cfg.increment
     min_ptu = deployment_cfg.default_min_ptu
     term = _pricing_terms(reservation_type)
@@ -400,7 +435,9 @@ def _serialize_analysis(
     spillover_pct = float(spillover["spillover_pct"])
     avg_spillover_tpm = float(spillover["avg_spillover_tpm"])
 
-    ptu_needed_full = max(min_ptu, int((peak_tpm * 1.2 / ptu_capacity) + 0.5)) if peak_tpm > 0 else min_ptu
+    ptu_needed_full = (
+        max(min_ptu, int((peak_tpm * 1.2 / ptu_capacity) + 0.5)) if peak_tpm > 0 else min_ptu
+    )
     ptu_needed_full = ((ptu_needed_full + (ptu_increment - 1)) // ptu_increment) * ptu_increment
     ptu_monthly_full = ptu_needed_full * ptu_hourly * 24 * 30
     ptu_committed_cost = ptu_monthly_full * reservation_discount
@@ -408,75 +445,49 @@ def _serialize_analysis(
     savings = payg_total - hybrid_total
     savings_pct = (savings / payg_total * 100) if payg_total > 0 else 0.0
 
-    break_even_tpm = calculate_break_even(
+    # v2: Fixed-PTU break-even — analytical solution
+    break_even_tpm = calculate_break_even_for_fixed_ptu(
+        selected_ptu=baseline_ptu,
         ptu_capacity_per_unit=ptu_capacity,
         ptu_hourly_rate=ptu_hourly,
         payg_blended_rate=payg_blended_rate,
         reservation_discount=reservation_discount,
-        min_ptu=min_ptu,
-        ptu_increment=ptu_increment,
-        max_search_tpm=max(peak_tpm * 3, 100_000) if peak_tpm > 0 else 200_000,
     )
 
-    cost_curves_df = generate_cost_curves(
-        tpm_values=tpm_values,
-        ptu_capacity_per_unit=ptu_capacity,
-        ptu_hourly_rate=ptu_hourly,
-        payg_blended_rate=payg_blended_rate,
-        payg_rate_per_1k=payg_rate_per_1k,
-        reservation_discount=reservation_discount,
-        min_ptu=min_ptu,
-        ptu_increment=ptu_increment,
-        include_tpm=baseline_tpm,
-    )
-
-    # Derive chart-consistent break-even from the generated cost curves
-    # (PAYG and PTU+spillover lines used in the frontend chart).
-    curve_break_even_tpm: Optional[float] = None
-    if not cost_curves_df.empty:
-        diff = cost_curves_df["payg_monthly"] - cost_curves_df["ptu_spill_monthly"]
-        for idx in range(1, len(cost_curves_df)):
-            prev_diff = float(diff.iloc[idx - 1])
-            curr_diff = float(diff.iloc[idx])
-            if prev_diff < 0 <= curr_diff:
-                prev_x = float(cost_curves_df["baseline_tpm"].iloc[idx - 1])
-                curr_x = float(cost_curves_df["baseline_tpm"].iloc[idx])
-                if curr_diff == prev_diff:
-                    curve_break_even_tpm = curr_x
-                else:
-                    ratio = abs(prev_diff) / (abs(prev_diff) + abs(curr_diff))
-                    curve_break_even_tpm = prev_x + (curr_x - prev_x) * ratio
-                break
-
-    if curve_break_even_tpm and curve_break_even_tpm > 0:
-        break_even_tpm = curve_break_even_tpm
-
-    payg_at_slider = baseline_tpm * 43_200 / 1_000_000 * payg_blended_rate
-
-    if break_even_tpm and break_even_tpm > 0 and avg_tpm > 0:
-        distance_pct = ((avg_tpm - break_even_tpm) / break_even_tpm) * 100
-        if distance_pct > 10:
-            break_even_message = (
-                f"Your average TPM ({avg_tpm:,.0f}) is {distance_pct:.0f}% above break-even "
-                f"({break_even_tpm:,.0f} TPM). PTU is cost-effective at current usage."
-            )
-        elif distance_pct >= -10:
-            break_even_message = (
-                f"Your average TPM ({avg_tpm:,.0f}) is near break-even ({break_even_tpm:,.0f} TPM). "
-                "Small usage changes can tip the decision."
-            )
-        else:
-            break_even_message = (
-                f"Your average TPM ({avg_tpm:,.0f}) is {abs(distance_pct):.0f}% below break-even "
-                f"({break_even_tpm:,.0f} TPM). PAYG is currently more cost-effective."
-            )
+    # Determine break-even reason for distinct messaging (PRD §5):
+    # - "exists": break-even TPM is within PTU capacity (normal case)
+    # - "ptu_always_more_expensive": flat_break_even > ptu_capacity (PTU never pays off)
+    # - "ptu_always_cheaper": degenerate case (ptu_fixed ≈ 0 or rate ≈ 0)
+    if break_even_tpm is not None:
+        break_even_reason = "exists"
+    elif payg_blended_rate > 0 and ptu_hourly > 0:
+        break_even_reason = "ptu_always_more_expensive"
     else:
-        break_even_message = "Break-even was not reached in the evaluated range for the selected pricing term."
+        break_even_reason = "ptu_always_cheaper"
+
+    # v2: Cost curves with fixed PTU, varying traffic on X-axis
+    curve_max_tpm = (
+        max(peak_tpm * 2, avg_tpm * 3, ptu_capacity_tpm * 2, 100_000) if peak_tpm > 0 else 200_000
+    )
+    cost_curves_df = generate_cost_curves_fixed_ptu(
+        selected_ptu=baseline_ptu,
+        ptu_capacity_per_unit=ptu_capacity,
+        ptu_hourly_rate=ptu_hourly,
+        payg_blended_rate=payg_blended_rate,
+        reservation_discount=reservation_discount,
+        max_tpm=curve_max_tpm,
+    )
+
+    payg_at_avg = avg_tpm * 43_200 / 1_000_000 * payg_blended_rate
 
     token_timestamps = (
         [ts.isoformat() for ts in prompt.timestamps]
         if prompt and prompt.timestamps
-        else ([ts.isoformat() for ts in completion.timestamps] if completion and completion.timestamps else [])
+        else (
+            [ts.isoformat() for ts in completion.timestamps]
+            if completion and completion.timestamps
+            else []
+        )
     )
 
     token_total_values: List[float] = []
@@ -488,7 +499,11 @@ def _serialize_analysis(
     requests_timestamps = (
         [ts.isoformat() for ts in successful.timestamps]
         if successful and successful.timestamps
-        else ([ts.isoformat() for ts in throttled.timestamps] if throttled and throttled.timestamps else [])
+        else (
+            [ts.isoformat() for ts in throttled.timestamps]
+            if throttled and throttled.timestamps
+            else []
+        )
     )
 
     request_total_values: List[float] = []
@@ -521,56 +536,56 @@ def _serialize_analysis(
 
     # total_tokens already computed above from actual fetched data
 
-    # ── Default PTU for slider (break-even-guided and recommendation-focused) ──
-    if tpm_values:
-        p25_tpm = float(np.percentile(tpm_values, 25))
-        p25_raw = p25_tpm / ptu_capacity
-        default_baseline_ptu = max(min_ptu, int(
-            np.ceil(p25_raw / ptu_increment) * ptu_increment
-        ))
-    else:
-        default_baseline_ptu = min_ptu
+    # ── Default PTU for slider (recommendation-aware) ──────────────────
+    # Strategy:
+    #   PTU recommended / borderline → max PTU that still saves > 5%
+    #   PTU NOT recommended          → min PTU (so break-even chart
+    #                                   shows what traffic level is needed)
+    default_baseline_ptu = min_ptu  # fallback
 
-    if break_even_tpm and break_even_tpm > 0:
-        be_ptu_raw = break_even_tpm / ptu_capacity
-        break_even_ptu = max(min_ptu, int(
-            np.ceil(be_ptu_raw / ptu_increment) * ptu_increment
-        ))
+    if payg_total > 0 and tpm_values:
+        # Upper bound for the sweep: enough PTU to cover P99 × 1.3
+        p99_tpm_sweep = float(np.percentile(tpm_values, 99))
+        sweep_ceiling_raw = p99_tpm_sweep * 1.3 / ptu_capacity
+        sweep_ceiling = max(
+            min_ptu, int(np.ceil(sweep_ceiling_raw / ptu_increment) * ptu_increment)
+        )
 
-        # Start from break-even PTU, then search up to break-even for the
-        # best recommendation-friendly baseline (prefer savings > 5%).
-        default_baseline_ptu = break_even_ptu
+        # Walk from min_ptu up to sweep_ceiling and track the lowest-cost
+        # PTU value that still delivers > 5% savings.
+        best_positive_ptu: Optional[int] = None
+        best_positive_hybrid: Optional[float] = None
+        max_positive_ptu: Optional[int] = None
 
-        if payg_total > 0 and tpm_values:
-            best_positive: Optional[tuple[int, float]] = None
-            best_any: Optional[tuple[int, float]] = None
+        for candidate_ptu in range(min_ptu, sweep_ceiling + ptu_increment, ptu_increment):
+            candidate = calculate_spillover_cost(
+                tpm_values=tpm_values,
+                baseline_percentile=baseline_percentile,
+                ptu_capacity_per_unit=ptu_capacity,
+                ptu_hourly_rate=ptu_hourly,
+                payg_rate_per_1k=payg_rate_per_1k,
+                reservation_discount=reservation_discount,
+                baseline_ptu_override=candidate_ptu,
+                min_ptu=min_ptu,
+                ptu_increment=ptu_increment,
+            )
+            candidate_hybrid = float(candidate["total_hybrid_cost"])
+            candidate_savings_pct = ((payg_total - candidate_hybrid) / payg_total) * 100
 
-            for candidate_ptu in range(min_ptu, break_even_ptu + ptu_increment, ptu_increment):
-                candidate = calculate_spillover_cost(
-                    tpm_values=tpm_values,
-                    baseline_percentile=baseline_percentile,
-                    ptu_capacity_per_unit=ptu_capacity,
-                    ptu_hourly_rate=ptu_hourly,
-                    payg_rate_per_1k=payg_rate_per_1k,
-                    reservation_discount=reservation_discount,
-                    baseline_ptu_override=candidate_ptu,
-                    min_ptu=min_ptu,
-                    ptu_increment=ptu_increment,
-                )
-                candidate_hybrid = float(candidate["total_hybrid_cost"])
-                candidate_savings_pct = ((payg_total - candidate_hybrid) / payg_total) * 100
+            if candidate_savings_pct > 5 and (
+                best_positive_hybrid is None or candidate_hybrid < best_positive_hybrid
+            ):
+                best_positive_ptu = candidate_ptu
+                best_positive_hybrid = candidate_hybrid
+            if candidate_savings_pct > 5:
+                max_positive_ptu = candidate_ptu
 
-                if best_any is None or candidate_savings_pct > best_any[1]:
-                    best_any = (candidate_ptu, candidate_savings_pct)
-                if candidate_savings_pct > 5 and (
-                    best_positive is None or candidate_savings_pct > best_positive[1]
-                ):
-                    best_positive = (candidate_ptu, candidate_savings_pct)
-
-            if best_positive is not None:
-                default_baseline_ptu = best_positive[0]
-            elif best_any is not None:
-                default_baseline_ptu = best_any[0]
+        if best_positive_ptu is not None:
+            # PTU is cost-effective → default to the clearest economical
+            # starting point rather than the largest viable commitment.
+            default_baseline_ptu = best_positive_ptu
+        # else: no PTU level saves > 5% → keep min_ptu so user sees the
+        # break-even threshold for the smallest possible commitment
 
     # Max PTU for slider range (P99 × 1.3 worth of PTU, minimum 2× default)
     if tpm_values:
@@ -582,6 +597,8 @@ def _serialize_analysis(
         )
     else:
         max_baseline_ptu = default_baseline_ptu * 4
+
+    max_viable_baseline_ptu = max_positive_ptu if payg_total > 0 else None
 
     # If caller didn't specify baseline PTU, evaluate Financial Decision using
     # the computed default baseline so first render is recommendation-focused.
@@ -610,8 +627,6 @@ def _serialize_analysis(
 
         savings = payg_total - hybrid_total
         savings_pct = (savings / payg_total * 100) if payg_total > 0 else 0.0
-        payg_at_slider = baseline_tpm * 43_200 / 1_000_000 * payg_blended_rate
-
     # ── Cost-driven recommendation (reacts to slider PTU value) ──────────
     if payg_total > 0 and hybrid_total > 0:
         cost_savings_pct = savings_pct  # already (payg - hybrid) / payg * 100
@@ -625,10 +640,56 @@ def _serialize_analysis(
         # Fall back to engine recommendation when costs can't be compared
         cost_recommendation = str(analysis.recommendation.value)
 
+    # ── Commitment Safety metrics (Layer E) ─────────────────────────────
+    savings_margin_pct = float(savings_pct)  # already (payg - hybrid) / payg * 100
+    capacity_coverage_pct = 100.0 - spillover_pct  # % of intervals fitting in PTU
+    # Determine safety verdict (thresholds per PRD §3.1.1)
+    if savings_margin_pct <= 0:
+        safety_verdict = "not_justified"
+    elif savings_margin_pct < 5 or spillover_pct > 25 or capacity_coverage_pct < 75:
+        safety_verdict = "efficient_but_risky"
+    else:
+        safety_verdict = "safe"
+
+    if break_even_tpm and break_even_tpm > 0 and avg_tpm > 0:
+        distance_pct = ((avg_tpm - break_even_tpm) / break_even_tpm) * 100
+        if distance_pct > 10:
+            break_even_message = (
+                f"Economic break-even for {baseline_ptu} PTU is {break_even_tpm:,.0f} TPM. "
+                f"Your average TPM ({avg_tpm:,.0f}) is {distance_pct:.0f}% above that threshold, "
+                f"so the economic signal favors PTU. Final recommendation: {cost_recommendation.replace('_', ' ')} "
+                f"with safety verdict '{safety_verdict}'."
+            )
+        elif distance_pct >= -10:
+            break_even_message = (
+                f"Economic break-even for {baseline_ptu} PTU is {break_even_tpm:,.0f} TPM. "
+                f"Your average TPM ({avg_tpm:,.0f}) is near that threshold, so the economic signal is marginal. "
+                f"Final recommendation: {cost_recommendation.replace('_', ' ')} with safety verdict '{safety_verdict}'."
+            )
+        else:
+            break_even_message = (
+                f"Economic break-even for {baseline_ptu} PTU is {break_even_tpm:,.0f} TPM. "
+                f"Your average TPM ({avg_tpm:,.0f}) is {abs(distance_pct):.0f}% below that threshold, "
+                f"so the economic signal favors PAYG. Final recommendation: {cost_recommendation.replace('_', ' ')} "
+                f"with safety verdict '{safety_verdict}'."
+            )
+    elif break_even_reason == "ptu_always_cheaper":
+        break_even_message = (
+            f"PTU is cheaper than PAYG at all usage levels for {baseline_ptu} PTU. "
+            f"Final recommendation: {cost_recommendation.replace('_', ' ')} with safety verdict '{safety_verdict}'."
+        )
+    else:
+        # ptu_always_more_expensive (PRD §5 row 1)
+        break_even_message = (
+            f"No economic break-even exists for {baseline_ptu} PTU within the no-spillover range. "
+            f"At your usage level, PAYG is more cost-effective for this commitment size. "
+            f"Final recommendation: {cost_recommendation.replace('_', ' ')} with safety verdict '{safety_verdict}'."
+        )
+
     # ── Financial-decision-aware narratives and dimensions ───────────────
     break_even_distance_pct = 0.0
-    if break_even_tpm and break_even_tpm > 0 and baseline_tpm > 0:
-        break_even_distance_pct = ((baseline_tpm - break_even_tpm) / break_even_tpm) * 100
+    if break_even_tpm and break_even_tpm > 0 and avg_tpm > 0:
+        break_even_distance_pct = ((avg_tpm - break_even_tpm) / break_even_tpm) * 100
 
     selected_context = (
         f"Selected baseline: {baseline_ptu} PTU ({baseline_tpm:,.0f} TPM), "
@@ -677,8 +738,12 @@ def _serialize_analysis(
 
     dynamic_confidence = float(min(0.98, max(0.55, 0.55 + (abs(savings_pct) / 100))))
 
-    financial_score = "positive" if savings_pct > 5 else ("negative" if savings_pct < -5 else "neutral")
-    spillover_score = "positive" if spillover_pct <= 20 else ("negative" if spillover_pct >= 40 else "neutral")
+    financial_score = (
+        "positive" if savings_pct > 5 else ("negative" if savings_pct < -5 else "neutral")
+    )
+    spillover_score = (
+        "positive" if spillover_pct <= 20 else ("negative" if spillover_pct >= 40 else "neutral")
+    )
 
     enriched_dimensions: List[Dict[str, Any]] = []
     for dim in dimensions:
@@ -791,18 +856,30 @@ def _serialize_analysis(
                 "p95": float(tpm.p95) if tpm else 0.0,
             },
             "throttling": {
-                "timestamps": [ts.isoformat() for ts in (throttled.timestamps if throttled else [])],
+                "timestamps": [
+                    ts.isoformat() for ts in (throttled.timestamps if throttled else [])
+                ],
                 "values": [float(v) for v in (throttled.values if throttled else [])],
             },
             "cost_curves": {
-                "baseline_tpm": [float(v) for v in cost_curves_df["baseline_tpm"].tolist()] if not cost_curves_df.empty else [],
-                "payg_monthly": [float(v) for v in cost_curves_df["payg_monthly"].tolist()] if not cost_curves_df.empty else [],
-                "ptu_spill_monthly": [float(v) for v in cost_curves_df["ptu_spill_monthly"].tolist()] if not cost_curves_df.empty else [],
-                "ptu_units": [int(v) for v in cost_curves_df["ptu_units"].tolist()] if not cost_curves_df.empty else [],
+                "sustained_tpm": [float(v) for v in cost_curves_df["sustained_tpm"].tolist()]
+                if not cost_curves_df.empty
+                else [],
+                "payg_monthly": [float(v) for v in cost_curves_df["payg_monthly"].tolist()]
+                if not cost_curves_df.empty
+                else [],
+                "ptu_spill_monthly": [
+                    float(v) for v in cost_curves_df["ptu_spill_monthly"].tolist()
+                ]
+                if not cost_curves_df.empty
+                else [],
                 "break_even_tpm": float(break_even_tpm) if break_even_tpm else None,
-                "slider_baseline_tpm": baseline_tpm,
-                "payg_at_slider": float(payg_at_slider),
-                "hybrid_at_slider": float(hybrid_total),
+                "break_even_reason": break_even_reason,
+                "ptu_capacity_tpm": float(ptu_capacity_tpm),
+                "avg_tpm": float(avg_tpm),
+                "selected_ptu": baseline_ptu,
+                "payg_at_avg": float(payg_at_avg),
+                "hybrid_at_avg": float(hybrid_total),
             },
         },
         cost_analysis={
@@ -826,6 +903,9 @@ def _serialize_analysis(
                 "effective_mult": round(effective_mult, 4),
                 "ptu_increment": ptu_increment,
                 "ptu_minimum": min_ptu,
+                "pricing_source": pricing.source,
+                "pricing_as_of": pricing.as_of.isoformat(),
+                "pricing_currency": pricing.currency,
             },
             "payg": {
                 "monthly_tokens": float(monthly_tokens),
@@ -839,6 +919,9 @@ def _serialize_analysis(
                 "baseline_tpm": baseline_tpm,
                 "baseline_ptu": baseline_ptu,
                 "default_baseline_ptu": default_baseline_ptu,
+                "max_viable_baseline_ptu": int(max_viable_baseline_ptu)
+                if max_viable_baseline_ptu is not None
+                else None,
                 "max_baseline_ptu": max_baseline_ptu,
                 "ptu_capacity_tpm": ptu_capacity_tpm,
                 "avg_spillover_tpm": avg_spillover_tpm,
@@ -858,6 +941,12 @@ def _serialize_analysis(
                 "savings_pct": float(savings_pct),
                 "break_even_tpm": float(break_even_tpm) if break_even_tpm else None,
                 "cheaper_strategy": "PTU + Spillover" if savings > 0 else "PAYG",
+            },
+            "commitment_safety": {
+                "savings_margin_pct": round(savings_margin_pct, 1),
+                "spillover_pct": round(spillover_pct, 1),
+                "capacity_coverage_pct": round(capacity_coverage_pct, 1),
+                "safety_verdict": safety_verdict,
             },
             "formula_blocks": _build_formula_blocks(
                 avg_tpm=avg_tpm,
@@ -892,7 +981,16 @@ def _serialize_analysis(
                 "PTU + spillover sizes baseline capacity and overflows peak traffic to PAYG.",
                 "Throttling above 1% usually indicates capacity pressure affecting reliability.",
                 "Stable utilization patterns improve PTU ROI.",
-            ],
+            ]
+            + (
+                [
+                    "High usage variance (CV > 1.5) means spillover costs remain significant "
+                    "even at high baselines. Consider whether your workload shape is predictable "
+                    "enough for a PTU commitment."
+                ]
+                if tpm_values and avg_tpm > 0 and float(np.std(tpm_values)) / avg_tpm > 1.5
+                else []
+            ),
         },
     )
 
@@ -905,8 +1003,7 @@ def health() -> Dict[str, str]:
 @app.get("/api/focus-topics")
 def focus_topics() -> List[Dict[str, str]]:
     return [
-        {"name": name, "tagline": data.get("tagline", "")}
-        for name, data in FOCUS_TOPICS.items()
+        {"name": name, "tagline": data.get("tagline", "")} for name, data in FOCUS_TOPICS.items()
     ]
 
 
@@ -1019,10 +1116,16 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             deployment_type=payload.deployment_type,
             baseline_ptu=payload.baseline_ptu,
             include_throttle=payload.include_throttle,
+            payg_input_rate_override=payload.payg_input_rate_override,
+            payg_output_rate_override=payload.payg_output_rate_override,
+            ptu_hourly_rate_override=payload.ptu_hourly_rate_override,
         )
 
     if not payload.subscription_id or not payload.resource_group or not payload.workspace:
-        raise HTTPException(status_code=400, detail="subscription_id, resource_group, and workspace are required in live mode")
+        raise HTTPException(
+            status_code=400,
+            detail="subscription_id, resource_group, and workspace are required in live mode",
+        )
 
     if not payload.deployment:
         raise HTTPException(status_code=400, detail="deployment is required in live mode")
@@ -1110,6 +1213,9 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         deployment_type=payload.deployment_type,
         baseline_ptu=payload.baseline_ptu,
         include_throttle=payload.include_throttle,
+        payg_input_rate_override=payload.payg_input_rate_override,
+        payg_output_rate_override=payload.payg_output_rate_override,
+        ptu_hourly_rate_override=payload.ptu_hourly_rate_override,
     )
 
 

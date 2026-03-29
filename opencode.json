@@ -1,0 +1,45 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "skill": {
+      "sdlc-orchestrator": "allow",
+      "gemini-cli": "allow",
+      "copilot-cli": "allow",
+      "claude-code": "allow",
+      "aider": "allow",
+      "kimi-cli": "allow",
+      "cursor-cli": "allow"
+    }
+  },
+  "command": {
+    "delegate-gemini-cli": {
+      "template": "Load the \"gemini-cli\" skill and delegate the following task to Gemini CLI: $ARGUMENTS",
+      "description": "Delegate a task to Gemini CLI (not installed)"
+    },
+    "delegate-copilot-cli": {
+      "template": "Load the \"copilot-cli\" skill and delegate the following task to GitHub Copilot CLI: $ARGUMENTS",
+      "description": "Delegate a task to GitHub Copilot CLI"
+    },
+    "delegate-claude-code": {
+      "template": "Load the \"claude-code\" skill and delegate the following task to Claude Code: $ARGUMENTS",
+      "description": "Delegate a task to Claude Code (not installed)"
+    },
+    "delegate-aider": {
+      "template": "Load the \"aider\" skill and delegate the following task to Aider: $ARGUMENTS",
+      "description": "Delegate a task to Aider (not installed)"
+    },
+    "delegate-kimi-cli": {
+      "template": "Load the \"kimi-cli\" skill and delegate the following task to Kimi CLI: $ARGUMENTS",
+      "description": "Delegate a task to Kimi CLI (not installed)"
+    },
+    "delegate-cursor-cli": {
+      "template": "Load the \"cursor-cli\" skill and delegate the following task to Cursor CLI: $ARGUMENTS",
+      "description": "Delegate a task to Cursor CLI (not installed)"
+    },
+    "delegate": {
+      "template": "Load the \"sdlc-orchestrator\" skill. Based on the task type, choose the best sub-agent CLI and delegate: $ARGUMENTS",
+      "description": "Auto-route a task to the best available sub-agent CLI"
+    }
+  },
+  "instructions": []
+}
