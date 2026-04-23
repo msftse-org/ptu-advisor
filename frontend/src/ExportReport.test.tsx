@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ExportReport } from './ExportReport'
-import type { AnalysisResponse } from './types'
+import type { AnalysisResponse, ConsolidationSummary } from './types'
 
 /* ── Shared mock data ── */
 
@@ -436,5 +436,337 @@ describe('Edge cases', () => {
     const root = within(report)
 
     expect(root.queryByText('Break-even TPM')).not.toBeInTheDocument()
+  })
+})
+
+/* ────────────────────────────────────────────────────
+   Consolidation export
+   ──────────────────────────────────────────────────── */
+
+function buildConsolidationSummary(): ConsolidationSummary {
+  return {
+    deployment_count: 3,
+    model_name: 'gpt-4o',
+    deployment_type: 'Standard',
+    individual_deployments: [
+      { name: 'gpt-4o-customer-chat', avg_tpm: 18000, peak_tpm: 35000, throttling_rate_pct: 6.1, total_requests: 120000, latency_p50: 180, latency_p95: 290, payg_monthly_cost: 5200 },
+      { name: 'gpt-4o-doc-processing', avg_tpm: 14000, peak_tpm: 28000, throttling_rate_pct: 3.5, total_requests: 80000, latency_p50: 200, latency_p95: 350, payg_monthly_cost: 3800 },
+      { name: 'gpt-4o-batch-analytics', avg_tpm: 10300, peak_tpm: 15500, throttling_rate_pct: 1.2, total_requests: 50000, latency_p50: 250, latency_p95: 400, payg_monthly_cost: 3450 },
+    ],
+    combined_avg_tpm: 42300,
+    combined_peak_tpm: 78500,
+    combined_throttling_rate_pct: 3.9,
+    individual_payg_total: 12450,
+    consolidated_hybrid_cost: 8200,
+    savings: 4250,
+    savings_pct: 34.1,
+    warnings: [],
+    all_on_ptu: false,
+  }
+}
+
+describe('Consolidation export — report content', () => {
+  it('renders consolidation header and mode label', () => {
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={buildConsolidationSummary()}
+      />,
+    )
+
+    const report = document.getElementById('export-report-root')!
+    const root = within(report)
+
+    expect(root.getByText('PTU Advisor — Consolidation Assessment')).toBeInTheDocument()
+    expect(root.getByText(/Consolidation \(3 deployments\)/)).toBeInTheDocument()
+    expect(root.getByText(/gpt-4o-customer-chat, gpt-4o-doc-processing, gpt-4o-batch-analytics/)).toBeInTheDocument()
+  })
+
+  it('renders consolidation summary table with all deployments', () => {
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={buildConsolidationSummary()}
+      />,
+    )
+
+    const report = document.getElementById('export-report-root')!
+    const root = within(report)
+
+    expect(root.getByText('2. Consolidation Summary')).toBeInTheDocument()
+    expect(root.getByText('gpt-4o-customer-chat')).toBeInTheDocument()
+    expect(root.getByText('gpt-4o-doc-processing')).toBeInTheDocument()
+    expect(root.getByText('gpt-4o-batch-analytics')).toBeInTheDocument()
+  })
+
+  it('renders combined totals row in consolidation table', () => {
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={buildConsolidationSummary()}
+      />,
+    )
+
+    const totalRow = document.querySelector('.consolidation-total-row')!
+    expect(totalRow).toBeInTheDocument()
+    expect(totalRow.textContent).toContain('Combined')
+    expect(totalRow.textContent).toContain('42,300')
+    expect(totalRow.textContent).toContain('78,500')
+  })
+
+  it('renders consolidation savings summary text', () => {
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={buildConsolidationSummary()}
+      />,
+    )
+
+    const report = document.getElementById('export-report-root')!
+    const root = within(report)
+
+    expect(root.getByText(/saves an estimated \$4,250\/month \(34\.1%\)/)).toBeInTheDocument()
+  })
+
+  it('renders negative savings message when consolidation does not save', () => {
+    const summary = buildConsolidationSummary()
+    summary.savings = -500
+    summary.savings_pct = -4.0
+
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={summary}
+      />,
+    )
+
+    const report = document.getElementById('export-report-root')!
+    const root = within(report)
+
+    expect(root.getByText(/does not save money/)).toBeInTheDocument()
+    expect(root.getByText(/\$500\/month/)).toBeInTheDocument()
+  })
+
+  it('shifts section numbers when consolidation is present', () => {
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={buildConsolidationSummary()}
+      />,
+    )
+
+    const report = document.getElementById('export-report-root')!
+    const root = within(report)
+
+    // Section numbering: 1. Recommendation, 2. Consolidation Summary, 3. Key Evidence, 4. Cost Comparison, etc.
+    expect(root.getByText('1. Recommendation')).toBeInTheDocument()
+    expect(root.getByText('2. Consolidation Summary')).toBeInTheDocument()
+    expect(root.getByText(/3\. Key Evidence/)).toBeInTheDocument()
+    expect(root.getByText(/4\. Cost Comparison/)).toBeInTheDocument()
+    expect(root.getByText(/5\. Why This Recommendation/)).toBeInTheDocument()
+    expect(root.getByText(/6\. What Would Change This/)).toBeInTheDocument()
+    expect(root.getByText(/7\. Recommended Next Steps/)).toBeInTheDocument()
+  })
+
+  it('uses standard section numbers without consolidation', () => {
+    render(<ExportReport analysis={buildAnalysis()} baseAnalysis={null} isZoomed={false} />)
+
+    const report = document.getElementById('export-report-root')!
+    const root = within(report)
+
+    expect(root.getByText('1. Recommendation')).toBeInTheDocument()
+    expect(root.queryByText('2. Consolidation Summary')).not.toBeInTheDocument()
+    expect(root.getByText(/2\. Key Evidence/)).toBeInTheDocument()
+    expect(root.getByText(/3\. Cost Comparison/)).toBeInTheDocument()
+  })
+
+  it('renders consolidation cost comparison (individual PAYG vs consolidated hybrid)', () => {
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={buildConsolidationSummary()}
+      />,
+    )
+
+    const report = document.getElementById('export-report-root')!
+    const root = within(report)
+
+    expect(root.getByText('Sum of Individual PAYG')).toBeInTheDocument()
+    expect(root.getByText('Consolidated PTU + Spillover')).toBeInTheDocument()
+  })
+})
+
+describe('Consolidation export — filename and HTML title', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('uses consolidation filename prefix on HTML download', () => {
+    const createObjectURL = vi.fn(() => 'blob:mock')
+    const revokeObjectURL = vi.fn()
+    global.URL.createObjectURL = createObjectURL
+    global.URL.revokeObjectURL = revokeObjectURL
+
+    // Capture the <a> element to verify filename
+    const appendSpy = vi.spyOn(document.body, 'appendChild')
+
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={buildConsolidationSummary()}
+      />,
+    )
+
+    fireEvent.click(screen.getByText('Export Report ▾'))
+    fireEvent.click(screen.getByText('Download HTML'))
+
+    const anchor = appendSpy.mock.calls.find(
+      (call) => call[0] instanceof HTMLAnchorElement,
+    )?.[0] as HTMLAnchorElement | undefined
+
+    expect(anchor).toBeDefined()
+    expect(anchor!.download).toContain('ptu-consolidation')
+    expect(anchor!.download).toContain('gpt-4o')
+    expect(anchor!.download).toContain('3deps')
+    expect(anchor!.download).not.toContain('ptu-assessment')
+
+    appendSpy.mockRestore()
+    vi.advanceTimersByTime(1000)
+  })
+
+  it('uses standard filename for single-deployment HTML download', () => {
+    const createObjectURL = vi.fn(() => 'blob:mock')
+    const revokeObjectURL = vi.fn()
+    global.URL.createObjectURL = createObjectURL
+    global.URL.revokeObjectURL = revokeObjectURL
+
+    const appendSpy = vi.spyOn(document.body, 'appendChild')
+
+    render(<ExportReport analysis={buildAnalysis()} baseAnalysis={null} isZoomed={false} />)
+
+    fireEvent.click(screen.getByText('Export Report ▾'))
+    fireEvent.click(screen.getByText('Download HTML'))
+
+    const anchor = appendSpy.mock.calls.find(
+      (call) => call[0] instanceof HTMLAnchorElement,
+    )?.[0] as HTMLAnchorElement | undefined
+
+    expect(anchor).toBeDefined()
+    expect(anchor!.download).toContain('ptu-assessment')
+    expect(anchor!.download).toContain('gpt-4o-2024-11-20')
+    expect(anchor!.download).not.toContain('ptu-consolidation')
+
+    appendSpy.mockRestore()
+    vi.advanceTimersByTime(1000)
+  })
+})
+
+describe('Consolidation export — warnings and all_on_ptu', () => {
+  it('renders consolidation warnings in the report', () => {
+    const summary = buildConsolidationSummary()
+    summary.warnings = [
+      "Deployment 'dep-late' has no data for 03/24–03/27. Consolidation will treat missing periods as 0 TPM.",
+    ]
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={summary}
+      />,
+    )
+    const report = document.getElementById('export-report-root')!
+    const root = within(report)
+    expect(root.getByText(/dep-late/)).toBeInTheDocument()
+    expect(root.getByText(/0 TPM/)).toBeInTheDocument()
+  })
+
+  it('does not render warnings section when warnings array is empty', () => {
+    const summary = buildConsolidationSummary()
+    summary.warnings = []
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={summary}
+      />,
+    )
+    expect(document.querySelector('[data-testid="report-consolidation-warnings"]')).toBeNull()
+  })
+
+  it('renders all_on_ptu savings messaging variant', () => {
+    const summary = buildConsolidationSummary()
+    summary.all_on_ptu = true
+    summary.warnings = [
+      "All selected deployments already use PTU (ProvisionedManaged). This analysis shows what their combined PAYG cost would be vs the current PTU spend.",
+    ]
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={summary}
+      />,
+    )
+    const report = document.getElementById('export-report-root')!
+    const root = within(report)
+    // all_on_ptu variant with positive savings — summary text uses "already use PTU"
+    // and the warning also mentions PTU, so use getAllByText
+    const ptuTexts = root.getAllByText(/already use PTU/)
+    expect(ptuTexts.length).toBeGreaterThanOrEqual(1)
+    expect(root.getByText(/single PTU allocation/)).toBeInTheDocument()
+  })
+
+  it('renders all_on_ptu negative savings messaging variant', () => {
+    const summary = buildConsolidationSummary()
+    summary.all_on_ptu = true
+    summary.savings = -500
+    summary.savings_pct = -4.0
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={summary}
+      />,
+    )
+    const report = document.getElementById('export-report-root')!
+    const root = within(report)
+    expect(root.getByText(/already use PTU/)).toBeInTheDocument()
+    expect(root.getByText(/already cost-effective/)).toBeInTheDocument()
+  })
+
+  it('renders multiple warnings', () => {
+    const summary = buildConsolidationSummary()
+    summary.warnings = [
+      "Deployment 'dep-a' has no data for 03/24–03/27. Consolidation will treat missing periods as 0 TPM.",
+      "Deployment 'dep-b' has no data for 03/29–03/31. Consolidation will treat missing periods as 0 TPM.",
+    ]
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        consolidationSummary={summary}
+      />,
+    )
+    const warnings = document.querySelectorAll('.report-warning-item')
+    expect(warnings.length).toBe(2)
   })
 })

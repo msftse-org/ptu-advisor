@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -27,61 +27,65 @@ console = Console()
 
 class DemoScenario(str, Enum):
     """Available demo scenarios."""
-    
+
     # Legacy / general scenarios (kept for CLI compatibility)
     PTU_RECOMMENDED = "ptu-recommended"
     PTU_NOT_RECOMMENDED = "ptu-not-recommended"
     BORDERLINE = "borderline"
-    
+
     # Cost Reduction focus
     COST_HIGH_VOLUME = "cost-high-volume"
     COST_LOW_VOLUME = "cost-low-volume"
-    
+
     # Throttling & Reliability focus
     THROTTLE_HEAVY = "throttle-heavy"
     THROTTLE_MINIMAL = "throttle-minimal"
-    
+
     # Latency Optimization focus
     LATENCY_SLA_CRITICAL = "latency-sla-critical"
     LATENCY_TOLERANT = "latency-tolerant"
-    
+
     # Predictable Billing focus
     BILLING_STEADY = "billing-steady"
     BILLING_VARIABLE = "billing-variable"
-    
+
     # Guaranteed Capacity focus
     CAPACITY_MISSION_CRITICAL = "capacity-mission-critical"
     CAPACITY_BEST_EFFORT = "capacity-best-effort"
+
+    # Consolidation focus
+    CONSOLIDATE_WORTH_IT = "consolidate-worth-it"
+    CONSOLIDATE_NOT_WORTH_IT = "consolidate-not-worth-it"
 
 
 @dataclass
 class ScenarioConfig:
     """Configuration for a demo scenario."""
-    
+
     name: str
     description: str
     deployment_name: str
     model_name: str
-    
+
     # Workload shape parameters
     tpm_mean: float
     tpm_std: float
     tpm_spikes: bool
-    
+
     # Capacity pressure parameters
     throttling_rate: float
     utilization_pct: float
-    
+
     # Latency parameters
     latency_p50: float
     latency_p95: float
     latency_p99: float
     latency_variance: float
-    
+
     # Load predictability
     active_hours_pct: float
     daily_pattern_consistency: float
-    
+
     # Request patterns
     avg_requests_per_hour: float
     avg_tokens_per_request: float
@@ -100,31 +104,25 @@ SCENARIOS = {
         ),
         deployment_name="gpt-4o-enterprise-platform-prod",
         model_name="gpt-4o (2024-11-20)",
-        
         # Very stable, high-volume workload — ideal for cost savings on PTU
         tpm_mean=120000.0,
         tpm_std=5000.0,
         tpm_spikes=False,
-        
         # High capacity pressure — consistently hitting PAYG limits costs more
-        throttling_rate=0.07,   # 7% throttled — above 5% threshold for POSITIVE
-        utilization_pct=0.88,   # 88% utilized — well above breakeven
-        
+        throttling_rate=0.07,  # 7% throttled — above 5% threshold for POSITIVE
+        utilization_pct=0.88,  # 88% utilized — well above breakeven
         # Moderate latency variance — shared PAYG infra shows inconsistency
         latency_p50=350.0,
         latency_p95=1800.0,
         latency_p99=3500.0,
         latency_variance=1.0,
-        
         # Near-24/7 usage with moderate business-hour peaks — PTU capacity well utilized
         active_hours_pct=0.75,
         daily_pattern_consistency=0.95,
-        
         # Very high sustained volume — the cost advantage of PTU shines here
         avg_requests_per_hour=3200.0,
         avg_tokens_per_request=780.0,
     ),
-    
     DemoScenario.PTU_NOT_RECOMMENDED: ScenarioConfig(
         name="Internal Dev/Test Assistant",
         description=(
@@ -134,31 +132,25 @@ SCENARIOS = {
         ),
         deployment_name="gpt-4o-dev-assistant",
         model_name="gpt-4o-mini (2024-07-18)",
-        
         # Spiky, inconsistent workload
         tpm_mean=8000.0,
         tpm_std=15000.0,  # High variance
         tpm_spikes=True,
-        
         # Low capacity pressure
         throttling_rate=0.002,  # 0.2% throttled
-        utilization_pct=0.15,   # 15% utilized
-        
+        utilization_pct=0.15,  # 15% utilized
         # Good latency
         latency_p50=320.0,
         latency_p95=580.0,
         latency_p99=850.0,
         latency_variance=0.3,
-        
         # Unpredictable, sparse usage
         active_hours_pct=0.25,
         daily_pattern_consistency=0.35,
-        
         # Low volume
         avg_requests_per_hour=45.0,
         avg_tokens_per_request=1200.0,
     ),
-    
     DemoScenario.BORDERLINE: ScenarioConfig(
         name="E-commerce Product Recommendations",
         description=(
@@ -168,31 +160,25 @@ SCENARIOS = {
         ),
         deployment_name="gpt-4o-recommendations",
         model_name="gpt-4o (2024-11-20)",
-        
         # Moderately variable workload
         tpm_mean=35000.0,
         tpm_std=18000.0,
         tpm_spikes=True,
-        
         # Moderate capacity pressure
         throttling_rate=0.025,  # 2.5% throttled
         utilization_pct=0.65,
-        
         # Moderate latency
         latency_p50=380.0,
         latency_p95=1500.0,
         latency_p99=3200.0,
         latency_variance=0.8,
-        
         # Somewhat predictable
         active_hours_pct=0.55,
         daily_pattern_consistency=0.68,
-        
         # Medium volume
         avg_requests_per_hour=850.0,
         avg_tokens_per_request=620.0,
     ),
-
     # =========================================================================
     # COST REDUCTION FOCUS SCENARIOS
     # =========================================================================
@@ -219,7 +205,6 @@ SCENARIOS = {
         avg_requests_per_hour=3500.0,
         avg_tokens_per_request=750.0,
     ),
-
     DemoScenario.COST_LOW_VOLUME: ScenarioConfig(
         name="Internal Summarization Tool",
         description=(
@@ -243,7 +228,6 @@ SCENARIOS = {
         avg_requests_per_hour=30.0,
         avg_tokens_per_request=1500.0,
     ),
-
     # =========================================================================
     # THROTTLING & RELIABILITY FOCUS SCENARIOS
     # =========================================================================
@@ -270,7 +254,6 @@ SCENARIOS = {
         avg_requests_per_hour=2200.0,
         avg_tokens_per_request=650.0,
     ),
-
     DemoScenario.THROTTLE_MINIMAL: ScenarioConfig(
         name="Analytics Helper — Comfortable Headroom",
         description=(
@@ -294,7 +277,6 @@ SCENARIOS = {
         avg_requests_per_hour=600.0,
         avg_tokens_per_request=700.0,
     ),
-
     # =========================================================================
     # LATENCY OPTIMIZATION FOCUS SCENARIOS
     # =========================================================================
@@ -322,7 +304,6 @@ SCENARIOS = {
         avg_requests_per_hour=2000.0,
         avg_tokens_per_request=650.0,
     ),
-
     DemoScenario.LATENCY_TOLERANT: ScenarioConfig(
         name="Background Batch Summarization",
         description=(
@@ -346,7 +327,6 @@ SCENARIOS = {
         avg_requests_per_hour=1000.0,
         avg_tokens_per_request=900.0,
     ),
-
     # =========================================================================
     # PREDICTABLE BILLING FOCUS SCENARIOS
     # =========================================================================
@@ -373,7 +353,6 @@ SCENARIOS = {
         avg_requests_per_hour=2800.0,
         avg_tokens_per_request=700.0,
     ),
-
     DemoScenario.BILLING_VARIABLE: ScenarioConfig(
         name="Startup MVP — Rapidly Changing Usage",
         description=(
@@ -397,7 +376,6 @@ SCENARIOS = {
         avg_requests_per_hour=200.0,
         avg_tokens_per_request=1100.0,
     ),
-
     # =========================================================================
     # GUARANTEED CAPACITY FOCUS SCENARIOS
     # =========================================================================
@@ -425,7 +403,6 @@ SCENARIOS = {
         avg_requests_per_hour=1800.0,
         avg_tokens_per_request=680.0,
     ),
-
     DemoScenario.CAPACITY_BEST_EFFORT: ScenarioConfig(
         name="Internal Team Assistant — No SLA",
         description=(
@@ -449,6 +426,77 @@ SCENARIOS = {
         avg_requests_per_hour=150.0,
         avg_tokens_per_request=1300.0,
     ),
+    # =========================================================================
+    # CONSOLIDATION FOCUS SCENARIOS
+    # =========================================================================
+    # These scenarios define the *first* sibling deployment only. The
+    # ``generate_consolidation_demo_metrics()`` function uses these as a
+    # template and generates 2 additional sibling deployments with scaled
+    # parameters.
+    DemoScenario.CONSOLIDATE_WORTH_IT: ScenarioConfig(
+        name="Customer Chat (Consolidation — Worth It)",
+        description=(
+            "High-volume customer chat deployment that, combined with sibling doc-processing "
+            "and batch-analytics deployments, crosses the PTU break-even threshold. "
+            "Individually each deployment is borderline, but together they justify PTU."
+        ),
+        deployment_name="gpt-4o-customer-chat",
+        model_name="gpt-4o (2024-11-20)",
+        tpm_mean=15000.0,
+        tpm_std=3000.0,
+        tpm_spikes=False,
+        throttling_rate=0.02,
+        utilization_pct=0.55,
+        latency_p50=350.0,
+        latency_p95=1800.0,
+        latency_p99=3500.0,
+        latency_variance=0.8,
+        active_hours_pct=0.70,
+        daily_pattern_consistency=0.80,
+        avg_requests_per_hour=800.0,
+        avg_tokens_per_request=700.0,
+    ),
+    DemoScenario.CONSOLIDATE_NOT_WORTH_IT: ScenarioConfig(
+        name="Internal Summaries (Consolidation — Not Worth It)",
+        description=(
+            "Low-volume internal summarization deployment that, even combined with sibling "
+            "deployments, stays well below the PTU break-even point. PAYG remains cheaper."
+        ),
+        deployment_name="gpt-4o-mini-summaries",
+        model_name="gpt-4o-mini (2024-07-18)",
+        tpm_mean=3000.0,
+        tpm_std=2000.0,
+        tpm_spikes=True,
+        throttling_rate=0.0,
+        utilization_pct=0.10,
+        latency_p50=250.0,
+        latency_p95=500.0,
+        latency_p99=750.0,
+        latency_variance=0.3,
+        active_hours_pct=0.25,
+        daily_pattern_consistency=0.35,
+        avg_requests_per_hour=40.0,
+        avg_tokens_per_request=1200.0,
+    ),
+}
+
+# Sibling deployment definitions for consolidation demo scenarios.
+# Each entry maps a consolidation scenario to a list of
+# (deployment_name, tpm_scale, throttle_scale) tuples describing how to
+# derive siblings from the base ScenarioConfig.
+_CONSOLIDATION_SIBLINGS: Dict[DemoScenario, List[Tuple[str, float, float]]] = {
+    DemoScenario.CONSOLIDATE_WORTH_IT: [
+        # Deployment B: doc-processing — 80% of base TPM, 75% throttle
+        ("gpt-4o-doc-processing", 0.80, 0.75),
+        # Deployment C: batch-analytics — 53% of base TPM, 25% throttle
+        ("gpt-4o-batch-analytics", 0.53, 0.25),
+    ],
+    DemoScenario.CONSOLIDATE_NOT_WORTH_IT: [
+        # Deployment B — 50% of base TPM, no throttle
+        ("gpt-4o-mini-reports", 0.50, 0.0),
+        # Deployment C — 27% of base TPM, no throttle
+        ("gpt-4o-mini-qa-bot", 0.27, 0.0),
+    ],
 }
 
 
@@ -507,43 +555,40 @@ def generate_demo_metrics(
 ) -> Tuple[DeploymentMetrics, ScenarioConfig]:
     """
     Generate realistic demo metrics for a scenario.
-    
+
     Args:
         scenario: The demo scenario to generate.
         lookback_days: Number of days of data to generate.
         granularity_minutes: Aggregation interval in minutes (5, 15, 30, 60).
-        
+
     Returns:
         Tuple of (DeploymentMetrics, ScenarioConfig).
     """
     config = SCENARIOS[scenario]
-    
+
     # Generate timestamps at the selected granularity for the lookback period.
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=lookback_days)
 
     granularity = granularity_minutes if granularity_minutes in (1, 5, 15, 30) else 5
     point_count = max(2, int((lookback_days * 24 * 60) / granularity))
-    timestamps = [
-        start_time + timedelta(minutes=i * granularity)
-        for i in range(point_count)
-    ]
-    
+    timestamps = [start_time + timedelta(minutes=i * granularity) for i in range(point_count)]
+
     # Generate TPM based on scenario
     tpm_values = _generate_tpm_series(config, timestamps)
-    
+
     # Generate RPM (requests per minute)
     rpm_values = _generate_rpm_series(config, timestamps)
-    
+
     # Generate throttling
     throttled, successful = _generate_throttling_series(config, timestamps, rpm_values)
-    
+
     # Generate latency
     p50_values, p95_values, p99_values = _generate_latency_series(config, timestamps)
-    
+
     # Generate token breakdown
     prompt_tokens, completion_tokens = _generate_token_series(config, timestamps, tpm_values)
-    
+
     metrics = DeploymentMetrics(
         deployment_name=config.deployment_name,
         model_name=config.model_name,
@@ -612,63 +657,209 @@ def generate_demo_metrics(
         sku_type="Standard",
         sku_capacity=None,
     )
-    
+
     return metrics, config
 
 
+def generate_consolidation_demo_metrics(
+    scenario: DemoScenario,
+    lookback_days: int = 14,
+    granularity_minutes: int = 60,
+) -> List[DeploymentMetrics]:
+    """Generate a list of sibling DeploymentMetrics for a consolidation demo.
+
+    Each consolidation scenario produces 3 same-model deployments:
+    - Deployment A: generated directly from the scenario config.
+    - Deployments B, C: derived by scaling TPM/throttle from A's config.
+
+    Args:
+        scenario: Must be a consolidation scenario
+            (CONSOLIDATE_WORTH_IT or CONSOLIDATE_NOT_WORTH_IT).
+        lookback_days: Number of days of data to generate.
+        granularity_minutes: Aggregation interval in minutes.
+
+    Returns:
+        List of 3 DeploymentMetrics (all sharing the same model name).
+    """
+    if scenario not in _CONSOLIDATION_SIBLINGS:
+        raise ValueError(
+            f"{scenario.value} is not a consolidation scenario. "
+            f"Use one of: {[s.value for s in _CONSOLIDATION_SIBLINGS]}"
+        )
+
+    base_config = SCENARIOS[scenario]
+    siblings_spec = _CONSOLIDATION_SIBLINGS[scenario]
+
+    # Generate Deployment A from the base scenario config
+    dep_a, _ = generate_demo_metrics(scenario, lookback_days, granularity_minutes)
+    all_deployments: List[DeploymentMetrics] = [dep_a]
+
+    # Generate siblings B, C by cloning the base config with scaled params
+    for sib_name, tpm_scale, throttle_scale in siblings_spec:
+        sibling_config = ScenarioConfig(
+            name=f"{base_config.name} — sibling",
+            description=base_config.description,
+            deployment_name=sib_name,
+            model_name=base_config.model_name,
+            tpm_mean=base_config.tpm_mean * tpm_scale,
+            tpm_std=base_config.tpm_std * tpm_scale,
+            tpm_spikes=base_config.tpm_spikes,
+            throttling_rate=base_config.throttling_rate * throttle_scale,
+            utilization_pct=base_config.utilization_pct * tpm_scale,
+            latency_p50=base_config.latency_p50 * (0.9 + 0.2 * tpm_scale),
+            latency_p95=base_config.latency_p95 * (0.9 + 0.2 * tpm_scale),
+            latency_p99=base_config.latency_p99 * (0.9 + 0.2 * tpm_scale),
+            latency_variance=base_config.latency_variance,
+            active_hours_pct=base_config.active_hours_pct,
+            daily_pattern_consistency=base_config.daily_pattern_consistency,
+            avg_requests_per_hour=base_config.avg_requests_per_hour * tpm_scale,
+            avg_tokens_per_request=base_config.avg_tokens_per_request,
+        )
+
+        # Temporarily inject sibling config into SCENARIOS so
+        # generate_demo_metrics can look it up. We reuse the base scenario
+        # key but swap the config, then restore afterward.
+        # Instead, we just call the internal generators directly:
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(days=lookback_days)
+        granularity = granularity_minutes if granularity_minutes in (1, 5, 15, 30) else 5
+        point_count = max(2, int((lookback_days * 24 * 60) / granularity))
+        timestamps = [start_time + timedelta(minutes=i * granularity) for i in range(point_count)]
+
+        tpm_values = _generate_tpm_series(sibling_config, timestamps)
+        rpm_values = _generate_rpm_series(sibling_config, timestamps)
+        throttled, successful = _generate_throttling_series(sibling_config, timestamps, rpm_values)
+        p50_values, p95_values, p99_values = _generate_latency_series(sibling_config, timestamps)
+        prompt_tokens, completion_tokens = _generate_token_series(
+            sibling_config, timestamps, tpm_values
+        )
+
+        sib_metrics = DeploymentMetrics(
+            deployment_name=sibling_config.deployment_name,
+            model_name=sibling_config.model_name,
+            start_time=start_time,
+            end_time=end_time,
+            timestamps=timestamps,
+            tokens_per_minute=TimeSeries(
+                timestamps=timestamps,
+                values=tpm_values,
+                metric_name="TokensPerMinute",
+                unit="Count",
+            ),
+            requests_per_minute=TimeSeries(
+                timestamps=timestamps,
+                values=rpm_values,
+                metric_name="RequestsPerMinute",
+                unit="Count",
+            ),
+            throttled_requests=TimeSeries(
+                timestamps=timestamps,
+                values=throttled,
+                metric_name="ThrottledRequests",
+                unit="Count",
+            ),
+            successful_requests=TimeSeries(
+                timestamps=timestamps,
+                values=successful,
+                metric_name="SuccessfulRequests",
+                unit="Count",
+            ),
+            prompt_tokens=TimeSeries(
+                timestamps=timestamps,
+                values=prompt_tokens,
+                metric_name="PromptTokens",
+                unit="Count",
+            ),
+            completion_tokens=TimeSeries(
+                timestamps=timestamps,
+                values=completion_tokens,
+                metric_name="CompletionTokens",
+                unit="Count",
+            ),
+            time_to_first_byte_p50=TimeSeries(
+                timestamps=timestamps,
+                values=p50_values,
+                metric_name="TimeToFirstByte_P50",
+                unit="Milliseconds",
+            ),
+            time_to_first_byte_p95=TimeSeries(
+                timestamps=timestamps,
+                values=p95_values,
+                metric_name="TimeToFirstByte_P95",
+                unit="Milliseconds",
+            ),
+            time_to_first_byte_p99=TimeSeries(
+                timestamps=timestamps,
+                values=p99_values,
+                metric_name="TimeToFirstByte_P99",
+                unit="Milliseconds",
+            ),
+        )
+
+        sib_metrics.deployment_info = DeploymentInfo(
+            name=sibling_config.deployment_name,
+            model=sibling_config.model_name,
+            sku_type="Standard",
+            sku_capacity=None,
+        )
+        all_deployments.append(sib_metrics)
+
+    return all_deployments
+
+
 def _generate_tpm_series(
-    config: ScenarioConfig, 
+    config: ScenarioConfig,
     timestamps: List[datetime],
 ) -> List[float]:
     """Generate tokens per minute time series.
-    
+
     The ``daily_pattern_consistency`` parameter controls how much random
     noise is added.  High consistency (0.9+) produces a nearly-deterministic
     daily cycle that the engine's autocorrelation check can detect.
     """
     values = []
-    
+
     # Scale random noise inversely with consistency so that
     # high-consistency workloads produce high autocorrelation.
     noise_scale = (1.0 - config.daily_pattern_consistency) * 0.5 + 0.02
-    
+
     # Flatten daily amplitude for consistent workloads so TPM CV stays
     # below the 0.3 threshold when consistency is high.
     pattern_amplitude = 1.0 - config.daily_pattern_consistency * 0.7
-    
+
     for ts in timestamps:
         hour = ts.hour
         weekday = ts.weekday()
-        
+
         # Base value with noise (scaled by consistency)
         base = config.tpm_mean
         noise = np.random.normal(0, config.tpm_std * noise_scale)
-        
+
         # Business hours multiplier — scaled by pattern_amplitude so
         # consistent workloads have a flatter daily curve.
         if 9 <= hour <= 18:
             multiplier = 1.0 + config.active_hours_pct * 0.5 * pattern_amplitude
         else:
             multiplier = 1.0 - config.active_hours_pct * 0.3 * pattern_amplitude
-        
+
         # Weekend reduction — flatten for 24/7 workloads
         # High active_hours_pct → mild weekend dip; low → steep dip
         if weekday >= 5:
             weekend_factor = 0.6 * (1 - config.active_hours_pct) + config.active_hours_pct
             multiplier *= weekend_factor
-        
+
         # Add spikes if configured
         if config.tpm_spikes and np.random.random() < 0.05:
             multiplier *= np.random.uniform(2.0, 4.0)
-        
+
         # Add occasional zeros for sparse usage
         if config.active_hours_pct < 0.5 and np.random.random() > config.active_hours_pct:
             value = 0.0
         else:
             value = max(0, (base + noise) * multiplier)
-        
+
         values.append(value)
-    
+
     return values
 
 
@@ -677,18 +868,18 @@ def _generate_rpm_series(
     timestamps: List[datetime],
 ) -> List[float]:
     """Generate requests per minute time series.
-    
+
     Uses ``daily_pattern_consistency`` to scale random noise so that
     high-consistency workloads produce strong autocorrelation signals.
     """
     values = []
-    
+
     # Flatten daily and weekly cycles based on active_hours_pct.
     # Use a less aggressive flattening (× 0.6) so the deterministic
     # daily pattern remains detectable by the autocorrelation check
     # even for near-24/7 workloads.
     flatten = config.active_hours_pct * 0.6
-    
+
     # Scale noise inversely with consistency — keep noise well below
     # the deterministic signal so autocorrelation stays high.
     noise_scale = (1.0 - config.daily_pattern_consistency) * 0.5 + 0.02
@@ -696,11 +887,11 @@ def _generate_rpm_series(
     for ts in timestamps:
         hour = ts.hour
         weekday = ts.weekday()
-        
+
         # Base value with noise (scaled by consistency)
         base = config.avg_requests_per_hour / 60  # Convert to per minute
         noise = np.random.normal(0, base * noise_scale)
-        
+
         # Business hours pattern — blend toward 1.0 for 24/7 workloads
         if 9 <= hour <= 18:
             raw_mult = 1.2
@@ -709,20 +900,20 @@ def _generate_rpm_series(
         else:
             raw_mult = 0.3
         multiplier = raw_mult * (1 - flatten) + flatten
-        
+
         # Weekend reduction — flatten for 24/7 workloads
         if weekday >= 5:
             weekend_factor = 0.5 * (1 - flatten) + flatten
             multiplier *= weekend_factor
-        
+
         # Sparse usage handling
         if config.active_hours_pct < 0.5 and np.random.random() > config.active_hours_pct:
             value = 0.0
         else:
             value = max(0, (base + noise) * multiplier)
-        
+
         values.append(value)
-    
+
     return values
 
 
@@ -734,26 +925,26 @@ def _generate_throttling_series(
     """Generate throttled and successful request series."""
     throttled = []
     successful = []
-    
+
     for i, ts in enumerate(timestamps):
         total_requests = rpm_values[i] * 60  # Requests per hour
-        
+
         # Higher throttling during peak hours if throttling rate is high
         hour = ts.hour
         if 10 <= hour <= 16 and config.throttling_rate > 0.03:
             effective_rate = config.throttling_rate * 1.5
         else:
             effective_rate = config.throttling_rate * 0.7
-        
+
         # Add randomness
         actual_rate = max(0, effective_rate + np.random.normal(0, effective_rate * 0.3))
-        
+
         throttled_count = total_requests * actual_rate
         successful_count = total_requests - throttled_count
-        
+
         throttled.append(max(0, throttled_count))
         successful.append(max(0, successful_count))
-    
+
     return throttled, successful
 
 
@@ -765,35 +956,35 @@ def _generate_latency_series(
     p50_values = []
     p95_values = []
     p99_values = []
-    
+
     for ts in timestamps:
         hour = ts.hour
-        
+
         # Base latencies
         p50_base = config.latency_p50
         p95_base = config.latency_p95
         p99_base = config.latency_p99
-        
+
         # Peak hours have higher latency if there's variance
         if 10 <= hour <= 16:
             multiplier = 1.0 + config.latency_variance * 0.3
         else:
             multiplier = 1.0 - config.latency_variance * 0.1
-        
+
         # Add noise
         p50 = p50_base * multiplier * (1 + np.random.normal(0, 0.1))
         p95 = p95_base * multiplier * (1 + np.random.normal(0, 0.15))
         p99 = p99_base * multiplier * (1 + np.random.normal(0, 0.2))
-        
+
         # Ensure ordering p50 <= p95 <= p99
         p50 = max(100, p50)
         p95 = max(p50 * 1.5, p95)
         p99 = max(p95 * 1.2, p99)
-        
+
         p50_values.append(p50)
         p95_values.append(p95)
         p99_values.append(p99)
-    
+
     return p50_values, p95_values, p99_values
 
 
@@ -805,138 +996,121 @@ def _generate_token_series(
     """Generate prompt and completion token series."""
     prompt_tokens = []
     completion_tokens = []
-    
+
     for tpm in tpm_values:
         # Typical ratio: 60% prompt, 40% completion
         ratio = 0.6 + np.random.normal(0, 0.1)
         ratio = max(0.4, min(0.8, ratio))
-        
+
         prompt = tpm * ratio
         completion = tpm * (1 - ratio)
-        
+
         prompt_tokens.append(prompt)
         completion_tokens.append(completion)
-    
+
     return prompt_tokens, completion_tokens
 
 
 def display_scenario_info(config: ScenarioConfig) -> None:
     """Display scenario information to the user."""
     console.print()
-    console.print(Panel(
-        f"[bold]{config.name}[/bold]\n\n{config.description}",
-        title="📋 Demo Scenario",
-        border_style="blue",
-    ))
+    console.print(
+        Panel(
+            f"[bold]{config.name}[/bold]\n\n{config.description}",
+            title="📋 Demo Scenario",
+            border_style="blue",
+        )
+    )
 
 
 def display_fetched_metrics(metrics: DeploymentMetrics, config: ScenarioConfig) -> None:
     """Display the 'fetched' metrics to the user in a detailed format."""
     console.print()
-    console.print("[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]")
-    console.print("[bold cyan]                    FETCHED DEPLOYMENT DATA                     [/bold cyan]")
-    console.print("[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]")
+    console.print(
+        "[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]"
+    )
+    console.print(
+        "[bold cyan]                    FETCHED DEPLOYMENT DATA                     [/bold cyan]"
+    )
+    console.print(
+        "[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]"
+    )
     console.print()
-    
+
     # Deployment Info
     info_table = Table(title="🔧 Deployment Information", show_header=False, box=None)
     info_table.add_column("Property", style="cyan")
     info_table.add_column("Value", style="white")
-    
+
     info_table.add_row("Deployment Name", metrics.deployment_name)
     info_table.add_row("Model", metrics.model_name)
-    info_table.add_row("Analysis Period", f"{metrics.start_time.strftime('%b %d')} - {metrics.end_time.strftime('%b %d, %Y')}")
+    info_table.add_row(
+        "Analysis Period",
+        f"{metrics.start_time.strftime('%b %d')} - {metrics.end_time.strftime('%b %d, %Y')}",
+    )
     info_table.add_row("Data Points Collected", f"{len(metrics.timestamps):,} hourly samples")
     info_table.add_row("SKU Type", "Standard (PAYG)")
-    
+
     console.print(info_table)
     console.print()
-    
+
     # Request Metrics
     req_table = Table(title="📊 Request Metrics", box=None)
     req_table.add_column("Metric", style="cyan")
     req_table.add_column("Value", style="white", justify="right")
     req_table.add_column("", style="dim")
-    
+
     total_requests = metrics.total_requests
     throttled_total = metrics.throttled_requests.total if metrics.throttled_requests else 0
     throttling_rate = metrics.throttling_rate
-    
+
     req_table.add_row(
         "Total Requests Analyzed",
         f"{total_requests:,.0f}",
-        f"over {len(metrics.timestamps) // 24} days"
+        f"over {len(metrics.timestamps) // 24} days",
     )
-    req_table.add_row(
-        "Average Requests/Hour",
-        f"{config.avg_requests_per_hour:,.0f}",
-        ""
-    )
-    req_table.add_row(
-        "Peak Requests/Hour",
-        f"{metrics.requests_per_minute.max * 60:,.0f}",
-        ""
-    )
+    req_table.add_row("Average Requests/Hour", f"{config.avg_requests_per_hour:,.0f}", "")
+    req_table.add_row("Peak Requests/Hour", f"{metrics.requests_per_minute.max * 60:,.0f}", "")
     req_table.add_row(
         "Successful Requests",
         f"{metrics.successful_requests.total:,.0f}",
-        f"({(1-throttling_rate)*100:.1f}%)"
+        f"({(1 - throttling_rate) * 100:.1f}%)",
     )
     req_table.add_row(
         "Throttled Requests (429s)",
         f"{throttled_total:,.0f}",
-        f"[{'red' if throttling_rate > 0.03 else 'green'}]({throttling_rate*100:.2f}%)[/]"
+        f"[{'red' if throttling_rate > 0.03 else 'green'}]({throttling_rate * 100:.2f}%)[/]",
     )
-    
+
     console.print(req_table)
     console.print()
-    
+
     # Token Metrics
     token_table = Table(title="🔤 Token Metrics", box=None)
     token_table.add_column("Metric", style="cyan")
     token_table.add_column("Value", style="white", justify="right")
     token_table.add_column("", style="dim")
-    
+
     tpm = metrics.tokens_per_minute
-    token_table.add_row(
-        "Average TPM",
-        f"{tpm.mean:,.0f}",
-        "tokens per minute"
-    )
-    token_table.add_row(
-        "Peak TPM",
-        f"{tpm.max:,.0f}",
-        "maximum observed"
-    )
-    token_table.add_row(
-        "TPM Std Deviation",
-        f"{tpm.std:,.0f}",
-        f"(CV: {tpm.cv:.2f})"
-    )
-    token_table.add_row(
-        "Total Tokens Processed",
-        f"{tpm.total:,.0f}",
-        ""
-    )
-    token_table.add_row(
-        "Avg Tokens/Request",
-        f"{metrics.avg_tokens_per_request:,.0f}",
-        ""
-    )
-    
+    token_table.add_row("Average TPM", f"{tpm.mean:,.0f}", "tokens per minute")
+    token_table.add_row("Peak TPM", f"{tpm.max:,.0f}", "maximum observed")
+    token_table.add_row("TPM Std Deviation", f"{tpm.std:,.0f}", f"(CV: {tpm.cv:.2f})")
+    token_table.add_row("Total Tokens Processed", f"{tpm.total:,.0f}", "")
+    token_table.add_row("Avg Tokens/Request", f"{metrics.avg_tokens_per_request:,.0f}", "")
+
     if metrics.prompt_tokens and metrics.completion_tokens:
         prompt_total = metrics.prompt_tokens.total
         completion_total = metrics.completion_tokens.total
-        ratio = prompt_total / (prompt_total + completion_total) if (prompt_total + completion_total) > 0 else 0
-        token_table.add_row(
-            "Prompt/Completion Ratio",
-            f"{ratio:.0%} / {1-ratio:.0%}",
-            ""
+        ratio = (
+            prompt_total / (prompt_total + completion_total)
+            if (prompt_total + completion_total) > 0
+            else 0
         )
-    
+        token_table.add_row("Prompt/Completion Ratio", f"{ratio:.0%} / {1 - ratio:.0%}", "")
+
     console.print(token_table)
     console.print()
-    
+
     # Latency Metrics
     lat_table = Table(title="⏱️ Latency Metrics (Time to First Byte)", box=None)
     lat_table.add_column("Percentile", style="cyan")
@@ -944,100 +1118,118 @@ def display_fetched_metrics(metrics: DeploymentMetrics, config: ScenarioConfig) 
     lat_table.add_column("Min (ms)", style="dim", justify="right")
     lat_table.add_column("Max (ms)", style="dim", justify="right")
     lat_table.add_column("Assessment", style="white")
-    
+
     p50 = metrics.time_to_first_byte_p50
     p95 = metrics.time_to_first_byte_p95
     p99 = metrics.time_to_first_byte_p99
-    
+
     lat_table.add_row(
         "P50 (Median)",
         f"{p50.mean:,.0f}",
         f"{p50.min:,.0f}",
         f"{p50.max:,.0f}",
-        "[green]Good[/]" if p50.mean < 500 else "[yellow]Moderate[/]"
+        "[green]Good[/]" if p50.mean < 500 else "[yellow]Moderate[/]",
     )
     lat_table.add_row(
         "P95",
         f"{p95.mean:,.0f}",
         f"{p95.min:,.0f}",
         f"{p95.max:,.0f}",
-        "[green]Good[/]" if p95.mean < 2000 else "[yellow]Elevated[/]" if p95.mean < 5000 else "[red]High[/]"
+        "[green]Good[/]"
+        if p95.mean < 2000
+        else "[yellow]Elevated[/]"
+        if p95.mean < 5000
+        else "[red]High[/]",
     )
     lat_table.add_row(
         "P99",
         f"{p99.mean:,.0f}",
         f"{p99.min:,.0f}",
         f"{p99.max:,.0f}",
-        "[green]Good[/]" if p99.mean < 3000 else "[yellow]Elevated[/]" if p99.mean < 6000 else "[red]High[/]"
+        "[green]Good[/]"
+        if p99.mean < 3000
+        else "[yellow]Elevated[/]"
+        if p99.mean < 6000
+        else "[red]High[/]",
     )
-    
+
     variance_ratio = p99.mean / p50.mean if p50.mean > 0 else 0
     lat_table.add_row(
         "Variance (P99/P50)",
         f"{variance_ratio:.1f}x",
         "",
         "",
-        "[green]Stable[/]" if variance_ratio < 3 else "[yellow]Variable[/]" if variance_ratio < 5 else "[red]Unstable[/]"
+        "[green]Stable[/]"
+        if variance_ratio < 3
+        else "[yellow]Variable[/]"
+        if variance_ratio < 5
+        else "[red]Unstable[/]",
     )
-    
+
     console.print(lat_table)
     console.print()
-    
+
     # Usage Patterns
     pattern_table = Table(title="📈 Usage Patterns", box=None)
     pattern_table.add_column("Pattern", style="cyan")
     pattern_table.add_column("Observation", style="white")
-    
+
     # Calculate active hours
     rpm = metrics.requests_per_minute
     active_pct = 1.0 - rpm.zero_percentage
-    
-    pattern_table.add_row(
-        "Active Time",
-        f"{active_pct:.0%} of hours had traffic"
-    )
+
+    pattern_table.add_row("Active Time", f"{active_pct:.0%} of hours had traffic")
     pattern_table.add_row(
         "Peak Hours",
-        "10 AM - 4 PM (business hours)" if active_pct > 0.5 else "Sporadic throughout day"
+        "10 AM - 4 PM (business hours)" if active_pct > 0.5 else "Sporadic throughout day",
     )
     pattern_table.add_row(
-        "Weekend Traffic",
-        "~60% of weekday volume" if active_pct > 0.5 else "Minimal"
+        "Weekend Traffic", "~60% of weekday volume" if active_pct > 0.5 else "Minimal"
     )
     pattern_table.add_row(
         "Daily Pattern",
-        f"{'Consistent' if config.daily_pattern_consistency > 0.7 else 'Variable' if config.daily_pattern_consistency > 0.4 else 'Unpredictable'} day-over-day"
+        f"{'Consistent' if config.daily_pattern_consistency > 0.7 else 'Variable' if config.daily_pattern_consistency > 0.4 else 'Unpredictable'} day-over-day",
     )
-    
+
     console.print(pattern_table)
     console.print()
-    
+
     # Capacity Utilization
     cap_table = Table(title="🎯 Capacity Indicators", box=None)
     cap_table.add_column("Indicator", style="cyan")
     cap_table.add_column("Status", style="white")
     cap_table.add_column("Implication", style="dim")
-    
+
     cap_table.add_row(
         "Throttling Rate",
         f"[{'red' if throttling_rate > 0.05 else 'yellow' if throttling_rate > 0.01 else 'green'}]{throttling_rate:.1%}[/]",
-        "PAYG capacity limit reached" if throttling_rate > 0.05 else "Within capacity" if throttling_rate < 0.01 else "Occasional limits"
+        "PAYG capacity limit reached"
+        if throttling_rate > 0.05
+        else "Within capacity"
+        if throttling_rate < 0.01
+        else "Occasional limits",
     )
     cap_table.add_row(
         "Utilization Level",
         f"{config.utilization_pct:.0%}",
-        "Near ceiling" if config.utilization_pct > 0.8 else "Moderate" if config.utilization_pct > 0.5 else "Low"
+        "Near ceiling"
+        if config.utilization_pct > 0.8
+        else "Moderate"
+        if config.utilization_pct > 0.5
+        else "Low",
     )
     cap_table.add_row(
         "Burst Behavior",
         "Frequent spikes detected" if config.tpm_spikes else "Steady throughput",
-        "May need headroom" if config.tpm_spikes else "Predictable capacity needs"
+        "May need headroom" if config.tpm_spikes else "Predictable capacity needs",
     )
-    
+
     console.print(cap_table)
     console.print()
-    
-    console.print("[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]")
+
+    console.print(
+        "[bold cyan]═══════════════════════════════════════════════════════════════[/bold cyan]"
+    )
     console.print()
 
 
@@ -1057,14 +1249,14 @@ def list_demo_scenarios() -> None:
     console.print()
     console.print("[bold]Available Demo Scenarios:[/bold]")
     console.print()
-    
+
     for scenario_enum, config in SCENARIOS.items():
         emoji = {
             DemoScenario.PTU_RECOMMENDED: "✅",
             DemoScenario.PTU_NOT_RECOMMENDED: "❌",
             DemoScenario.BORDERLINE: "⚠️",
         }.get(scenario_enum, "")
-        
+
         console.print(f"  {emoji} [cyan]{scenario_enum.value}[/cyan]")
         console.print(f"     {config.name}")
         console.print(f"     [dim]{config.description[:80]}...[/dim]")

@@ -547,3 +547,176 @@ class TestRegionalPTURates:
     @pytest.mark.parametrize("region", TIER3_REGIONS)
     def test_tier3_rate(self, region: str) -> None:
         assert STATIC_REGIONAL_PTU_RATES[region] == 2.40
+
+
+# ---------------------------------------------------------------------------
+# Tests: structured logging (_log_resolution)
+# ---------------------------------------------------------------------------
+
+
+class TestStructuredLogging:
+    def test_log_resolution_emits_info(self) -> None:
+        """_log_resolution should emit a structured logger.info call."""
+        result = PricingResult(
+            payg_input_rate=2.50,
+            payg_output_rate=10.00,
+            ptu_hourly_rate=1.00,
+            source="live",
+            as_of=datetime.now(timezone.utc),
+            model_name="gpt-4o",
+            region="eastus",
+            deployment_type="global",
+        )
+        with patch("ptu_advisor.cost.price_resolver.logger") as mock_logger:
+            PricingResolver._log_resolution(result, 0.042)
+            mock_logger.info.assert_called_once()
+            log_msg = mock_logger.info.call_args[0][0]
+            assert "pricing_resolved" in log_msg
+            assert "model=%s" in log_msg
+            # Verify the positional args contain key values
+            args = mock_logger.info.call_args[0]
+            assert "gpt-4o" in args
+            assert "eastus" in args
+            assert "live" in args
+
+    def test_log_resolution_latency_ms(self) -> None:
+        """Latency should be passed as milliseconds."""
+        result = PricingResult(
+            payg_input_rate=1.0,
+            payg_output_rate=2.0,
+            ptu_hourly_rate=3.0,
+            source="fallback",
+            as_of=datetime.now(timezone.utc),
+        )
+        with patch("ptu_advisor.cost.price_resolver.logger") as mock_logger:
+            PricingResolver._log_resolution(result, 0.123)
+            args = mock_logger.info.call_args[0]
+            # The latency_ms positional arg should be ~123.0
+            latency_ms = args[5]  # positional: msg, model, region, dtype, source, latency_ms, ...
+            assert abs(latency_ms - 123.0) < 0.1
+
+
+# ---------------------------------------------------------------------------
+# Tests: cache warm-up
+# ---------------------------------------------------------------------------
+
+
+class TestCacheWarmup:
+    @patch("ptu_advisor.cost.price_resolver._httpx", None)
+    def test_warm_cache_returns_count(self) -> None:
+        """warm_cache should return the number of successfully warmed combos."""
+        resolver = PricingResolver()
+        # With httpx=None, all will go to fallback (not "live" or "cached")
+        warmed = resolver.warm_cache()
+        assert warmed == 0  # fallback is not counted as "warmed"
+
+    @patch("ptu_advisor.cost.price_resolver._httpx", None)
+    def test_warm_cache_custom_combos(self) -> None:
+        """warm_cache accepts a custom combos list."""
+        resolver = PricingResolver()
+        # Manually seed one cache entry so it counts as "cached"
+        now = datetime.now(timezone.utc)
+        resolver._cache["gpt-4o:eastus:global"] = (
+            PricingResult(
+                payg_input_rate=2.5,
+                payg_output_rate=10.0,
+                ptu_hourly_rate=1.0,
+                source="live",
+                as_of=now,
+                model_name="gpt-4o",
+                region="eastus",
+                deployment_type="global",
+            ),
+            now,
+        )
+        warmed = resolver.warm_cache(combos=[("gpt-4o", "eastus", "global")])
+        assert warmed == 1  # should hit cache → "cached" counts
+
+    @patch("ptu_advisor.cost.price_resolver._httpx", None)
+    def test_warm_cache_handles_errors(self) -> None:
+        """warm_cache should not raise even if resolve throws."""
+        resolver = PricingResolver()
+        # Monkeypatch resolve to raise
+        original_resolve = resolver.resolve
+        call_count = 0
+
+        def _failing_resolve(*args: Any, **kwargs: Any) -> PricingResult:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("test error")
+            return original_resolve(*args, **kwargs)
+
+        resolver.resolve = _failing_resolve  # type: ignore[assignment]
+        warmed = resolver.warm_cache(
+            combos=[("gpt-4o", "eastus", "global"), ("gpt-5", "eastus", "global")]
+        )
+        assert warmed == 0  # first fails, second goes to fallback (not counted)
+        assert call_count == 2
+
+    @patch("ptu_advisor.cost.price_resolver._httpx", None)
+    def test_start_background_warmup_returns_daemon_thread(self) -> None:
+        """start_background_warmup should return a running daemon thread."""
+        resolver = PricingResolver()
+        thread = resolver.start_background_warmup(interval_seconds=999999)
+        assert thread.is_alive()
+        assert thread.daemon is True
+        assert thread.name == "pricing-cache-warmup"
+
+
+# ---------------------------------------------------------------------------
+# Tests: _build_formula_blocks "(custom rate)" annotation
+# ---------------------------------------------------------------------------
+
+
+class TestFormulaBlocksCustomRateAnnotation:
+    """Phase 2.1: _build_formula_blocks annotates with '(custom rate)' when source is manual."""
+
+    def _common_kwargs(self, pricing_source: str = "") -> Dict[str, Any]:
+        return dict(
+            avg_tpm=10000,
+            total_tokens=432_000_000,
+            lookback_days=14,
+            avg_daily_tokens=14_400_000,
+            payg_input_rate=2.50,
+            payg_output_rate=10.00,
+            output_ratio=0.30,
+            payg_blended_rate=4.75,
+            payg_base=2052,
+            payg_total=2052,
+            throttle_rate=0.0,
+            throttle_rate_pct=0.0,
+            throttle_impact=0.0,
+            include_throttle=False,
+            baseline_ptu=20,
+            ptu_monthly_rate=263.43,
+            ptu_baseline_cost=5269,
+            avg_spillover_tpm=500,
+            spillover_cost=200,
+            hybrid_total=5469,
+            effective_mult=1.60,
+            input_tpm_per_ptu=2500,
+            model_output_multiplier=3,
+            pricing_source=pricing_source,
+        )
+
+    def test_manual_source_adds_custom_rate_tag(self) -> None:
+        from ptu_advisor.api.server import _build_formula_blocks
+
+        blocks = _build_formula_blocks(**self._common_kwargs(pricing_source="manual"))
+        assert "(custom rate)" in blocks["payg"]
+        assert "(custom rate)" in blocks["hybrid"]
+
+    def test_live_source_no_custom_rate_tag(self) -> None:
+        from ptu_advisor.api.server import _build_formula_blocks
+
+        blocks = _build_formula_blocks(**self._common_kwargs(pricing_source="live"))
+        assert "(custom rate)" not in blocks["payg"]
+        assert "(custom rate)" not in blocks["hybrid"]
+
+    def test_empty_source_no_custom_rate_tag(self) -> None:
+        from ptu_advisor.api.server import _build_formula_blocks
+
+        blocks = _build_formula_blocks(**self._common_kwargs(pricing_source=""))
+        assert "(custom rate)" not in blocks["payg"]
+        assert "(custom rate)" not in blocks["hybrid"]

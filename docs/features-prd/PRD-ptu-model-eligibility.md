@@ -1,9 +1,9 @@
 # PRD: PTU Model Eligibility — Deployment Gate & Visual Indicators
 
-> **Version**: 1.0  
-> **Date**: March 17, 2026  
+> **Version**: 2.0  
+> **Date**: March 31, 2026  
 > **Author**: PTU Advisor Team  
-> **Status**: 📋 Proposed
+> **Status**: Phase 1 ✅ Complete | Phase 2 🚧 In Progress
 
 ---
 
@@ -326,10 +326,149 @@ When new models gain PTU support, only `MODEL_CAPACITY_CONFIGS` in `ptu_advisor/
 - Backend: validate in `/api/analyze`
 - Tests for all paths
 
-### Phase 2 — Refinements (follow-up)
-- Add model family grouping in the deployment list (e.g., "GPT-4o family", "Embedding models")
-- Consider a "Why?" expandable detail panel for ineligible deployments
-- Telemetry: track how often users encounter ineligible-only accounts
+### Phase 2 — Model Family Grouping & UX Refinements (this PR)
+
+#### 2A: Model Family Classification
+
+Add a `get_model_family()` function to `ptu_advisor/config.py` that classifies any Azure OpenAI model string into a human-readable family:
+
+```python
+MODEL_FAMILIES: Dict[str, str] = {
+    "gpt-5": "GPT-5",
+    "gpt-4.1-nano": "GPT-4.1 Nano",
+    "gpt-4.1-mini": "GPT-4.1 Mini",
+    "gpt-4.1": "GPT-4.1",
+    "gpt-4o-mini": "GPT-4o Mini",
+    "gpt-4o": "GPT-4o",
+    "o4-mini": "o4-mini",
+    "o3-mini": "o3-mini",
+    "o1": "o1",
+    "text-embedding": "Embedding",
+    "dall-e": "DALL-E",
+    "whisper": "Whisper",
+    "tts": "TTS",
+    "gpt-3.5": "GPT-3.5 (Legacy)",
+}
+
+def get_model_family(model_name: str) -> str:
+    model_lower = model_name.lower()
+    for key in sorted(MODEL_FAMILIES, key=len, reverse=True):
+        if key in model_lower:
+            return MODEL_FAMILIES[key]
+    return "Other"
+```
+
+**Single source of truth**: Uses the same longest-match-first approach as `get_model_config()`. The family classification covers both PTU-eligible and non-eligible models.
+
+#### 2B: Backend Enrichment
+
+Extend the `/api/discovery/deployments` response to include `model_family`:
+
+```python
+# ptu_advisor/api/server.py — deployments endpoint
+return [
+    {
+        "name": dep.name,
+        "model": dep.model,
+        "model_family": get_model_family(dep.model),
+        "sku_type": dep.sku_type,
+        "sku_capacity": dep.sku_capacity,
+        "ptu_eligible": get_model_config(dep.model) is not None,
+    }
+    for dep in items
+]
+```
+
+Update `DeploymentInfo` type in `frontend/src/types.ts`:
+
+```typescript
+export type DeploymentInfo = {
+  name: string
+  model: string
+  model_family: string  // NEW — "GPT-4o", "Embedding", "DALL-E", etc.
+  sku_type: string
+  sku_capacity: number | null
+  ptu_eligible: boolean
+}
+```
+
+#### 2C: Frontend — Model Family Grouping in Single Deployment Picker
+
+In single deployment mode, group deployments by `model_family` with a visual separator:
+
+```
+┌─ GPT-4o ─────────────────────────────────────────────┐
+│  ● gpt4o-prod · gpt-4o                     PTU Eligible │
+│  ○ gpt4o-staging · gpt-4o (2024-11-20)     PTU Eligible │
+└──────────────────────────────────────────────────────────┘
+
+┌─ GPT-5 ──────────────────────────────────────────────┐
+│  ○ gpt5-preview · gpt-5 (2025-06-01)       PTU Eligible │
+└──────────────────────────────────────────────────────────┘
+
+┌─ Embedding ──────────────────────────────────────────┐
+│  ⊘ embed-prod · text-embedding-3-large   PTU Not Available │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Grouping logic**:
+1. Group deployments by `model_family`
+2. Sort groups: PTU-eligible families first (alphabetically), then non-eligible families (alphabetically)
+3. Within each group, sort by deployment name
+4. Groups with all ineligible deployments get a muted header
+
+#### 2D: Frontend — Expandable "Why?" Panel for Ineligible Deployments
+
+When a user clicks on an ineligible deployment card (or a "Why?" link), show an inline expandable explanation:
+
+```
+┌─ Embedding ──────────────────────────────────────────┐
+│  ⊘ embed-prod · text-embedding-3-large   PTU Not Available │
+│     ╰─ Why?                                              │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │ Provisioned Throughput Units (PTU) are designed  │   │
+│  │ for chat and reasoning models with token-based   │   │
+│  │ throughput. Embedding models use a different      │   │
+│  │ billing model and don't support PTU pricing.      │   │
+│  │                                                    │   │
+│  │ PTU-eligible models:                              │   │
+│  │ GPT-4o, GPT-4.1, GPT-5, o1, o3-mini, o4-mini    │   │
+│  │ Learn more → (link to docs)                       │   │
+│  └──────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────┘
+```
+
+**Model-specific reason text**:
+
+| Family | Reason |
+|--------|--------|
+| Embedding | "Embedding models use a fixed per-token pricing model and don't have PTU provisioned capacity." |
+| DALL-E | "Image generation models bill per image and don't support token-based provisioned throughput." |
+| Whisper / TTS | "Audio models bill per minute of audio and don't support token-based provisioned throughput." |
+| GPT-3.5 (Legacy) | "GPT-3.5 Turbo has been retired from PTU provisioning. Consider upgrading to GPT-4o-mini for similar performance with PTU support." |
+| Other | "This model does not support Provisioned Throughput Units. PTU is available for select Azure OpenAI chat and reasoning models." |
+
+#### 2E: Files to Modify
+
+| File | Change |
+|------|--------|
+| `ptu_advisor/config.py` | Add `MODEL_FAMILIES` dict and `get_model_family()` function |
+| `ptu_advisor/api/server.py` | Add `model_family` to deployments endpoint response |
+| `frontend/src/types.ts` | Add `model_family: string` to `DeploymentInfo` type |
+| `frontend/src/App.tsx` | Group single deployment picker by model family; add "Why?" expandable panel |
+| `frontend/src/styles.css` | Add `.family-group`, `.family-group-header`, `.why-panel` styles |
+| `tests/test_eligibility.py` | Add tests for `get_model_family()` and `model_family` in API response |
+| `frontend/src/eligibility.test.tsx` | Add tests for family grouping and Why? panel rendering |
+
+#### 2F: Success Criteria
+
+| KPI | Target |
+|-----|--------|
+| Model family classification accuracy | 100% — all known models classified, unknown → "Other" |
+| Family grouping rendering | Groups visible for ≥2 distinct model families in deployment list |
+| "Why?" panel explanation | Model-specific reason shown for each non-PTU model family |
+| No regressions | All existing Phase 1 tests pass unchanged |
+| New model onboarding | Adding a family requires only `MODEL_FAMILIES` dict update |
 
 ---
 
@@ -337,7 +476,9 @@ When new models gain PTU support, only `MODEL_CAPACITY_CONFIGS` in `ptu_advisor/
 
 | # | Question | Proposed Answer |
 |---|----------|----------------|
-| 1 | Should we show ineligible deployments at all, or hide them entirely? | Show but grayed out — hiding them is confusing ("where's my deployment?"); showing them with explanation teaches the user about PTU scope |
-| 2 | Should the model list be hardcoded or fetched from an API? | Hardcoded in `MODEL_CAPACITY_CONFIGS` for now; fetching from Azure APIs is Phase 2 (PRD-live-pricing-fetch) |
+| 1 | Should we show ineligible deployments at all, or hide them entirely? | **Resolved (Phase 1)**: Show but grayed out — hiding them is confusing; showing them teaches the user about PTU scope |
+| 2 | Should the model list be hardcoded or fetched from an API? | Hardcoded in `MODEL_CAPACITY_CONFIGS` for now; fetching from Azure APIs is future work |
 | 3 | What if `get_model_config()` fuzzy match produces a false positive? | The sorted longest-match-first approach minimizes this; edge cases can be reported as bugs |
 | 4 | Should we surface PTU-eligible status in the analysis results page too? | Not needed — if the user got to results, the deployment was already validated |
+| 5 | Should family grouping be collapsible? | No — keep groups always expanded for scanability; there are typically <10 groups |
+| 6 | Should the "Why?" panel be pre-expanded for the first ineligible deployment? | No — keep collapsed by default to reduce visual noise; user clicks to learn more |

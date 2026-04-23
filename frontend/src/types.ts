@@ -1,3 +1,11 @@
+export type AuthStatus = {
+  authenticated: boolean
+  display_name: string
+  email: string
+  tenant_id: string
+  error?: string
+}
+
 export type FocusTopic = {
   name: string
   tagline: string
@@ -16,6 +24,13 @@ export type DeploymentTypeOption = {
   increment: number
   default_min_ptu: number
   base_hourly_rate: number
+}
+
+/** Lightweight pre-analysis stats for a single deployment (from GET /api/deployments/preview). */
+export type DeploymentPreview = {
+  name: string
+  avg_tpm: number
+  throttling_rate_pct: number
 }
 
 export type PricingOptions = {
@@ -42,8 +57,11 @@ export type AccountInfo = {
 export type DeploymentInfo = {
   name: string
   model: string
+  model_family: string
   sku_type: string
   sku_capacity: number | null
+  ptu_eligible: boolean
+  ineligibility_reason?: string
 }
 
 export type DimensionResult = {
@@ -206,4 +224,82 @@ export type AnalysisResponse = {
     focus_topic: string
     analysis_notes: string[]
   }
+}
+
+// ---------------------------------------------------------------------------
+// Consolidation Analysis types
+// ---------------------------------------------------------------------------
+
+export type AnalysisMode = 'single' | 'consolidation'
+
+export type IndividualDeploymentSummary = {
+  name: string
+  avg_tpm: number
+  peak_tpm: number
+  throttling_rate_pct: number
+  total_requests: number
+  latency_p50: number
+  latency_p95: number
+  payg_monthly_cost: number
+}
+
+export type ConsolidationSummary = {
+  deployment_count: number
+  model_name: string
+  deployment_type: string
+  individual_deployments: IndividualDeploymentSummary[]
+  combined_avg_tpm: number
+  combined_peak_tpm: number
+  combined_throttling_rate_pct: number
+  individual_payg_total: number
+  consolidated_hybrid_cost: number
+  savings: number
+  savings_pct: number
+  warnings: string[]
+  all_on_ptu: boolean
+}
+
+// ---------------------------------------------------------------------------
+// Per-deployment chart data (Phase 2 — consolidation chart attribution)
+// ---------------------------------------------------------------------------
+
+/** Per-deployment token breakdown (prompt + completion per deployment). */
+export type PerDeploymentTokens = Record<string, { prompt: number[]; completion: number[] }>
+
+/** Per-deployment request breakdown (successful + throttled per deployment). */
+export type PerDeploymentRequests = Record<string, { successful: number[]; throttled: number[] }>
+
+/** Per-deployment latency traces (p50/p95/p99 per deployment — overlaid, not stacked). */
+export type PerDeploymentLatency = Record<string, { p50: number[]; p95: number[]; p99: number[] }>
+
+/** Per-deployment TPM values (one array per deployment). */
+export type PerDeploymentTpm = Record<string, number[]>
+
+/** Per-deployment throttling (429) event values. */
+export type PerDeploymentThrottling = Record<string, number[]>
+
+/** Extended charts shape returned by consolidation endpoint. */
+export type ConsolidationCharts = AnalysisResponse['charts'] & {
+  tokens: AnalysisResponse['charts']['tokens'] & {
+    per_deployment: PerDeploymentTokens
+  }
+  requests: AnalysisResponse['charts']['requests'] & {
+    per_deployment: PerDeploymentRequests
+  }
+  tpm: AnalysisResponse['charts']['tpm'] & {
+    per_deployment: PerDeploymentTpm
+  }
+  throttling: AnalysisResponse['charts']['throttling'] & {
+    per_deployment: PerDeploymentThrottling
+  }
+  latency: {
+    timestamps: string[]
+    combined: { p50: number[]; p95: number[]; p99: number[] }
+    per_deployment: PerDeploymentLatency
+  }
+}
+
+export type ConsolidationResponse = Omit<AnalysisResponse, 'charts'> & {
+  charts: ConsolidationCharts
+  consolidation_summary: ConsolidationSummary
 }

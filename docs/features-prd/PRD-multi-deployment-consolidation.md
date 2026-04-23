@@ -1,10 +1,10 @@
 # PRD: Multi-Deployment Consolidation Analysis
 
-> **Version**: 1.0  
-> **Date**: March 16, 2026  
+> **Version**: 1.2  
+> **Date**: March 30, 2026  
 > **Author**: PTU Advisor Team  
 > **Priority**: P1 — High customer value  
-> **Status**: Draft
+> **Status**: Phase 3 Complete
 
 ---
 
@@ -221,12 +221,12 @@ In the Financial section, replace the simple PAYG-vs-Hybrid comparison with a 3-
 > **so that** I can determine if consolidating onto PTU saves money.
 
 **Acceptance Criteria:**
-- [ ] "Consolidation" mode toggle is visible in the deployment selection step
-- [ ] Deployments are grouped by (model name, SKU type)
-- [ ] Checkboxes allow multi-select within a single group
-- [ ] Selecting across groups is prevented (with clear explanation)
-- [ ] "Analyze Consolidation" button is enabled only when ≥2 deployments are selected
-- [ ] Groups with only 1 deployment show a "nothing to consolidate" label
+- [x] "Consolidation" mode toggle is visible in the deployment selection step
+- [x] Deployments are grouped by (model name, SKU type)
+- [x] Checkboxes allow multi-select within a single group
+- [x] Selecting across groups is prevented (with toast notification and tooltip)
+- [x] "Analyze Consolidation" button is enabled only when ≥2 deployments are selected
+- [x] Groups with only 1 deployment show a "nothing to consolidate" label
 
 #### US-2: See combined workload analysis
 
@@ -235,11 +235,11 @@ In the Financial section, replace the simple PAYG-vs-Hybrid comparison with a 3-
 > **so that** I can make a data-driven decision about PTU consolidation.
 
 **Acceptance Criteria:**
-- [ ] Combined TPM time-series is the element-wise sum of individual deployment TPM series
-- [ ] Combined throttled requests is the element-wise sum across deployments
-- [ ] 4-dimension analysis runs on the combined `DeploymentMetrics` object
-- [ ] Cost analysis (break-even, spillover, cost curves) uses the combined workload
-- [ ] Recommendation reflects the consolidated picture, not any individual deployment
+- [x] Combined TPM time-series is the element-wise sum of individual deployment TPM series
+- [x] Combined throttled requests is the element-wise sum across deployments
+- [x] 4-dimension analysis runs on the combined `DeploymentMetrics` object
+- [x] Cost analysis (break-even, spillover, cost curves) uses the combined workload
+- [x] Recommendation reflects the consolidated picture, not any individual deployment
 
 #### US-3: Understand per-deployment contribution
 
@@ -248,10 +248,10 @@ In the Financial section, replace the simple PAYG-vs-Hybrid comparison with a 3-
 > **so that** I can explain to the customer why consolidation helps (or doesn't).
 
 **Acceptance Criteria:**
-- [ ] Consolidation Summary card shows per-deployment metrics side-by-side
-- [ ] Charts use color-coded traces with deployment name in the legend
-- [ ] Cost comparison shows each deployment's individual PAYG cost alongside the consolidated total
-- [ ] Hovering over a chart point shows the per-deployment breakdown in the tooltip
+- [x] Consolidation Summary card shows per-deployment metrics side-by-side
+- [x] Charts use color-coded traces with deployment name in the legend *(Phase 2 — per-deployment chart attribution)*
+- [x] Cost comparison shows each deployment's individual PAYG cost alongside the consolidated total
+- [x] Hovering over a chart point shows the per-deployment breakdown in the tooltip *(Phase 3 — tooltip enhancement)*
 
 #### US-4: Prevent mismatched consolidation
 
@@ -260,10 +260,10 @@ In the Financial section, replace the simple PAYG-vs-Hybrid comparison with a 3-
 > **so that** the analysis is valid (you can't share a PTU allocation across different models).
 
 **Acceptance Criteria:**
-- [ ] Deployments are grouped by (model base name, deployment type)
-- [ ] Checkbox selection is constrained to one group at a time
-- [ ] If user tries to check a deployment in a different group, previous selection is cleared with a toast notification
-- [ ] Tooltip on group headers explains: "PTU capacity is model-specific — only same-model deployments can share a PTU allocation"
+- [x] Deployments are grouped by (model base name, deployment type)
+- [x] Checkbox selection is constrained to one group at a time
+- [x] If user tries to check a deployment in a different group, previous selection is cleared with a toast notification
+- [x] Tooltip on group headers explains: "PTU capacity is model-specific — only same-model deployments can share a PTU allocation"
 
 #### US-5: Demo mode consolidation
 
@@ -272,9 +272,9 @@ In the Financial section, replace the simple PAYG-vs-Hybrid comparison with a 3-
 > **so that** I can evaluate the feature without a live connection.
 
 **Acceptance Criteria:**
-- [ ] Demo mode generates 2–3 same-model deployments per scenario group
-- [ ] User can multi-select among demo deployments and run consolidation
-- [ ] Results clearly show "Demo Data" watermark
+- [x] Demo mode generates 2–3 same-model deployments per scenario group
+- [x] User can multi-select among demo deployments and run consolidation
+- [ ] Results clearly show "Demo Data" watermark *(existing demo mode watermark; consolidation inherits it)*
 
 ---
 
@@ -490,10 +490,10 @@ class DemoScenario(str, Enum):
 
 Each consolidation demo scenario generates **3 sibling deployments** of the same model:
 
-| Scenario | Deployment A | Deployment B | Deployment C | Combined Verdict |
-|---|---|---|---|---|
-| `consolidate-worth-it` | 15K TPM, 2% throttle | 12K TPM, 1.5% throttle | 8K TPM, 0.5% throttle | PTU Recommended (35K combined crosses break-even) |
-| `consolidate-not-worth-it` | 3K TPM, 0% throttle | 1.5K TPM, 0% throttle | 800 TPM, 0% throttle | Not Recommended (5.3K combined, far below break-even) |
+| Scenario | Model | Deployment A (base) | Deployment B (scale) | Deployment C (scale) | Combined Verdict |
+|---|---|---|---|---|---|
+| `consolidate-worth-it` | gpt-4o (2024-11-20) | 15K TPM, 2% throttle | 80% of base TPM, 75% throttle scale | 53% of base TPM, 25% throttle scale | PTU Recommended |
+| `consolidate-not-worth-it` | gpt-4o-mini (2024-07-18) | 3K TPM, 0% throttle | 50% of base TPM, 0% throttle | 27% of base TPM, 0% throttle | Not Recommended |
 
 ### 3.5 Frontend Changes
 
@@ -625,44 +625,114 @@ The consolidation feature must be **immediately understandable**. Key copy guide
 
 ## 7. Implementation Phases
 
-### Phase 1: Core consolidation (MVP)
+### Phase 1: Core consolidation (MVP) — COMPLETE
 
 **Scope:** Backend merging + API endpoint + basic frontend multi-select + consolidation summary card + cost comparison table.
 
-| Item | Effort |
-|---|---|
-| `merge_deployment_metrics()` function | S |
-| `POST /api/analyze-consolidation` endpoint | M |
-| Validation logic (same model + type) | S |
-| Frontend: analysis mode toggle | S |
-| Frontend: grouped deployment picker with checkboxes | M |
-| Frontend: consolidation summary card | M |
-| Frontend: cost comparison table (Individual vs Consolidated vs Savings) | M |
-| Demo mode: consolidation scenarios (2) | S |
+| Item | Effort | Status |
+|---|---|---|
+| `merge_deployment_metrics()` function | S | Done |
+| `POST /api/analyze-consolidation` endpoint | M | Done |
+| Validation logic (same model + SKU type) | S | Done |
+| Frontend: analysis mode toggle | S | Done |
+| Frontend: grouped deployment picker with checkboxes | M | Done |
+| Frontend: consolidation summary card | M | Done |
+| Frontend: cost comparison table (Individual vs Consolidated vs Savings) | M | Done |
+| Demo mode: consolidation scenarios (2) | S | Done |
+| Toast notification on cross-group selection clear | S | Done |
+| Tooltip on group headers explaining PTU model constraint | S | Done |
+| Enriched cost table (per-deployment PAYG, spillover %, break-even, annual savings) | M | Done |
+| Inline TPM/throttle preview per deployment in picker (post-analysis) | S | Done |
+| Combined estimated TPM in selection counter | S | Done |
 
-### Phase 2: Per-deployment chart attribution
+**Implementation Notes (Phase 1):**
+- Mini-preview TPM/throttle data in the picker (§2.2 rule 4) is shown **post-analysis** from `consolidationSummary.individual_deployments` rather than pre-fetched. A lightweight `GET /api/deployments/preview` endpoint was added in Phase 3 to provide pre-analysis preview data.
+- Demo scenarios use **scaling factors** for sibling deployment generation rather than exact TPM values from the PRD table. The CONSOLIDATE_WORTH_IT scenario uses gpt-4o (15K base TPM, siblings at 80%/53% scale); the CONSOLIDATE_NOT_WORTH_IT scenario uses gpt-4o-mini (3K base TPM, siblings at 50%/27% scale).
+- Latency P99 merge uses **element-wise max** (worst-case) instead of weighted average, matching the PRD spec.
+- Max 10 deployments enforced at Pydantic validation level (`max_length=10`).
+- Default granularity is 1 minute (changed from original 5-minute default).
+- SKU type validation added to both `merge_deployment_metrics()` and the API endpoint.
+
+**Test Coverage:**
+- 33 backend unit tests: 30 in `tests/test_merge.py` (merge logic) + 3 new SKU/max validation tests
+- 30 backend API tests: `tests/test_consolidation_api.py` (demo mode, validation, request params, per-deployment chart data)
+- 52 frontend tests pass (TypeScript type-checks clean)
+
+### Phase 2: Per-deployment chart attribution — COMPLETE
 
 **Scope:** Stacked/layered charts showing per-deployment contribution.
 
-| Item | Effort |
+| Item | Status |
 |---|---|
-| Backend: return `per_deployment` chart series in response | M |
-| Frontend: stacked area chart for tokens/TPM | M |
-| Frontend: stacked bar chart for requests | M |
-| Frontend: overlaid line chart for latency | M |
-| Color palette assignment logic | S |
-| Tooltip with per-deployment breakdown | S |
+| Backend: `serialize_per_deployment_charts()` in merge.py returns `per_deployment` chart series | Done |
+| Backend: consolidation endpoint enriches response with per-deployment data + latency section | Done |
+| Frontend: `DEPLOYMENT_COLORS` palette + `getDeploymentColor()` + `hexToRgba()` in theme.ts | Done |
+| Frontend: `ConsolidationCharts` type + per-deployment sub-types in types.ts | Done |
+| Frontend: `TokenVolumeChart` — stacked areas per deployment + combined dashed line | Done |
+| Frontend: `RequestOutcomesChart` — stacked areas per deployment + combined dashed line | Done |
+| Frontend: `ThrottleChart` — stacked areas per deployment + combined dashed line | Done |
+| Frontend: `TpmBandChart` — stacked areas per deployment + combined dashed line (preserves Avg/refLabel) | Done |
+| Frontend: `LatencyOverlayChart` — NEW component for per-deployment P95 lines + combined P50/P95 | Done |
+| Frontend: App.tsx integration — `perDepCharts` useMemo + props passed to all charts + LatencyOverlayChart card | Done |
+| Backend tests: 12 new tests covering per-deployment data shape, alignment, latency section | Done |
+| Full regression: 641 backend tests pass, 52 frontend tests pass, TypeScript clean | Done |
 
-### Phase 3: Polish & edge cases
+### Phase 3: Polish & edge cases — COMPLETE
 
 **Scope:** Export support, error handling, UX refinements.
 
-| Item | Effort |
-|---|---|
-| Export Report support for consolidation results | M |
-| Time window mismatch warnings | S |
-| "Already on PTU" messaging variant | S |
-| Limit enforcement (max 10 deployments) | S |
+| Item | Effort | Status |
+|---|---|---|
+| Export Report support for consolidation results | M | Done |
+| Per-deployment tooltip breakdown on chart hover | S | Done |
+| Time window mismatch warnings | S | Done |
+| "Already on PTU" messaging variant | S | Done |
+| Limit enforcement (max 10 deployments) | ~~S~~ Done in Phase 1 | Done |
+| Lightweight `GET /api/deployments/preview` for pre-analysis TPM/throttle | S | Done |
+
+**Phase 3 Implementation Log (Tooltips):**
+- `fmtPct(part, total)` utility added to `frontend/src/charts/theme.ts`
+- All 5 consolidation charts enhanced with per-deployment tooltip breakdowns:
+  - `TokenVolumeChart` — combined total + per-dep total with prompt/completion + % contribution
+  - `RequestOutcomesChart` — combined OK+429 + per-dep grouped OK/429 + % contribution
+  - `ThrottleChart` — combined total + per-dep with % contribution
+  - `TpmBandChart` — combined total + per-dep with % contribution + avg/refLine footer
+  - `LatencyOverlayChart` — combined P95+P50 + per-dep P95+P50 from raw data
+
+**Phase 3 Implementation Log (Export Report):**
+- `ExportReport.tsx` — added `consolidationSummary` optional prop, consolidation header, section 2 consolidation summary table, per-deployment metrics table, consolidation cost comparison, shifted section numbering, CSS for `.report-consolidation-table` and `.consolidation-total-row`
+- `App.tsx` — wired `consolidationSummary` prop to `<ExportReport>`
+- Export filename: `ptu-consolidation-{model}-{count}deps-{date}.html` in consolidation mode, `ptu-assessment-{deployment}-{date}.html` in single mode
+- HTML `<title>` dynamically set to "Consolidation Assessment" vs "Deployment Assessment"
+- 10 new tests in `ExportReport.test.tsx` covering consolidation content, section numbering, savings messaging, filename prefixes
+- Full regression: 641 backend tests pass, 62 frontend tests pass, TypeScript clean, Docker builds
+
+**Phase 3 Implementation Log (Time Window Mismatch Warnings):**
+- Backend: Added `warnings: List[str]` field to `ConsolidationSummary` model (server.py)
+- Backend: Time-window mismatch detection — if a deployment's data span covers < 80% of the global analysis window, a warning is generated identifying the missing date ranges
+- Frontend: `warnings: string[]` added to `ConsolidationSummary` type (types.ts)
+- Frontend: Amber warning banner with ⚠ SVG icon displayed above consolidation summary card when warnings are present (App.tsx)
+- Frontend: Warnings rendered in export report (ExportReport.tsx)
+- 6 backend tests in `TestTimeWindowMismatchWarnings` class (test_consolidation_api.py)
+- 5 frontend tests in "Consolidation export — warnings and all_on_ptu" describe block (ExportReport.test.tsx)
+
+**Phase 3 Implementation Log ("Already on PTU" Messaging):**
+- Backend: Added `all_on_ptu: bool` field to `ConsolidationSummary` model (server.py)
+- Backend: Detection logic — checks if all selected deployments have `sku_type == "ProvisionedManaged"`, adds warning message
+- Frontend: 3-branch verdict messaging in consolidation summary card: (1) all_on_ptu + savings, (2) all_on_ptu + no savings, (3) standard PAYG→PTU message (App.tsx)
+- Frontend: `all_on_ptu` flag rendered in export report with appropriate messaging (ExportReport.tsx)
+- 7 backend tests in `TestAllOnPtuDetection` class (test_consolidation_api.py)
+- Full regression: 654 backend tests pass, 67 frontend tests pass, TypeScript clean
+
+**Phase 3 Implementation Log (Lightweight Preview Endpoint):**
+- Backend: `DeploymentPreview(BaseModel)` class with `name`, `avg_tpm`, `throttling_rate_pct` fields (server.py line ~1564)
+- Backend: `GET /api/deployments/preview` endpoint — demo mode generates metrics from consolidation demo scenario and extracts summary stats; live mode creates `MetricsCollector` per deployment with 5-minute granularity for speed (server.py lines ~1572-1654)
+- Backend: Endpoint uses `focus_topic` query param to select demo scenario (e.g. "Cost Reduction" → CONSOLIDATE_WORTH_IT)
+- Frontend: `DeploymentPreview` type added to types.ts; `api.deploymentPreview()` method added to api.ts
+- Frontend: `deploymentPreviews` state + `useEffect` in App.tsx fetches preview data when `analysisMode === 'consolidation'` in demo mode
+- Frontend: Preview chips in deployment picker show dashed border styling (`.deployment-chip-preview` CSS class) when pre-analysis data is available; post-analysis data from `consolidationSummary` takes precedence with solid `deployment-chip-metric` styling
+- 15 backend tests: 8 in `TestDeploymentPreviewDemoMode` + 7 in `TestDeploymentPreviewLiveMode` (test_consolidation_api.py)
+- Full regression: 669 backend tests pass, 67 frontend tests pass, TypeScript clean
 
 ---
 
@@ -670,7 +740,7 @@ The consolidation feature must be **immediately understandable**. Key copy guide
 
 | # | Question | Status |
 |---|---|---|
-| 1 | Should the mini-preview TPM/throttle in the deployment picker be fetched live (slow) or use cached/estimated values? | **Recommendation**: Use a lightweight `GET /api/deployments/preview` that fetches 1-day averages with a 5-min cache. Keeps the picker fast without stale data. |
+| 1 | Should the mini-preview TPM/throttle in the deployment picker be fetched live (slow) or use cached/estimated values? | **Resolved (Phase 3)**: Lightweight `GET /api/deployments/preview` endpoint fetches summary stats pre-analysis. Demo mode uses generated metrics; live mode uses 5-minute granularity for speed. Post-analysis data from `consolidationSummary` takes precedence. |
 | 2 | Should we show a "what if you added deployment X" suggestion after consolidation results? | Defer to v2. Interesting but adds complexity. |
-| 3 | For consolidation, should the PTU baseline slider still be interactive? | **Yes** — the combined workload should still allow slider-based what-if exploration. The slider operates on the merged TPM series. |
-| 4 | Should consolidation analysis support the time-window zoom feature? | **Yes** — zoom should work identically to single-deployment mode, applied to the merged time series. |
+| 3 | For consolidation, should the PTU baseline slider still be interactive? | **Yes — Implemented.** The slider operates on the merged TPM series. |
+| 4 | Should consolidation analysis support the time-window zoom feature? | **Yes — Implemented.** Zoom works identically to single-deployment mode. |

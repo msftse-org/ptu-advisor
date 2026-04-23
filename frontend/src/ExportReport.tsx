@@ -1,11 +1,12 @@
 import { useCallback, useRef, useState } from 'react'
-import type { AnalysisResponse } from './types'
+import type { AnalysisResponse, ConsolidationSummary } from './types'
 import './export-report.css'
 
 interface ExportReportProps {
   analysis: AnalysisResponse
   baseAnalysis: AnalysisResponse | null
   isZoomed: boolean
+  consolidationSummary?: ConsolidationSummary | null
 }
 
 /* ── Formatting helpers ── */
@@ -288,21 +289,34 @@ function ThrottleChart({ charts }: { charts: AnalysisResponse['charts'] }) {
 
 /* ── The static report markup ── */
 
-function ReportContent({ analysis, baseAnalysis, isZoomed }: ExportReportProps) {
+function ReportContent({ analysis, baseAnalysis, isZoomed, consolidationSummary }: ExportReportProps) {
   const rec = getRecDisplay(analysis.recommendation)
   const m = analysis.metrics
   const cost = analysis.cost_analysis
   const nextSteps = buildNextSteps(analysis)
   const now = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+  const isConsolidated = consolidationSummary != null
 
   return (
     <div className="export-report" id="export-report-root">
       {/* Header */}
       <header className="report-header">
-        <h1 className="report-title">PTU Advisor — Deployment Assessment</h1>
+        <h1 className="report-title">
+          PTU Advisor — {isConsolidated ? 'Consolidation Assessment' : 'Deployment Assessment'}
+        </h1>
         <div className="report-meta">
-          <span><strong>Deployment:</strong> {m.deployment_name}</span>
-          <span><strong>Model:</strong> {m.model_name}</span>
+          {isConsolidated ? (
+            <>
+              <span><strong>Analysis Mode:</strong> Consolidation ({consolidationSummary.deployment_count} deployments)</span>
+              <span><strong>Model:</strong> {consolidationSummary.model_name}</span>
+              <span><strong>Deployments:</strong> {consolidationSummary.individual_deployments.map(d => d.name).join(', ')}</span>
+            </>
+          ) : (
+            <>
+              <span><strong>Deployment:</strong> {m.deployment_name}</span>
+              <span><strong>Model:</strong> {m.model_name}</span>
+            </>
+          )}
           <span>
             <strong>Analysis Period:</strong> {analysis.analysis_period}
             {isZoomed && ' (zoomed)'}
@@ -327,9 +341,82 @@ function ReportContent({ analysis, baseAnalysis, isZoomed }: ExportReportProps) 
         <p className="report-summary">{analysis.summary}</p>
       </section>
 
-      {/* 2 — Key Evidence */}
+      {/* Consolidation Summary (only in consolidation mode) */}
+      {isConsolidated && (
+        <section className="report-section">
+          <h2 className="report-section-title">2. Consolidation Summary</h2>
+          <p className="report-text" style={{ marginBottom: 8 }}>
+            {consolidationSummary.all_on_ptu
+              ? `All ${consolidationSummary.deployment_count} deployments already use PTU. ${
+                  consolidationSummary.savings > 0
+                    ? `Consolidating onto a single PTU allocation saves an estimated ${fmtCurrency(consolidationSummary.savings)}/month (${fmtPct(consolidationSummary.savings_pct)}) vs the current combined PTU spend.`
+                    : `The current separate PTU allocations are already cost-effective. Consolidation would cost ${fmtCurrency(Math.abs(consolidationSummary.savings))}/month more.`
+                }`
+              : consolidationSummary.savings > 0
+                ? `Consolidating these ${consolidationSummary.deployment_count} deployments onto shared PTU capacity saves an estimated ${fmtCurrency(consolidationSummary.savings)}/month (${fmtPct(consolidationSummary.savings_pct)}).`
+                : `Consolidation does not save money. Individual PAYG is more cost-effective by ${fmtCurrency(Math.abs(consolidationSummary.savings))}/month.`
+            }
+          </p>
+          {consolidationSummary.warnings.length > 0 && (
+            <div className="report-consolidation-warnings" data-testid="report-consolidation-warnings">
+              {consolidationSummary.warnings.map((w, i) => (
+                <p key={i} className="report-warning-item">{w}</p>
+              ))}
+            </div>
+          )}
+          <table className="report-consolidation-table">
+            <thead>
+              <tr>
+                <th>Deployment</th>
+                <th style={{ textAlign: 'right' }}>Avg TPM</th>
+                <th style={{ textAlign: 'right' }}>Peak TPM</th>
+                <th style={{ textAlign: 'right' }}>Throttle %</th>
+                <th style={{ textAlign: 'right' }}>PAYG Cost</th>
+              </tr>
+            </thead>
+            <tbody>
+              {consolidationSummary.individual_deployments.map(dep => (
+                <tr key={dep.name}>
+                  <td>{dep.name}</td>
+                  <td style={{ textAlign: 'right' }}>{fmtNumber(dep.avg_tpm)}</td>
+                  <td style={{ textAlign: 'right' }}>{fmtNumber(dep.peak_tpm)}</td>
+                  <td style={{ textAlign: 'right' }}>{fmtPct(dep.throttling_rate_pct)}</td>
+                  <td style={{ textAlign: 'right' }}>{fmtCurrency(dep.payg_monthly_cost)}</td>
+                </tr>
+              ))}
+              <tr className="consolidation-total-row">
+                <td><strong>Combined</strong></td>
+                <td style={{ textAlign: 'right' }}><strong>{fmtNumber(consolidationSummary.combined_avg_tpm)}</strong></td>
+                <td style={{ textAlign: 'right' }}><strong>{fmtNumber(consolidationSummary.combined_peak_tpm)}</strong></td>
+                <td style={{ textAlign: 'right' }}><strong>{fmtPct(consolidationSummary.combined_throttling_rate_pct)}</strong></td>
+                <td style={{ textAlign: 'right' }}><strong>{fmtCurrency(consolidationSummary.individual_payg_total)}</strong></td>
+              </tr>
+            </tbody>
+          </table>
+          <table className="report-cost-table" style={{ marginTop: 12 }}>
+            <tbody>
+              <tr>
+                <td className="cost-label">Sum of Individual PAYG</td>
+                <td className="cost-value">{fmtCurrency(consolidationSummary.individual_payg_total)} / month</td>
+              </tr>
+              <tr>
+                <td className="cost-label">Consolidated PTU + Spillover</td>
+                <td className="cost-value">{fmtCurrency(consolidationSummary.consolidated_hybrid_cost)} / month</td>
+              </tr>
+              <tr className="cost-highlight">
+                <td className="cost-label">Monthly Savings</td>
+                <td className="cost-value">
+                  {consolidationSummary.savings > 0 ? '-' : '+'}{fmtCurrency(Math.abs(consolidationSummary.savings))} ({fmtPct(Math.abs(consolidationSummary.savings_pct))})
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {/* Key Evidence (section number adjusts for consolidation) */}
       <section className="report-section">
-        <h2 className="report-section-title">2. Key Evidence</h2>
+        <h2 className="report-section-title">{isConsolidated ? '3' : '2'}. Key Evidence{isConsolidated ? ' (Combined Metrics)' : ''}</h2>
         <table className="report-metrics-table">
           <tbody>
             <tr><td className="metric-label">Average TPM</td><td className="metric-value">{fmtNumber(m.avg_tpm)}</td></tr>
@@ -344,9 +431,9 @@ function ReportContent({ analysis, baseAnalysis, isZoomed }: ExportReportProps) 
         <ThrottleChart charts={analysis.charts} />
       </section>
 
-      {/* 3 — Cost Comparison */}
+      {/* Cost Comparison */}
       <section className="report-section">
-        <h2 className="report-section-title">3. Cost Comparison</h2>
+        <h2 className="report-section-title">{isConsolidated ? '4' : '3'}. Cost Comparison</h2>
         <table className="report-cost-table">
           <tbody>
             <tr>
@@ -377,9 +464,9 @@ function ReportContent({ analysis, baseAnalysis, isZoomed }: ExportReportProps) 
         <CostCurveChart charts={analysis.charts} />
       </section>
 
-      {/* 4 — Why This Recommendation */}
+      {/* Why This Recommendation */}
       <section className="report-section">
-        <h2 className="report-section-title">4. Why This Recommendation</h2>
+        <h2 className="report-section-title">{isConsolidated ? '5' : '4'}. Why This Recommendation</h2>
         <p className="report-text">{analysis.explanation}</p>
         <ul className="report-dimensions">
           {analysis.dimensions
@@ -391,15 +478,15 @@ function ReportContent({ analysis, baseAnalysis, isZoomed }: ExportReportProps) 
         </ul>
       </section>
 
-      {/* 5 — What Would Change This */}
+      {/* What Would Change This */}
       <section className="report-section">
-        <h2 className="report-section-title">5. What Would Change This</h2>
+        <h2 className="report-section-title">{isConsolidated ? '6' : '5'}. What Would Change This</h2>
         <p className="report-text">{analysis.what_would_change}</p>
       </section>
 
-      {/* 6 — Next Steps */}
+      {/* Next Steps */}
       <section className="report-section">
-        <h2 className="report-section-title">6. Recommended Next Steps</h2>
+        <h2 className="report-section-title">{isConsolidated ? '7' : '6'}. Recommended Next Steps</h2>
         <ol className="report-next-steps">
           {nextSteps.map((step, i) => <li key={i}>{step}</li>)}
         </ol>
@@ -444,17 +531,25 @@ const REPORT_INLINE_CSS = `
   .report-chart { margin-top: 16px; }
   .report-chart-title { font-size: 13px; font-weight: 600; color: #323130; margin-bottom: 6px; }
   .report-chart-svg { width: 100%; height: auto; display: block; }
+  .report-consolidation-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; font-size: 13px; }
+  .report-consolidation-table th { text-align: left; padding: 6px 12px; border-bottom: 2px solid #edebe9; color: #605e5c; font-weight: 600; font-size: 12px; }
+  .report-consolidation-table td { padding: 6px 12px; border-bottom: 1px solid #f3f2f1; }
+  .consolidation-total-row td { border-top: 2px solid #edebe9; background: #faf9f8; }
+  .report-consolidation-warnings { margin-bottom: 10px; }
+  .report-warning-item { margin: 0 0 4px 0; padding: 6px 10px; background: #fff8e1; border-left: 3px solid #d4a017; font-size: 12px; line-height: 1.5; color: #7a6520; }
 `
 
 /* ── Export logic ── */
 
 function buildReportHTML(reportEl: HTMLElement): string {
+  const isConsolidation = reportEl.querySelector('.report-consolidation-table') != null
+  const title = isConsolidation ? 'PTU Advisor — Consolidation Assessment' : 'PTU Advisor — Deployment Assessment'
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PTU Advisor — Deployment Assessment</title>
+  <title>${title}</title>
   <style>${REPORT_INLINE_CSS}</style>
 </head>
 <body>
@@ -491,9 +586,10 @@ function printReport(reportEl: HTMLElement) {
 
 /* ── Public component ── */
 
-export function ExportReport({ analysis, baseAnalysis, isZoomed }: ExportReportProps) {
+export function ExportReport({ analysis, baseAnalysis, isZoomed, consolidationSummary }: ExportReportProps) {
   const reportRef = useRef<HTMLDivElement>(null)
   const [dropdownOpen, setDropdownOpen] = useState(false)
+  const isConsolidated = consolidationSummary != null
 
   const handlePDF = useCallback(() => {
     setDropdownOpen(false)
@@ -504,9 +600,13 @@ export function ExportReport({ analysis, baseAnalysis, isZoomed }: ExportReportP
     setDropdownOpen(false)
     if (!reportRef.current) return
     const html = buildReportHTML(reportRef.current)
-    const name = `ptu-assessment-${analysis.metrics.deployment_name}-${new Date().toISOString().slice(0, 10)}.html`
+    const prefix = isConsolidated ? 'ptu-consolidation' : 'ptu-assessment'
+    const suffix = isConsolidated
+      ? `${consolidationSummary.model_name}-${consolidationSummary.deployment_count}deps`
+      : analysis.metrics.deployment_name
+    const name = `${prefix}-${suffix}-${new Date().toISOString().slice(0, 10)}.html`
     downloadBlob(html, name)
-  }, [analysis.metrics.deployment_name])
+  }, [analysis.metrics.deployment_name, isConsolidated, consolidationSummary])
 
   return (
     <>
@@ -530,7 +630,7 @@ export function ExportReport({ analysis, baseAnalysis, isZoomed }: ExportReportP
 
       {/* Hidden report content (used as source for export) */}
       <div ref={reportRef} style={{ position: 'absolute', left: '-9999px', top: 0 }} aria-hidden="true">
-        <ReportContent analysis={analysis} baseAnalysis={baseAnalysis} isZoomed={isZoomed} />
+        <ReportContent analysis={analysis} baseAnalysis={baseAnalysis} isZoomed={isZoomed} consolidationSummary={consolidationSummary} />
       </div>
     </>
   )

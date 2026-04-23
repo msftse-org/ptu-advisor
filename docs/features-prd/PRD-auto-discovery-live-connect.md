@@ -1,8 +1,8 @@
 # PRD: Auto-Discovery Live Connect for PTU Advisor
 
-> **Status:** Draft  
+> **Status:** Implemented  
 > **Author:** PTU Advisor Team  
-> **Date:** 2026-02-11  
+> **Date:** 2026-02-11 (Updated: 2026-04-02)  
 > **Priority:** P0 — Core feature for production readiness
 
 ---
@@ -101,7 +101,7 @@ Replace the manual-entry Azure connection flow with an **automatic resource disc
 - When user selects "Connect to Azure," authentication happens automatically using `az login` credentials.
 - A status indicator shows: spinner → "Signed in as user@contoso.com" (with the user's actual identity).
 - If not authenticated, a clear error message says: "Please run `az login` in your terminal first."
-- Authentication result is cached in `st.session_state` so it doesn't re-run on every Streamlit rerun.
+- Authentication result is cached so it doesn't re-run on every page interaction.
 
 #### US-2: Auto-discover subscriptions
 > **As a** Platform Lead with multiple subscriptions,  
@@ -163,9 +163,9 @@ Replace the manual-entry Azure connection flow with an **automatic resource disc
 - Upon selection, it shows: "Azure SDK packages are required. Run: `pip install azure-identity azure-mgmt-cognitiveservices azure-mgmt-monitor azure-mgmt-resource`"
 - Demo mode remains fully functional.
 
-### 2.4 Non-Goals
+### 2.4 Non-Goals (Original — Some Now Implemented)
 
-- **Multi-deployment comparison in a single analysis run.** Users analyze one deployment at a time. Comparison features are a future enhancement.
+- **~~Multi-deployment comparison in a single analysis run.~~** *(Implemented as "Consolidation Mode" — users can select 2+ deployments of the same model for combined analysis.)*
 - **Write operations.** The dashboard never modifies Azure resources — it is strictly read-only.
 - **Service principal / client-secret auth.** Only `az login` / Managed Identity / DefaultAzureCredential flows are supported.
 - **Cross-tenant discovery.** Only resources in the authenticated tenant are shown.
@@ -178,16 +178,16 @@ Replace the manual-entry Azure connection flow with an **automatic resource disc
 
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Streamlit UI    │────▶│  Discovery Layer  │────▶│  Azure ARM APIs │
-│  (app.py)        │     │  (discovery.py)   │     │                 │
-│                  │     │                   │     │  - SubscriptionClient
-│  • Subscription  │     │  • list_subs()    │     │  - CogServicesClient
-│    dropdown      │     │  • list_accounts()│     │  - MonitorClient
-│  • Account       │     │  • list_deploys() │     │                 │
-│    dropdown      │     │  • get_identity() │     └─────────────────┘
-│  • Deployment    │     └──────────────────┘
-│    cards         │              │
-│                  │              ▼
+│  React SPA       │────▶│  FastAPI Backend  │────▶│  Azure ARM APIs │
+│  (App.tsx)       │     │  (server.py)      │     │                 │
+│                  │     │  ↕                │     │  - SubscriptionClient
+│  • Subscription  │     │  Discovery Layer  │     │  - CogServicesClient
+│    radio cards   │     │  (discovery.py)   │     │  - MonitorClient
+│  • Account       │     │  • list_subs()    │     │                 │
+│    radio cards   │     │  • list_accounts()│     └─────────────────┘
+│  • Deployment    │     │  • list_deploys() │
+│    cards         │     │  • authenticate() │
+│                  │     └──────────────────┘
 │  ▶ Analyze ──────┼───▶  MetricsCollector.collect()
 │                  │              │
 │                  │              ▼
@@ -198,7 +198,7 @@ Replace the manual-entry Azure connection flow with an **automatic resource disc
 
 ### 3.2 New Module: `ptu_advisor/discovery.py`
 
-A thin orchestration layer that wraps Azure SDK calls with caching, error handling, and Streamlit-friendly return types.
+A thin orchestration layer that wraps Azure SDK calls with caching, error handling, and typed return values.
 
 ```python
 # Key functions:
@@ -221,11 +221,11 @@ def list_deployments(credential, subscription_id, resource_group, account_name) 
 
 | Data | Cache Key | TTL | Mechanism |
 |------|-----------|-----|-----------|
-| Credential + UserInfo | `azure_credential` | Session lifetime | `st.session_state` (not serializable → no `@st.cache_data`) |
-| Subscriptions | `f"subs_{tenant_id}"` | 300s | `@st.cache_data` |
-| Accounts | `f"accounts_{sub_id}"` | 300s | `@st.cache_data` |
-| Deployments | `f"deps_{sub_id}_{account}"` | 120s | `@st.cache_data` |
-| Metrics + Analysis | `f"analysis_{sub}_{rg}_{acct}_{dep}_{days}"` | 300s | `@st.cache_data` |
+| Credential + UserInfo | `azure_credential` | Session lifetime | Module-level singleton in `auth.py` |
+| Subscriptions | `"subs"` | 300s | `_TTLCache` in `discovery.py` |
+| Accounts | `f"accounts_{sub_id}"` | 300s | `_TTLCache` in `discovery.py` |
+| Deployments | `f"deps_{sub_id}_{rg}_{account}"` | 120s | `_TTLCache` in `discovery.py` |
+| Metrics + Analysis | `f"analysis_{sub}_{rg}_{acct}_{dep}_{days}"` | 300s | Future (not yet cached) |
 
 ### 3.4 Error Handling
 
@@ -267,9 +267,10 @@ def list_deployments(credential, subscription_id, resource_group, account_name) 
 │  Tenant: Contoso Corp (abc123...)           │
 └─────────────────────────────────────────────┘
 ```
-- Uses `st.success()` for the green banner.
-- Shown immediately after credential validation.
-- If auth fails: `st.error()` with "Run `az login`" instructions.
+- Rendered as a styled `div.auth-status-banner` in the React SPA with green/red variants.
+- Shown immediately after credential validation via `GET /api/discovery/auth-status`.
+- If auth fails: red banner with "Run `az login`" instructions.
+- Includes a Refresh button to re-discover resources (clears backend TTL cache).
 
 ### 4.2 Cascading Dropdowns
 
@@ -279,7 +280,7 @@ Each dropdown triggers re-fetch of the level below:
 2. **Account** dropdown → fetches deployments for that account.
 3. **Deployment** cards → user selects one → "Analyze" button enables.
 
-Use `st.selectbox` for subscriptions and accounts. Use custom HTML/CSS cards with `st.radio` for deployments.
+Use radio-card groups for subscriptions, accounts, and deployments in the React SPA. API calls are made to FastAPI endpoints: `GET /api/discovery/subscriptions`, `GET /api/discovery/accounts`, `GET /api/discovery/deployments`.
 
 ### 4.3 Deployment Card Design
 
@@ -323,11 +324,12 @@ Use `st.selectbox` for subscriptions and accounts. Use custom HTML/CSS cards wit
 - Full analysis pipeline from live data.
 - Graceful SDK-not-installed fallback.
 
-### Phase 2: Polish (Follow-up)
+### Phase 2: Polish (Implemented)
 
-- Remember last-used subscription/account/deployment in `st.session_state` across sessions (via query params or local storage).
-- "Refresh" button to re-discover resources without page reload.
-- Show deployment-level quick stats (last 24h TPM, throttle rate) on the card before full analysis.
+- Remember last-used subscription/account/deployment via `localStorage` persistence.
+- "Refresh" button to re-discover resources (calls `POST /api/discovery/refresh` to invalidate backend cache).
+- "Already on PTU" badge and "analyze to validate sizing" hint on ProvisionedManaged deployments.
+- Performance budget telemetry (emits `performance_budget_exceeded` when latency targets are missed).
 
 ### Phase 3: Advanced (Future)
 
@@ -340,14 +342,21 @@ Use `st.selectbox` for subscriptions and accounts. Use custom HTML/CSS cards wit
 ## 7. Implementation Checklist
 
 - [x] PRD written and approved
-- [ ] Create `ptu_advisor/discovery.py` with `authenticate()`, `list_subscriptions()`, `list_ai_accounts()`, `list_deployments()` 
-- [ ] Add `SubscriptionInfo`, `AccountInfo` dataclasses to discovery module
-- [ ] Rewrite "Connect to Azure" section in `app.py` welcome page with cascading dropdowns
-- [ ] Implement deployment card rendering (HTML/CSS + `st.radio`)
-- [ ] Route "Analyze" button to `load_live_data()` with discovered resource coordinates
-- [ ] Update sidebar to show live deployment info when in live mode
-- [ ] Update footer to show "Live: deployment-name" instead of "Demo: ..."
-- [ ] Add SDK-not-installed graceful fallback
+- [x] Create `ptu_advisor/discovery.py` with `authenticate()`, `list_subscriptions()`, `list_ai_accounts()`, `list_deployments()` 
+- [x] Add `SubscriptionInfo`, `AccountInfo` dataclasses to discovery module
+- [x] Implement cascading radio-card pickers in React SPA (`App.tsx`) with FastAPI backend endpoints
+- [x] Implement deployment card rendering with model family grouping, eligibility chips, and PTU badges
+- [x] Route "Analyze" button to `load_live_data()` with discovered resource coordinates
+- [x] Add SDK-not-installed graceful fallback
+- [x] Auth status banner (`GET /api/discovery/auth-status`) with signed-in identity display
+- [x] Discovery telemetry events (PRD §10) with hashed tenant IDs (PRD §11)
+- [x] TTL caching for subscriptions (300s), accounts (300s), deployments (120s)
+- [x] Structured RBAC error messages with remediation steps
+- [x] Performance budget instrumentation (≤10s full discovery, ≤2s cached changes)
+- [x] "Already on PTU" card messaging for ProvisionedManaged deployments
+- [x] localStorage persistence of last-used subscription/account/deployment
+- [x] Refresh button with backend cache invalidation (`POST /api/discovery/refresh`)
+- [x] PRD updated to reflect React+FastAPI architecture
 - [ ] Manual end-to-end test with real Azure subscription
 
 ---
@@ -356,11 +365,11 @@ Use `st.selectbox` for subscriptions and accounts. Use custom HTML/CSS cards wit
 
 | Requirement ID | Description | Primary Files | Test Coverage | KPI |
 |---|---|---|---|---|
-| `REQ-UX-201` | Zero manual input discovery flow | `dashboard/app.py`, `discovery.py` | `test_discovery.py::test_cascading_discovery_flow` | Time-to-selection |
-| `REQ-DATA-202` | Subscription/account/deployment discovery correctness | `discovery.py` | `test_discovery.py::test_list_*` | First-run success rate |
-| `REQ-SEC-203` | Read-only behavior with no mutation operations | `discovery.py`, auth integration | static + integration checks | Security compliance |
-| `REQ-UX-204` | Graceful fallback when SDKs absent | `dashboard/app.py` | `test_smoke.py::test_demo_mode_without_sdk` | Demo availability |
-| `REQ-OBS-205` | Discovery/auth failure telemetry emitted | UI + discovery layer | telemetry validation | Error triage speed |
+| `REQ-UX-201` | Zero manual input discovery flow | `frontend/src/App.tsx`, `ptu_advisor/discovery.py`, `ptu_advisor/api/server.py` | `test_discovery.py::test_cascading_discovery_flow` | Time-to-selection |
+| `REQ-DATA-202` | Subscription/account/deployment discovery correctness | `ptu_advisor/discovery.py` | `test_discovery.py::test_list_*` | First-run success rate |
+| `REQ-SEC-203` | Read-only behavior with no mutation operations | `ptu_advisor/discovery.py`, auth integration | static + integration checks | Security compliance |
+| `REQ-UX-204` | Graceful fallback when SDKs absent | `frontend/src/App.tsx` | `test_smoke.py::test_demo_mode_without_sdk` | Demo availability |
+| `REQ-OBS-205` | Discovery/auth failure telemetry emitted | `frontend/src/telemetry.ts`, discovery layer | telemetry validation | Error triage speed |
 
 ## 9. Performance Budgets
 

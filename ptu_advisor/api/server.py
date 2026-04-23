@@ -10,7 +10,12 @@ from pydantic import BaseModel, Field
 
 from ptu_advisor.analysis.engine import DecisionEngine
 from ptu_advisor.auth import get_azure_credential
-from ptu_advisor.config import AnalysisConfig, get_model_config
+from ptu_advisor.config import (
+    AnalysisConfig,
+    get_ineligibility_reason,
+    get_model_config,
+    get_model_family,
+)
 from ptu_advisor.cost.calculator import (
     calculate_break_even,
     calculate_break_even_for_fixed_ptu,
@@ -27,8 +32,24 @@ from ptu_advisor.cost.pricing import (
     normalize_region,
 )
 from ptu_advisor.cost.price_resolver import PricingResolver, get_pricing_resolver
-from ptu_advisor.demo import DemoScenario, FOCUS_TOPICS, generate_demo_metrics
-from ptu_advisor.discovery import list_ai_accounts, list_deployments, list_subscriptions
+from ptu_advisor.demo import (
+    DemoScenario,
+    FOCUS_TOPICS,
+    generate_demo_metrics,
+    generate_consolidation_demo_metrics,
+)
+from ptu_advisor.metrics.merge import (
+    compute_individual_payg_cost,
+    merge_deployment_metrics,
+    serialize_per_deployment_charts,
+)
+from ptu_advisor.discovery import (
+    authenticate,
+    invalidate_discovery_cache,
+    list_ai_accounts,
+    list_deployments,
+    list_subscriptions,
+)
 from ptu_advisor.metrics.collector import MetricsCollector
 from ptu_advisor.metrics.models import DeploymentMetrics, TimeSeries
 
@@ -37,7 +58,7 @@ class AnalyzeRequest(BaseModel):
     mode: Literal["demo", "live"] = "live"
     focus_topic: str = "Cost Reduction"
     lookback_days: int = Field(default=14, ge=1, le=30)
-    granularity_minutes: Literal[1, 5, 15, 30] = 5
+    granularity_minutes: Literal[1, 5, 15, 30] = 1
     window_start: Optional[datetime] = None
     window_end: Optional[datetime] = None
 
@@ -48,28 +69,16 @@ class AnalyzeRequest(BaseModel):
     reservation_type: Literal[
         "Hourly — No Commitment",
         "Monthly Commitment (Estimated 64% off)",
-        "1-Year Commitment (Estimated 69% off)",
     ] = "Monthly Commitment (Estimated 64% off)"
-    baseline_percentile: int = Field(default=75, ge=0, le=95)
-    baseline_ptu: Optional[int] = Field(
-        default=None,
-        ge=0,
-        description="PTU units for slider. When set, overrides baseline_percentile.",
-    )
+    baseline_percentile: Optional[float] = None
+    baseline_ptu: Optional[int] = None
     region: str = "eastus"
     deployment_type: Literal["global", "data_zone", "regional"] = "global"
     include_throttle: bool = False
 
-    # Pricing overrides (optional — takes highest priority over live/cached/fallback)
-    payg_input_rate_override: Optional[float] = Field(
-        default=None, ge=0, description="Custom PAYG input rate ($ per 1M tokens)"
-    )
-    payg_output_rate_override: Optional[float] = Field(
-        default=None, ge=0, description="Custom PAYG output rate ($ per 1M tokens)"
-    )
-    ptu_hourly_rate_override: Optional[float] = Field(
-        default=None, ge=0, description="Custom PTU hourly rate"
-    )
+    payg_input_rate_override: Optional[float] = Field(default=None, ge=0)
+    payg_output_rate_override: Optional[float] = Field(default=None, ge=0)
+    ptu_hourly_rate_override: Optional[float] = Field(default=None, ge=0)
 
 
 class AnalyzeResponse(BaseModel):
@@ -85,6 +94,74 @@ class AnalyzeResponse(BaseModel):
     charts: Dict[str, Any]
     cost_analysis: Dict[str, Any]
     insights: Dict[str, Any]
+
+
+class ConsolidationRequest(BaseModel):
+    mode: Literal["demo", "live"] = "live"
+    deployments: List[str] = Field(
+        ...,
+        min_length=2,
+        max_length=10,
+        description="2-10 deployment names of the same model to consolidate",
+    )
+    focus_topic: str = "Cost Reduction"
+    lookback_days: int = Field(default=14, ge=1, le=30)
+    granularity_minutes: Literal[1, 5, 15, 30] = 1
+    window_start: Optional[datetime] = None
+    window_end: Optional[datetime] = None
+
+    subscription_id: Optional[str] = None
+    resource_group: Optional[str] = None
+    workspace: Optional[str] = None
+    reservation_type: Literal[
+        "Hourly — No Commitment",
+        "Monthly Commitment (Estimated 64% off)",
+        "1-Year Commitment (Estimated 69% off)",
+    ] = "Monthly Commitment (Estimated 64% off)"
+    baseline_percentile: int = Field(default=75, ge=0, le=95)
+    baseline_ptu: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="PTU units for slider. When set, overrides baseline_percentile.",
+    )
+    region: str = "eastus"
+    deployment_type: Literal["global", "data_zone", "regional"] = "global"
+    include_throttle: bool = False
+
+    payg_input_rate_override: Optional[float] = Field(default=None, ge=0)
+    payg_output_rate_override: Optional[float] = Field(default=None, ge=0)
+    ptu_hourly_rate_override: Optional[float] = Field(default=None, ge=0)
+
+
+class IndividualDeploymentSummary(BaseModel):
+    name: str
+    avg_tpm: float
+    peak_tpm: float
+    throttling_rate_pct: float
+    total_requests: int
+    latency_p50: float
+    latency_p95: float
+    payg_monthly_cost: float
+
+
+class ConsolidationSummary(BaseModel):
+    deployment_count: int
+    model_name: str
+    deployment_type: str
+    individual_deployments: List[IndividualDeploymentSummary]
+    combined_avg_tpm: float
+    combined_peak_tpm: float
+    combined_throttling_rate_pct: float
+    individual_payg_total: float
+    consolidated_hybrid_cost: float
+    savings: float
+    savings_pct: float
+    warnings: List[str] = Field(default_factory=list)
+    all_on_ptu: bool = False
+
+
+class ConsolidationResponse(AnalyzeResponse):
+    consolidation_summary: ConsolidationSummary
 
 
 def _series_payload(series: Optional[TimeSeries]) -> Dict[str, Any]:
@@ -132,6 +209,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.on_event("startup")
+def _startup_warm_pricing_cache() -> None:
+    """Pre-warm popular model/region pricing combos and start the periodic refresh."""
+    resolver = get_pricing_resolver()
+    resolver.warm_cache()
+    resolver.start_background_warmup()
 
 
 def _pick_demo_scenario(focus_topic: str) -> DemoScenario:
@@ -279,6 +364,7 @@ def _build_formula_blocks(
     effective_mult: float = 1.0,
     input_tpm_per_ptu: int = 2500,
     model_output_multiplier: int = 3,
+    pricing_source: str = "",
 ) -> Dict[str, str]:
     """Build human-readable formula strings for PAYG and hybrid cost breakdowns."""
     avg_daily_overflow = avg_spillover_tpm * 1440  # tokens/day
@@ -286,11 +372,14 @@ def _build_formula_blocks(
     monthly_tokens = avg_daily_tokens * 30
     effective_capacity = input_tpm_per_ptu / effective_mult
 
+    # Annotation suffix when user has overridden rates
+    rate_tag = " (custom rate)" if pricing_source == "manual" else ""
+
     # ── PAYG block ──
     payg_lines = [
         f"avg_daily_tokens = {avg_tpm:,.0f} TPM × 1,440 min/day = {avg_daily_tokens:,.0f} tokens/day",
         f"monthly_tokens = {avg_daily_tokens:,.0f} × 30 days = {monthly_tokens:,.0f} tokens/month",
-        f"blended_rate = ${payg_input_rate:.2f} × {(1 - output_ratio) * 100:.0f}% input + ${payg_output_rate:.2f} × {output_ratio * 100:.0f}% output = ${payg_blended_rate:.2f}/1M tokens",
+        f"blended_rate = ${payg_input_rate:.2f} × {(1 - output_ratio) * 100:.0f}% input + ${payg_output_rate:.2f} × {output_ratio * 100:.0f}% output = ${payg_blended_rate:.2f}/1M tokens{rate_tag}",
         f"payg_cost = {monthly_tokens:,.0f} ÷ 1M × ${payg_blended_rate:.2f} = ${payg_base:,.0f}/month",
     ]
     if include_throttle:
@@ -307,7 +396,7 @@ def _build_formula_blocks(
     hybrid_lines = [
         f"effective_mult = {(1 - output_ratio) * 100:.0f}% input + {output_ratio * 100:.0f}% output × {model_output_multiplier} = {effective_mult:.2f}×",
         f"capacity_per_ptu = {input_tpm_per_ptu:,} ÷ {effective_mult:.2f} = {effective_capacity:,.0f} raw TPM/PTU",
-        f"ptu_cost = {baseline_ptu} PTU × ${ptu_monthly_rate:,.2f}/PTU/month = ${ptu_baseline_cost:,.0f}/month",
+        f"ptu_cost = {baseline_ptu} PTU × ${ptu_monthly_rate:,.2f}/PTU/month = ${ptu_baseline_cost:,.0f}/month{rate_tag}",
     ]
     if avg_spillover_tpm > 0:
         hybrid_lines += [
@@ -972,6 +1061,7 @@ def _serialize_analysis(
                 effective_mult=effective_mult,
                 input_tpm_per_ptu=input_tpm_per_ptu,
                 model_output_multiplier=model_output_multiplier,
+                pricing_source=pricing.source,
             ),
         },
         insights={
@@ -1031,10 +1121,83 @@ def pricing_options() -> Dict[str, Any]:
     return {"regions": regions, "deployment_types": deployment_types}
 
 
+@app.get("/api/pricing/rates")
+def pricing_rates(
+    model: str = Query(..., description="Model name (e.g. gpt-4o, gpt-5)"),
+    region: str = Query("eastus", description="Azure region slug"),
+    deployment_type: str = Query(
+        "global", description="Deployment type: global, data_zone, regional"
+    ),
+) -> Dict[str, Any]:
+    """Expose resolved pricing rates for a model/region/deployment-type without running a full analysis.
+
+    This is useful for dashboards, CI scripts, and ad-hoc rate checks.
+    """
+    resolver = get_pricing_resolver()
+    result = resolver.resolve(
+        model_name=model,
+        region=region,
+        deployment_type=deployment_type,
+    )
+    return {
+        "model": result.model_name,
+        "region": result.region,
+        "deployment_type": result.deployment_type,
+        "payg_input_rate_per_million": round(result.payg_input_rate, 4),
+        "payg_output_rate_per_million": round(result.payg_output_rate, 4),
+        "ptu_hourly_rate": round(result.ptu_hourly_rate, 4),
+        "pricing_source": result.source,
+        "pricing_as_of": result.as_of.isoformat(),
+        "pricing_currency": result.currency,
+    }
+
+
+@app.get("/api/discovery/auth-status")
+def auth_status() -> Dict[str, Any]:
+    """Return the authenticated user's identity (PRD §4.1 Auth Status Banner)."""
+    try:
+        _credential, user_info = authenticate()
+        return {
+            "authenticated": True,
+            "display_name": user_info.display_name,
+            "email": user_info.email,
+            "tenant_id": user_info.tenant_id,
+        }
+    except Exception as e:
+        return {
+            "authenticated": False,
+            "display_name": "",
+            "email": "",
+            "tenant_id": "",
+            "error": str(e),
+        }
+
+
 @app.get("/api/discovery/subscriptions")
 def subscriptions() -> List[Dict[str, Any]]:
-    credential = get_azure_credential()
-    subs = list_subscriptions(credential)
+    try:
+        credential = get_azure_credential()
+    except Exception as e:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated. Please run `az login` in your terminal, then refresh this page. "
+            f"Error: {e}",
+        )
+    try:
+        subs = list_subscriptions(credential)
+    except Exception as e:
+        raise HTTPException(
+            status_code=403,
+            detail="Failed to list subscriptions. Ensure your account has Reader access to at least "
+            "one Azure subscription. You can check access in the Azure Portal under "
+            f"'Subscriptions'. Error: {e}",
+        )
+    if not subs:
+        raise HTTPException(
+            status_code=404,
+            detail="No Azure subscriptions found for your account. "
+            "Ensure you have at least one enabled subscription in this tenant.",
+        )
     return [
         {
             "subscription_id": sub.subscription_id,
@@ -1048,8 +1211,18 @@ def subscriptions() -> List[Dict[str, Any]]:
 
 @app.get("/api/discovery/accounts")
 def accounts(subscription_id: str = Query(...)) -> List[Dict[str, Any]]:
-    credential = get_azure_credential()
-    items = list_ai_accounts(credential, subscription_id)
+    try:
+        credential = get_azure_credential()
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication failed: {e}")
+    try:
+        items = list_ai_accounts(credential, subscription_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=403,
+            detail="Failed to list AI Services accounts. Ensure you have Reader access to "
+            f"the subscription. Error: {e}",
+        )
     return [
         {
             "name": account.name,
@@ -1069,17 +1242,42 @@ def deployments(
     resource_group: str = Query(...),
     account_name: str = Query(...),
 ) -> List[Dict[str, Any]]:
-    credential = get_azure_credential()
-    items = list_deployments(credential, subscription_id, resource_group, account_name)
-    return [
-        {
+    try:
+        credential = get_azure_credential()
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication failed: {e}")
+    try:
+        items = list_deployments(credential, subscription_id, resource_group, account_name)
+    except Exception as e:
+        raise HTTPException(
+            status_code=403,
+            detail="Failed to list deployments. Ensure you have Cognitive Services User or "
+            "Reader role on this account, plus Monitoring Reader for metrics. "
+            f"Error: {e}",
+        )
+    result: List[Dict[str, Any]] = []
+    for dep in items:
+        ptu_eligible = get_model_config(dep.model) is not None
+        family = get_model_family(dep.model)
+        entry: Dict[str, Any] = {
             "name": dep.name,
             "model": dep.model,
+            "model_family": family,
             "sku_type": dep.sku_type,
             "sku_capacity": dep.sku_capacity,
+            "ptu_eligible": ptu_eligible,
         }
-        for dep in items
-    ]
+        if not ptu_eligible:
+            entry["ineligibility_reason"] = get_ineligibility_reason(family)
+        result.append(entry)
+    return result
+
+
+@app.post("/api/discovery/refresh")
+def refresh_discovery_cache() -> Dict[str, str]:
+    """Invalidate the server-side discovery cache so the next fetch hits Azure ARM."""
+    invalidate_discovery_cache()
+    return {"status": "ok"}
 
 
 @app.post("/api/analyze", response_model=AnalyzeResponse)
@@ -1142,6 +1340,18 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
 
     collector = MetricsCollector(credential, config)
     metrics = collector.collect()
+
+    # PTU eligibility gate — reject non-PTU-eligible models
+    if get_model_config(metrics.model_name) is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Model '{metrics.model_name}' does not support PTU. "
+                "Analysis requires a PTU-eligible model (GPT-4o, GPT-4.1, GPT-5, "
+                "o1, o3-mini, o4-mini, and their variants)."
+            ),
+        )
+
     metrics = _filter_metrics_by_window(metrics, payload.window_start, payload.window_end)
 
     effective_lookback_days = max(
@@ -1219,8 +1429,380 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
     )
 
 
+@app.post("/api/analyze-consolidation", response_model=ConsolidationResponse)
+def analyze_consolidation(payload: ConsolidationRequest) -> ConsolidationResponse:
+    """Analyze whether consolidating multiple same-model deployments onto shared PTU is cost-effective."""
+
+    # ------------------------------------------------------------------
+    # 1. Collect metrics for each deployment
+    # ------------------------------------------------------------------
+    all_metrics: List[DeploymentMetrics] = []
+
+    if payload.mode == "demo":
+        # In demo mode, the deployment names in the payload are ignored;
+        # we generate 3 sibling deployments from the consolidation scenario.
+        # Pick scenario based on focus topic heuristic: "Cost Reduction"
+        # maps to CONSOLIDATE_WORTH_IT, everything else to NOT_WORTH_IT.
+        scenario = (
+            DemoScenario.CONSOLIDATE_WORTH_IT
+            if payload.focus_topic == "Cost Reduction"
+            else DemoScenario.CONSOLIDATE_NOT_WORTH_IT
+        )
+        all_metrics = generate_consolidation_demo_metrics(
+            scenario,
+            lookback_days=payload.lookback_days,
+            granularity_minutes=payload.granularity_minutes,
+        )
+        # Apply time-window filter
+        all_metrics = [
+            _filter_metrics_by_window(m, payload.window_start, payload.window_end)
+            for m in all_metrics
+        ]
+    else:
+        # Live mode
+        if not payload.subscription_id or not payload.resource_group or not payload.workspace:
+            raise HTTPException(
+                status_code=400,
+                detail="subscription_id, resource_group, and workspace are required in live mode",
+            )
+
+        credential = get_azure_credential()
+        for dep_name in payload.deployments:
+            config = AnalysisConfig(
+                resource_group=payload.resource_group,
+                workspace=payload.workspace,
+                deployment=dep_name,
+                subscription_id=payload.subscription_id,
+                lookback_days=payload.lookback_days,
+                aggregation_interval_minutes=payload.granularity_minutes,
+            )
+            collector = MetricsCollector(credential, config)
+            metrics = collector.collect()
+            metrics = _filter_metrics_by_window(metrics, payload.window_start, payload.window_end)
+
+            if metrics.tokens_per_minute is None and metrics.requests_per_minute is None:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "message": f"No metrics returned for deployment '{dep_name}'",
+                        "hint": (
+                            f"Deployment '{dep_name}' may have had no traffic "
+                            f"in the last {payload.lookback_days} days."
+                        ),
+                    },
+                )
+            all_metrics.append(metrics)
+
+    # ------------------------------------------------------------------
+    # 2. Validate all deployments share the same model
+    # ------------------------------------------------------------------
+    model_names = {m.model_name for m in all_metrics}
+    if len(model_names) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Cannot consolidate deployments with different models: {sorted(model_names)}. "
+                "PTU capacity is model-specific — only same-model deployments can share a PTU allocation."
+            ),
+        )
+
+    sku_types = {m.deployment_info.sku_type for m in all_metrics if m.deployment_info is not None}
+    if len(sku_types) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"Cannot consolidate deployments with different SKU types: {sorted(sku_types)}. "
+                "PTU capacity is SKU-specific — only same-SKU deployments can share a PTU allocation."
+            ),
+        )
+
+    if len(all_metrics) < 2:
+        raise HTTPException(
+            status_code=422,
+            detail="Need at least 2 deployments to consolidate.",
+        )
+
+    # ------------------------------------------------------------------
+    # 2b. Detect time-window mismatches and "already on PTU" status
+    # ------------------------------------------------------------------
+    consolidation_warnings: List[str] = []
+
+    # Time-window mismatch: check if any deployment has a significantly
+    # shorter time range than the overall span.
+    all_starts = [m.start_time for m in all_metrics]
+    all_ends = [m.end_time for m in all_metrics]
+    global_start = min(all_starts)
+    global_end = max(all_ends)
+    global_span = (global_end - global_start).total_seconds()
+
+    if global_span > 0:
+        for m in all_metrics:
+            dep_span = (m.end_time - m.start_time).total_seconds()
+            # Flag if a deployment covers less than 80% of the global span
+            if dep_span < global_span * 0.8:
+                missing_start = m.start_time > global_start
+                missing_end = m.end_time < global_end
+                gaps: List[str] = []
+                if missing_start:
+                    gaps.append(
+                        f"{global_start.strftime('%m/%d')}–{m.start_time.strftime('%m/%d')}"
+                    )
+                if missing_end:
+                    gaps.append(f"{m.end_time.strftime('%m/%d')}–{global_end.strftime('%m/%d')}")
+                gap_desc = " and ".join(gaps) if gaps else "some periods"
+                consolidation_warnings.append(
+                    f"Deployment '{m.deployment_name}' has no data for {gap_desc}. "
+                    "Consolidation will treat missing periods as 0 TPM."
+                )
+
+    # "Already on PTU" detection
+    all_on_ptu = all(
+        m.deployment_info is not None and m.deployment_info.sku_type == "ProvisionedManaged"
+        for m in all_metrics
+    )
+    if all_on_ptu:
+        consolidation_warnings.append(
+            "All selected deployments already use PTU (ProvisionedManaged). "
+            "This analysis shows what their combined PAYG cost would be vs the current PTU spend."
+        )
+
+    # ------------------------------------------------------------------
+    # 3. Merge into combined virtual deployment
+    # ------------------------------------------------------------------
+    combined_metrics = merge_deployment_metrics(all_metrics)
+
+    # ------------------------------------------------------------------
+    # 4. Run analysis engine on combined metrics
+    # ------------------------------------------------------------------
+    effective_lookback_days = max(
+        1,
+        int(
+            max(
+                1.0,
+                (combined_metrics.end_time - combined_metrics.start_time).total_seconds()
+                / 86_400.0,
+            )
+        ),
+    )
+
+    analysis_config = AnalysisConfig(
+        resource_group=payload.resource_group or "demo-rg",
+        workspace=payload.workspace or "demo-workspace",
+        deployment=combined_metrics.deployment_name,
+        subscription_id=payload.subscription_id,
+        lookback_days=effective_lookback_days,
+        aggregation_interval_minutes=payload.granularity_minutes,
+    )
+    engine = DecisionEngine(analysis_config)
+    analysis = engine.analyze(combined_metrics)
+
+    # ------------------------------------------------------------------
+    # 5. Build base response using _serialize_analysis on combined metrics
+    # ------------------------------------------------------------------
+    region = normalize_region(payload.region)
+    base_response = _serialize_analysis(
+        metrics=combined_metrics,
+        analysis=analysis,
+        focus_topic=payload.focus_topic,
+        lookback_days=effective_lookback_days,
+        reservation_type=payload.reservation_type,
+        baseline_percentile=payload.baseline_percentile,
+        region=region,
+        deployment_type=payload.deployment_type,
+        baseline_ptu=payload.baseline_ptu,
+        include_throttle=payload.include_throttle,
+        payg_input_rate_override=payload.payg_input_rate_override,
+        payg_output_rate_override=payload.payg_output_rate_override,
+        ptu_hourly_rate_override=payload.ptu_hourly_rate_override,
+    )
+
+    # ------------------------------------------------------------------
+    # 6. Compute per-deployment summaries and build consolidation summary
+    # ------------------------------------------------------------------
+    payg_blended_rate = base_response.cost_analysis["pricing"]["payg_blended_rate_per_million"]
+
+    individual_summaries: List[IndividualDeploymentSummary] = []
+    for m in all_metrics:
+        tpm = m.tokens_per_minute
+        p50 = m.time_to_first_byte_p50
+        p95 = m.time_to_first_byte_p95
+        individual_summaries.append(
+            IndividualDeploymentSummary(
+                name=m.deployment_name,
+                avg_tpm=float(tpm.mean) if tpm else 0.0,
+                peak_tpm=float(tpm.p95) if tpm else 0.0,
+                throttling_rate_pct=float(m.throttling_rate * 100),
+                total_requests=int(m.total_requests),
+                latency_p50=float(p50.mean) if p50 else 0.0,
+                latency_p95=float(p95.mean) if p95 else 0.0,
+                payg_monthly_cost=compute_individual_payg_cost(m, payg_blended_rate),
+            )
+        )
+
+    individual_payg_total = sum(s.payg_monthly_cost for s in individual_summaries)
+    consolidated_hybrid_cost = base_response.cost_analysis["hybrid"]["hybrid_total"]
+    savings = individual_payg_total - consolidated_hybrid_cost
+    savings_pct = (savings / individual_payg_total * 100) if individual_payg_total > 0 else 0.0
+
+    combined_tpm = combined_metrics.tokens_per_minute
+    consolidation_summary = ConsolidationSummary(
+        deployment_count=len(all_metrics),
+        model_name=combined_metrics.model_name,
+        deployment_type=payload.deployment_type,
+        individual_deployments=individual_summaries,
+        combined_avg_tpm=float(combined_tpm.mean) if combined_tpm else 0.0,
+        combined_peak_tpm=float(combined_tpm.p95) if combined_tpm else 0.0,
+        combined_throttling_rate_pct=float(combined_metrics.throttling_rate * 100),
+        individual_payg_total=individual_payg_total,
+        consolidated_hybrid_cost=consolidated_hybrid_cost,
+        savings=savings,
+        savings_pct=savings_pct,
+        warnings=consolidation_warnings,
+        all_on_ptu=all_on_ptu,
+    )
+
+    # ------------------------------------------------------------------
+    # 7. Build per-deployment chart series for chart attribution
+    # ------------------------------------------------------------------
+    # Use the combined timestamps from the token chart (canonical axis)
+    combined_ts_iso = base_response.charts.get("tokens", {}).get("timestamps", [])
+    per_dep_charts = serialize_per_deployment_charts(all_metrics, combined_ts_iso)
+
+    # Merge per_deployment data into existing chart sections
+    enriched_charts = dict(base_response.charts)
+    for chart_key in ("tokens", "requests", "tpm", "throttling"):
+        if chart_key in enriched_charts and chart_key in per_dep_charts:
+            enriched_charts[chart_key] = {
+                **enriched_charts[chart_key],
+                **per_dep_charts[chart_key],
+            }
+
+    # Latency chart section does not exist in single-deployment mode.
+    # For consolidation, build it from the combined + per-deployment data.
+    p50_combined = combined_metrics.time_to_first_byte_p50
+    p95_combined = combined_metrics.time_to_first_byte_p95
+    p99_combined = combined_metrics.time_to_first_byte_p99
+    enriched_charts["latency"] = {
+        "timestamps": combined_ts_iso,
+        "combined": {
+            "p50": [float(v) for v in p50_combined.values] if p50_combined else [],
+            "p95": [float(v) for v in p95_combined.values] if p95_combined else [],
+            "p99": [float(v) for v in p99_combined.values] if p99_combined else [],
+        },
+        **per_dep_charts.get("latency", {}),
+    }
+
+    # ------------------------------------------------------------------
+    # 8. Return ConsolidationResponse (extends AnalyzeResponse)
+    # ------------------------------------------------------------------
+    response_data = base_response.model_dump()
+    response_data["charts"] = enriched_charts
+    return ConsolidationResponse(
+        **response_data,
+        consolidation_summary=consolidation_summary,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Static file serving (production)
+# ---------------------------------------------------------------------------
+# Lightweight deployment preview (Phase 3 — pre-analysis TPM/throttle)
+# ---------------------------------------------------------------------------
+
+
+class DeploymentPreview(BaseModel):
+    """Lightweight preview stats for a single deployment."""
+
+    name: str
+    avg_tpm: float
+    throttling_rate_pct: float
+
+
+@app.get("/api/deployments/preview", response_model=List[DeploymentPreview])
+def deployment_preview(
+    mode: str = Query("demo"),
+    deployments: str = Query("", description="Comma-separated deployment names"),
+    subscription_id: Optional[str] = Query(None),
+    resource_group: Optional[str] = Query(None),
+    workspace: Optional[str] = Query(None),
+    lookback_days: int = Query(7),
+    focus_topic: str = Query("Cost Reduction"),
+) -> List[DeploymentPreview]:
+    """Return lightweight TPM and throttle preview for deployments.
+
+    In demo mode, generates preview data from the consolidation demo scenario.
+    In live mode, collects minimal metrics for each deployment.
+    """
+    if mode == "demo":
+        scenario = (
+            DemoScenario.CONSOLIDATE_WORTH_IT
+            if focus_topic == "Cost Reduction"
+            else DemoScenario.CONSOLIDATE_NOT_WORTH_IT
+        )
+        all_metrics = generate_consolidation_demo_metrics(
+            scenario,
+            lookback_days=lookback_days,
+            granularity_minutes=5,  # coarse granularity for speed
+        )
+        results: List[DeploymentPreview] = []
+        for m in all_metrics:
+            avg_tpm = float(m.tokens_per_minute.mean) if m.tokens_per_minute else 0.0
+            throttle_rate = m.throttling_rate * 100 if m.throttled_requests else 0.0
+            results.append(
+                DeploymentPreview(
+                    name=m.deployment_name,
+                    avg_tpm=round(avg_tpm, 1),
+                    throttling_rate_pct=round(throttle_rate, 1),
+                )
+            )
+        return results
+
+    # Live mode
+    if not subscription_id or not resource_group or not workspace:
+        raise HTTPException(
+            status_code=400,
+            detail="subscription_id, resource_group, and workspace are required in live mode",
+        )
+
+    dep_names = [d.strip() for d in deployments.split(",") if d.strip()]
+    if not dep_names:
+        raise HTTPException(status_code=400, detail="At least one deployment name is required")
+
+    credential = get_azure_credential()
+    results = []
+    for dep_name in dep_names:
+        try:
+            config = AnalysisConfig(
+                resource_group=resource_group,
+                workspace=workspace,
+                deployment=dep_name,
+                subscription_id=subscription_id,
+                lookback_days=lookback_days,
+                aggregation_interval_minutes=5,  # coarse for speed
+            )
+            collector = MetricsCollector(credential, config)
+            metrics = collector.collect()
+            avg_tpm = float(metrics.tokens_per_minute.mean) if metrics.tokens_per_minute else 0.0
+            throttle_rate = metrics.throttling_rate * 100 if metrics.throttled_requests else 0.0
+            results.append(
+                DeploymentPreview(
+                    name=dep_name,
+                    avg_tpm=round(avg_tpm, 1),
+                    throttling_rate_pct=round(throttle_rate, 1),
+                )
+            )
+        except Exception:
+            # If a deployment fails to fetch metrics, return zero values
+            results.append(
+                DeploymentPreview(
+                    name=dep_name,
+                    avg_tpm=0.0,
+                    throttling_rate_pct=0.0,
+                )
+            )
+    return results
+
+
 # ---------------------------------------------------------------------------
 # In Docker the Vite build output is copied to /app/static.  When that
 # directory exists we mount a catch-all route *after* all /api/* routes so

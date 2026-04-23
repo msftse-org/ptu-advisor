@@ -189,3 +189,160 @@ def test_max_viable_baseline_is_not_below_default_baseline():
 
     if max_viable is not None:
         assert max_viable >= default_ptu
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.2: /api/pricing/rates endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_pricing_rates_returns_valid_shape():
+    """GET /api/pricing/rates should return resolved rates for a known model."""
+    response = client.get("/api/pricing/rates", params={"model": "gpt-4o"})
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    for key in [
+        "model",
+        "region",
+        "deployment_type",
+        "payg_input_rate_per_million",
+        "payg_output_rate_per_million",
+        "ptu_hourly_rate",
+        "pricing_source",
+        "pricing_as_of",
+        "pricing_currency",
+    ]:
+        assert key in payload, f"Missing key: {key}"
+
+    assert payload["model"] == "gpt-4o"
+    assert payload["pricing_currency"] == "USD"
+    assert payload["payg_input_rate_per_million"] > 0
+    assert payload["payg_output_rate_per_million"] > 0
+    assert payload["ptu_hourly_rate"] > 0
+
+
+def test_pricing_rates_with_region_and_deployment_type():
+    """GET /api/pricing/rates respects region and deployment_type params."""
+    response = client.get(
+        "/api/pricing/rates",
+        params={"model": "gpt-4o", "region": "swedencentral", "deployment_type": "regional"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["region"] == "swedencentral"
+    assert payload["deployment_type"] == "regional"
+    # Regional Sweden → tier 2 → $2.20
+    assert payload["ptu_hourly_rate"] == pytest.approx(2.20, rel=0.01)
+
+
+def test_pricing_rates_unknown_model():
+    """GET /api/pricing/rates for an unknown model returns default fallback rates."""
+    response = client.get("/api/pricing/rates", params={"model": "unknown-model-999"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["pricing_source"] == "fallback"
+    # Default fallback rates
+    assert payload["payg_input_rate_per_million"] == pytest.approx(2.50, rel=0.01)
+    assert payload["payg_output_rate_per_million"] == pytest.approx(10.00, rel=0.01)
+
+
+def test_pricing_rates_requires_model_param():
+    """GET /api/pricing/rates without model param returns 422."""
+    response = client.get("/api/pricing/rates")
+    assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: pricing source and overrides in /api/analyze
+# ---------------------------------------------------------------------------
+
+
+def test_demo_analyze_returns_pricing_source_metadata():
+    """The /api/analyze response should contain pricing_source, pricing_as_of, pricing_currency."""
+    response = client.post(
+        "/api/analyze",
+        json={"mode": "demo", "focus_topic": "Cost Reduction", "lookback_days": 14},
+    )
+
+    assert response.status_code == 200
+    pricing = response.json()["cost_analysis"]["pricing"]
+    assert "pricing_source" in pricing
+    assert pricing["pricing_source"] in ("live", "cached", "fallback", "manual")
+    assert "pricing_as_of" in pricing
+    assert "pricing_currency" in pricing
+    assert pricing["pricing_currency"] == "USD"
+
+
+def test_demo_analyze_with_overrides_returns_manual_source():
+    """When rate overrides are provided, pricing_source should be 'manual'."""
+    response = client.post(
+        "/api/analyze",
+        json={
+            "mode": "demo",
+            "focus_topic": "Cost Reduction",
+            "lookback_days": 14,
+            "payg_input_rate_override": 5.0,
+            "payg_output_rate_override": 20.0,
+            "ptu_hourly_rate_override": 3.0,
+        },
+    )
+
+    assert response.status_code == 200
+    pricing = response.json()["cost_analysis"]["pricing"]
+    assert pricing["pricing_source"] == "manual"
+    assert pricing["payg_input_rate_per_million"] == pytest.approx(5.0, rel=0.01)
+    assert pricing["payg_output_rate_per_million"] == pytest.approx(20.0, rel=0.01)
+    assert pricing["ptu_hourly_rate"] == pytest.approx(3.0, rel=0.01)
+
+
+def test_demo_analyze_with_partial_override():
+    """A partial override (only one rate) should still set source to 'manual'."""
+    response = client.post(
+        "/api/analyze",
+        json={
+            "mode": "demo",
+            "focus_topic": "Cost Reduction",
+            "lookback_days": 14,
+            "ptu_hourly_rate_override": 2.5,
+        },
+    )
+
+    assert response.status_code == 200
+    pricing = response.json()["cost_analysis"]["pricing"]
+    assert pricing["pricing_source"] == "manual"
+    assert pricing["ptu_hourly_rate"] == pytest.approx(2.5, rel=0.01)
+
+
+def test_formula_blocks_annotated_with_custom_rate_on_manual():
+    """When overrides are used, formula_blocks should contain '(custom rate)'."""
+    response = client.post(
+        "/api/analyze",
+        json={
+            "mode": "demo",
+            "focus_topic": "Cost Reduction",
+            "lookback_days": 14,
+            "payg_input_rate_override": 5.0,
+        },
+    )
+
+    assert response.status_code == 200
+    blocks = response.json()["cost_analysis"]["formula_blocks"]
+    assert "(custom rate)" in blocks["payg"]
+    assert "(custom rate)" in blocks["hybrid"]
+
+
+def test_formula_blocks_not_annotated_without_override():
+    """Without overrides, formula_blocks should NOT contain '(custom rate)'."""
+    response = client.post(
+        "/api/analyze",
+        json={"mode": "demo", "focus_topic": "Cost Reduction", "lookback_days": 14},
+    )
+
+    assert response.status_code == 200
+    blocks = response.json()["cost_analysis"]["formula_blocks"]
+    assert "(custom rate)" not in blocks["payg"]
+    assert "(custom rate)" not in blocks["hybrid"]

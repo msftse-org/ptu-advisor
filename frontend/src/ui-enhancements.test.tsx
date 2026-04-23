@@ -1,5 +1,12 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+// Mock echarts to prevent jsdom rendering crashes (no real layout engine)
+vi.mock('echarts-for-react/lib/core', () => ({
+  default: () => null,
+  __esModule: true,
+}))
+
 import App from './App'
 
 /* ────────────────────────────────────────────────────
@@ -629,5 +636,209 @@ describe('Daily cost total badge', () => {
 
     const badge = await screen.findByText(/Total: \$90/)
     expect(badge).toBeInTheDocument()
+  })
+})
+
+/* ────────────────────────────────────────────────────
+   PricingSourceBadge (Phase 2.2)
+   ──────────────────────────────────────────────────── */
+
+describe('PricingSourceBadge', () => {
+  it('renders fallback badge with warning icon when pricing_source is fallback', async () => {
+    setupMockFetch({
+      cost_analysis: {
+        ...buildMockResponse().cost_analysis,
+        pricing: {
+          ...buildMockResponse().cost_analysis.pricing,
+          pricing_source: 'fallback',
+          pricing_as_of: '2026-03-15T12:00:00Z',
+          pricing_currency: 'USD',
+        },
+      },
+    })
+    await runDemoAnalysis()
+
+    const badge = await screen.findByText(/Fallback pricing/i)
+    expect(badge).toBeInTheDocument()
+    expect(badge).toHaveClass('pricing-badge', 'pricing-badge-fallback')
+    // Check for warning icon U+26A0
+    expect(badge.textContent).toContain('\u26A0')
+  })
+
+  it('renders live badge with checkmark when pricing_source is live', async () => {
+    setupMockFetch({
+      cost_analysis: {
+        ...buildMockResponse().cost_analysis,
+        pricing: {
+          ...buildMockResponse().cost_analysis.pricing,
+          pricing_source: 'live',
+          pricing_as_of: '2026-03-15T12:00:00Z',
+          pricing_currency: 'USD',
+        },
+      },
+    })
+    await runDemoAnalysis()
+
+    const badge = await screen.findByText(/Live pricing/i)
+    expect(badge).toBeInTheDocument()
+    expect(badge).toHaveClass('pricing-badge', 'pricing-badge-live')
+    expect(badge.textContent).toContain('\u2713')
+  })
+
+  it('renders cached badge when pricing_source is cached', async () => {
+    setupMockFetch({
+      cost_analysis: {
+        ...buildMockResponse().cost_analysis,
+        pricing: {
+          ...buildMockResponse().cost_analysis.pricing,
+          pricing_source: 'cached',
+          pricing_as_of: '2026-03-15T12:00:00Z',
+          pricing_currency: 'USD',
+        },
+      },
+    })
+    await runDemoAnalysis()
+
+    const badge = await screen.findByText(/Cached pricing/i)
+    expect(badge).toBeInTheDocument()
+    expect(badge).toHaveClass('pricing-badge', 'pricing-badge-cached')
+  })
+
+  it('renders manual badge when pricing_source is manual', async () => {
+    setupMockFetch({
+      cost_analysis: {
+        ...buildMockResponse().cost_analysis,
+        pricing: {
+          ...buildMockResponse().cost_analysis.pricing,
+          pricing_source: 'manual',
+          pricing_as_of: '2026-03-15T12:00:00Z',
+          pricing_currency: 'USD',
+        },
+      },
+    })
+    await runDemoAnalysis()
+
+    const badge = await screen.findByText(/Custom rates/i)
+    expect(badge).toBeInTheDocument()
+    expect(badge).toHaveClass('pricing-badge', 'pricing-badge-manual')
+    expect(badge.textContent).toContain('\u270E')
+  })
+})
+
+/* ────────────────────────────────────────────────────
+   Fallback warning banner (Phase 2.3)
+   ──────────────────────────────────────────────────── */
+
+describe('Fallback warning banner', () => {
+  it('shows fallback banner when pricing_source is fallback', async () => {
+    setupMockFetch({
+      cost_analysis: {
+        ...buildMockResponse().cost_analysis,
+        pricing: {
+          ...buildMockResponse().cost_analysis.pricing,
+          pricing_source: 'fallback',
+          pricing_as_of: '2026-03-15T12:00:00Z',
+          pricing_currency: 'USD',
+        },
+      },
+    })
+    await runDemoAnalysis()
+
+    const banner = await screen.findByRole('alert')
+    expect(banner).toBeInTheDocument()
+    expect(banner).toHaveClass('pricing-fallback-banner')
+    expect(banner.textContent).toContain('Using default pricing')
+  })
+
+  it('does not show fallback banner when pricing_source is live', async () => {
+    setupMockFetch({
+      cost_analysis: {
+        ...buildMockResponse().cost_analysis,
+        pricing: {
+          ...buildMockResponse().cost_analysis.pricing,
+          pricing_source: 'live',
+          pricing_as_of: '2026-03-15T12:00:00Z',
+          pricing_currency: 'USD',
+        },
+      },
+    })
+    await runDemoAnalysis()
+
+    // Wait for Financial Decision to render
+    await screen.findByText('Financial Decision')
+    // The fallback banner should not exist
+    const banners = screen.queryAllByRole('alert')
+    const fallbackBanner = banners.find(el => el.classList.contains('pricing-fallback-banner'))
+    expect(fallbackBanner).toBeUndefined()
+  })
+})
+
+/* ────────────────────────────────────────────────────
+   Advanced Pricing collapsible (Phase 2.4)
+   ──────────────────────────────────────────────────── */
+
+describe('Advanced Pricing section', () => {
+  beforeEach(() => {
+    setupMockFetch({
+      cost_analysis: {
+        ...buildMockResponse().cost_analysis,
+        pricing: {
+          ...buildMockResponse().cost_analysis.pricing,
+          pricing_source: 'fallback',
+          pricing_as_of: '2026-03-15T12:00:00Z',
+          pricing_currency: 'USD',
+          payg_input_rate_per_million: 2.50,
+          payg_output_rate_per_million: 10.00,
+          ptu_hourly_rate: 1.00,
+        },
+      },
+    })
+  })
+
+  it('renders Advanced Pricing as a collapsible details element', async () => {
+    await runDemoAnalysis()
+    await screen.findByText('Financial Decision')
+
+    const summary = screen.getByText(/Advanced Pricing/i)
+    expect(summary).toBeInTheDocument()
+    const details = summary.closest('details')
+    expect(details).toBeInTheDocument()
+    expect(details).toHaveClass('advanced-pricing-section')
+  })
+
+  it('contains three number inputs for rate overrides', async () => {
+    await runDemoAnalysis()
+    await screen.findByText('Financial Decision')
+
+    // Open the details
+    fireEvent.click(screen.getByText(/Advanced Pricing/i))
+
+    expect(screen.getByText('PAYG Input Rate ($/1M tokens)')).toBeInTheDocument()
+    expect(screen.getByText('PAYG Output Rate ($/1M tokens)')).toBeInTheDocument()
+    expect(screen.getByText('PTU Hourly Rate ($/PTU/hr)')).toBeInTheDocument()
+  })
+
+  it('shows Reset button only when overrides are entered', async () => {
+    await runDemoAnalysis()
+    await screen.findByText('Financial Decision')
+
+    fireEvent.click(screen.getByText(/Advanced Pricing/i))
+
+    // Initially no reset button
+    expect(screen.queryByText('Reset to auto-resolved rates')).not.toBeInTheDocument()
+
+    // Enter a value in the first input
+    const inputs = screen.getAllByRole('spinbutton')
+    const advancedInputs = inputs.filter(el => {
+      const label = el.closest('label')
+      return label && label.textContent?.includes('$/1M tokens')
+    })
+    expect(advancedInputs.length).toBeGreaterThan(0)
+
+    fireEvent.change(advancedInputs[0], { target: { value: '5.00' } })
+
+    await waitFor(() => {
+      expect(screen.getByText('Reset to auto-resolved rates')).toBeInTheDocument()
+    })
   })
 })

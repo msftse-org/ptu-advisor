@@ -13,6 +13,8 @@ Reference:
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Literal, Optional, Tuple
@@ -156,6 +158,26 @@ DEFAULT_PAYG_OUTPUT = 10.00
 SANITY_RATIO_UPPER = 100.0
 SANITY_RATIO_LOWER = 0.01
 
+# Popular model/region combos for background cache warm-up.
+# These are pre-warmed on startup and refreshed periodically to ensure
+# the most common queries hit cache instead of the API.
+POPULAR_WARMUP_COMBOS: List[Tuple[str, str, str]] = [
+    # (model, region, deployment_type)
+    ("gpt-4o", "eastus", "global"),
+    ("gpt-4o", "eastus2", "global"),
+    ("gpt-4o", "westus", "global"),
+    ("gpt-4o-mini", "eastus", "global"),
+    ("gpt-5", "eastus", "global"),
+    ("gpt-4.1", "eastus", "global"),
+    ("gpt-4.1-mini", "eastus", "global"),
+    ("o4-mini", "eastus", "global"),
+    ("gpt-4o", "swedencentral", "global"),
+    ("gpt-4o", "northeurope", "global"),
+]
+
+# Background warm-up interval (seconds).  Re-warms cache every 12 hours.
+WARMUP_INTERVAL_SECONDS = 12 * 3600
+
 
 # ---------------------------------------------------------------------------
 # PricingResult
@@ -217,6 +239,7 @@ class PricingResolver:
         Returns:
             :class:`PricingResult` with resolved rates and source metadata.
         """
+        t0 = time.monotonic()
         now = datetime.now(timezone.utc)
         model_key = self._normalize_model(model_name)
         region_key = (region or "eastus").strip().lower().replace(" ", "")
@@ -231,7 +254,7 @@ class PricingResolver:
             v is not None for v in (payg_input_override, payg_output_override, ptu_hourly_override)
         ):
             fallback = self._static_fallback(model_key, region_key, dtype_key, now)
-            return PricingResult(
+            result = PricingResult(
                 payg_input_rate=payg_input_override
                 if payg_input_override is not None
                 else fallback.payg_input_rate,
@@ -247,6 +270,8 @@ class PricingResolver:
                 region=region_key,
                 deployment_type=dtype_key,
             )
+            self._log_resolution(result, time.monotonic() - t0)
+            return result
 
         # ------------------------------------------------------------------
         # Layer 2: Cache
@@ -256,7 +281,7 @@ class PricingResolver:
         if cached is not None:
             result, cached_at = cached
             if now - cached_at < self._ttl:
-                return PricingResult(
+                cached_result = PricingResult(
                     payg_input_rate=result.payg_input_rate,
                     payg_output_rate=result.payg_output_rate,
                     ptu_hourly_rate=result.ptu_hourly_rate,
@@ -267,6 +292,8 @@ class PricingResolver:
                     region=result.region,
                     deployment_type=result.deployment_type,
                 )
+                self._log_resolution(cached_result, time.monotonic() - t0)
+                return cached_result
             # TTL expired — evict
             del self._cache[cache_key]
 
@@ -279,6 +306,7 @@ class PricingResolver:
             fallback = self._static_fallback(model_key, region_key, dtype_key, now)
             if self._passes_sanity_check(live, fallback):
                 self._cache[cache_key] = (live, now)
+                self._log_resolution(live, time.monotonic() - t0)
                 return live
             else:
                 logger.warning(
@@ -294,7 +322,9 @@ class PricingResolver:
         # ------------------------------------------------------------------
         # Layer 4: Static fallback
         # ------------------------------------------------------------------
-        return self._static_fallback(model_key, region_key, dtype_key, now)
+        fallback_result = self._static_fallback(model_key, region_key, dtype_key, now)
+        self._log_resolution(fallback_result, time.monotonic() - t0)
+        return fallback_result
 
     def clear_cache(self) -> None:
         """Flush the in-memory pricing cache."""
@@ -304,6 +334,25 @@ class PricingResolver:
     def cache_size(self) -> int:
         """Number of entries currently in the cache."""
         return len(self._cache)
+
+    # -- structured logging ------------------------------------------------
+
+    @staticmethod
+    def _log_resolution(result: PricingResult, latency_s: float) -> None:
+        """Emit a structured log entry for a pricing resolution event."""
+        logger.info(
+            "pricing_resolved model=%s region=%s deployment_type=%s "
+            "source=%s latency_ms=%.1f "
+            "payg_input=%.4f payg_output=%.4f ptu_hourly=%.4f",
+            result.model_name,
+            result.region,
+            result.deployment_type,
+            result.source,
+            latency_s * 1000,
+            result.payg_input_rate,
+            result.payg_output_rate,
+            result.ptu_hourly_rate,
+        )
 
     # -- internal ----------------------------------------------------------
 
@@ -605,6 +654,63 @@ class PricingResolver:
             if ratio > SANITY_RATIO_UPPER or ratio < SANITY_RATIO_LOWER:
                 return False
         return True
+
+    # -- background cache warm-up ------------------------------------------
+
+    def warm_cache(
+        self,
+        combos: Optional[List[Tuple[str, str, str]]] = None,
+    ) -> int:
+        """Pre-warm the cache for popular model/region/deployment-type combos.
+
+        Args:
+            combos: List of ``(model, region, deployment_type)`` tuples.
+                    Defaults to :data:`POPULAR_WARMUP_COMBOS`.
+
+        Returns:
+            Number of combos successfully warmed.
+        """
+        targets = combos or POPULAR_WARMUP_COMBOS
+        warmed = 0
+        for model, region, dtype in targets:
+            try:
+                result = self.resolve(model, region, dtype)
+                if result.source in ("live", "cached"):
+                    warmed += 1
+            except Exception:
+                logger.debug("Cache warm-up failed for %s/%s/%s", model, region, dtype)
+        logger.info(
+            "pricing_cache_warmup completed=%d/%d cache_size=%d",
+            warmed,
+            len(targets),
+            self.cache_size,
+        )
+        return warmed
+
+    def start_background_warmup(self, interval_seconds: Optional[int] = None) -> threading.Thread:
+        """Start a daemon thread that periodically warms the cache.
+
+        Args:
+            interval_seconds: Seconds between warm-up cycles.
+                              Defaults to :data:`WARMUP_INTERVAL_SECONDS`.
+
+        Returns:
+            The daemon thread (already started).
+        """
+        interval = interval_seconds or WARMUP_INTERVAL_SECONDS
+
+        def _loop() -> None:
+            while True:
+                try:
+                    self.warm_cache()
+                except Exception:
+                    logger.warning("Background cache warm-up cycle failed.", exc_info=True)
+                time.sleep(interval)
+
+        t = threading.Thread(target=_loop, name="pricing-cache-warmup", daemon=True)
+        t.start()
+        logger.info("pricing_background_warmup started interval_s=%d", interval)
+        return t
 
 
 # ---------------------------------------------------------------------------

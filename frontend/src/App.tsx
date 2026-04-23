@@ -8,13 +8,19 @@ import {
   ThrottleChart,
   TpmBandChart,
   CostCurveChart,
+  LatencyOverlayChart,
   useChartZoom,
 } from './charts'
 import { ExportReport } from './ExportReport'
 import type {
   AccountInfo,
+  AnalysisMode,
   AnalysisResponse,
+  AuthStatus,
+  ConsolidationCharts,
+  ConsolidationSummary,
   DeploymentInfo,
+  DeploymentPreview,
   DeploymentTypeOption,
   FocusTopic,
   PricingRegion,
@@ -25,6 +31,16 @@ import {
   emitCostRecalculated,
   emitBreakEvenMarkerRendered,
   emitBreakEvenUnavailable,
+  emitAzureConnectStarted,
+  emitAzureConnectSucceeded,
+  emitAzureConnectFailed,
+  emitDiscoverySubscriptionsLoaded,
+  emitDiscoveryAccountsLoaded,
+  emitDiscoveryDeploymentsLoaded,
+  emitAnalysisRunStarted,
+  emitPerformanceBudgetExceeded,
+  PERF_BUDGET,
+  hashTenantId,
 } from './telemetry'
 
 type Mode = 'demo' | 'live'
@@ -152,6 +168,27 @@ function getDeploymentMetaParts(deployment: DeploymentInfo): { sku: string; capa
     sku: deployment.sku_type?.trim() || 'n/a',
     capacity: String(deployment.sku_capacity ?? 'n/a'),
   }
+}
+
+/** Group deployments by model_family, keeping eligible families first. */
+function groupDeploymentsByFamily(items: DeploymentInfo[]): { family: string; deployments: DeploymentInfo[]; allIneligible: boolean }[] {
+  const familyMap = new Map<string, DeploymentInfo[]>()
+  for (const dep of items) {
+    const family = dep.model_family || 'Other'
+    if (!familyMap.has(family)) familyMap.set(family, [])
+    familyMap.get(family)!.push(dep)
+  }
+  const groups = Array.from(familyMap.entries()).map(([family, deps]) => ({
+    family,
+    deployments: deps.sort((a, b) => a.name.localeCompare(b.name)),
+    allIneligible: deps.every((d) => !d.ptu_eligible),
+  }))
+  // Eligible families first (alphabetical), then ineligible families (alphabetical)
+  groups.sort((a, b) => {
+    if (a.allIneligible !== b.allIneligible) return a.allIneligible ? 1 : -1
+    return a.family.localeCompare(b.family)
+  })
+  return groups
 }
 
 function formatSubscriptionTitle(subscription: SubscriptionInfo): string {
@@ -357,6 +394,23 @@ function FormulaBlock({ text }: { text: string }) {
   )
 }
 
+/** Displays the pricing source as a small badge (live / cached / fallback / manual). */
+function PricingSourceBadge({ source, asOf }: { source: string; asOf?: string }) {
+  const config: Record<string, { icon: string; label: string; className: string }> = {
+    live:     { icon: '\u2713', label: 'Live pricing',     className: 'pricing-badge pricing-badge-live' },
+    cached:   { icon: '\u23F1', label: 'Cached pricing',   className: 'pricing-badge pricing-badge-cached' },
+    fallback: { icon: '\u26A0', label: 'Fallback pricing', className: 'pricing-badge pricing-badge-fallback' },
+    manual:   { icon: '\u270E', label: 'Custom rates',     className: 'pricing-badge pricing-badge-manual' },
+  }
+  const c = config[source] ?? config.fallback
+  const dateStr = asOf ? new Date(asOf).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ''
+  return (
+    <span className={c.className} title={dateStr ? `${c.label} as of ${dateStr}` : c.label}>
+      {c.icon} {c.label}{dateStr ? ` (${dateStr})` : ''}
+    </span>
+  )
+}
+
 function FormStateMessage({ title, detail }: { title: string; detail: string }) {
   return (
     <div className="form-state-message" role="status" aria-live="polite">
@@ -405,7 +459,7 @@ function App() {
 
   // Chart zoom state — ECharts dataZoom
   const [selectedTimestamp, setSelectedTimestamp] = useState<string | null>(null)
-  const [granularityMinutes, setGranularityMinutes] = useState<1 | 5 | 15 | 30>(5)
+  const [granularityMinutes, setGranularityMinutes] = useState<1 | 5 | 15 | 30>(1)
   const [baseAnalysis, setBaseAnalysis] = useState<AnalysisResponse | null>(null)
 
   const [lookbackDays, setLookbackDays] = useState(14)
@@ -419,17 +473,53 @@ function App() {
   const [selectedDeploymentType, setSelectedDeploymentType] = useState<'global' | 'data_zone' | 'regional'>('global')
   const [includeThrottle, setIncludeThrottle] = useState(false)
 
+  // ── Pricing override state (Phase 2: Advanced Pricing) ──
+  const [paygInputOverride, setPaygInputOverride] = useState<number | null>(null)
+  const [paygOutputOverride, setPaygOutputOverride] = useState<number | null>(null)
+  const [ptuHourlyOverride, setPtuHourlyOverride] = useState<number | null>(null)
+
   const [subscriptions, setSubscriptions] = useState<SubscriptionInfo[]>([])
-  const [subscriptionId, setSubscriptionId] = useState('')
+  const [subscriptionsLoading, setSubscriptionsLoading] = useState(false)
+  const [subscriptionId, setSubscriptionId] = useState(() => localStorage.getItem('ptu_last_subscription') || '')
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
 
   const [accounts, setAccounts] = useState<AccountInfo[]>([])
-  const [accountKey, setAccountKey] = useState('')
+  const [accountKey, setAccountKey] = useState(() => localStorage.getItem('ptu_last_account') || '')
 
   const [deployments, setDeployments] = useState<DeploymentInfo[]>([])
-  const [deploymentName, setDeploymentName] = useState('')
+  const [deploymentName, setDeploymentName] = useState(() => localStorage.getItem('ptu_last_deployment') || '')
+  const [expandedWhyDeployment, setExpandedWhyDeployment] = useState<string | null>(null)
+
+  // Persist last discovery selections to localStorage (PRD §7 — remember last selection)
+  useEffect(() => { if (subscriptionId) localStorage.setItem('ptu_last_subscription', subscriptionId) }, [subscriptionId])
+  useEffect(() => { if (accountKey) localStorage.setItem('ptu_last_account', accountKey) }, [accountKey])
+  useEffect(() => { if (deploymentName) localStorage.setItem('ptu_last_deployment', deploymentName) }, [deploymentName])
+
+  // Refresh discovery: increment key to re-trigger fetch effects
+  const [discoveryKey, setDiscoveryKey] = useState(0)
+  const refreshDiscovery = useCallback(() => {
+    api.refreshDiscoveryCache().catch(() => {})  // best-effort backend cache clear
+    setSubscriptions([])
+    setAccounts([])
+    setDeployments([])
+    setSubscriptionId('')
+    setAccountKey('')
+    setDeploymentName('')
+    setError('')
+    setDiscoveryKey((k) => k + 1)
+  }, [])
 
   // ── App-level view: Deployment Advisor vs PTU Calculator ──
   const [activeView, setActiveView] = useState<'advisor' | 'calculator'>('advisor')
+
+  // ── Consolidation mode state ──
+  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('single')
+  const [selectedDeployments, setSelectedDeployments] = useState<string[]>([])
+  const [selectedModelGroup, setSelectedModelGroup] = useState<string | null>(null)
+  const [consolidationSummary, setConsolidationSummary] = useState<ConsolidationSummary | null>(null)
+  const [deploymentPreviews, setDeploymentPreviews] = useState<DeploymentPreview[]>([])
+  const [toastMessage, setToastMessage] = useState<string | null>(null)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // ── PTU Calculator form state ──
   const [calcModel, setCalcModel] = useState('gpt-4o')
@@ -443,6 +533,63 @@ function App() {
   // ── ECharts zoom state (replaces old drag-to-zoom) ──
   const chartTimestamps = useMemo(() => analysis?.charts.tokens.timestamps ?? [], [analysis])
   const { zoomState, onDataZoom, resetZoom, getReAnalyzeWindow } = useChartZoom(chartTimestamps)
+
+  // ── Consolidation: group deployments by (model, sku_type) ──
+  const deploymentGroups = useMemo(() => {
+    const groups: Record<string, DeploymentInfo[]> = {}
+    for (const d of deployments) {
+      const key = `${d.model}::${d.sku_type}`
+      if (!groups[key]) groups[key] = []
+      groups[key].push(d)
+    }
+    return groups
+  }, [deployments])
+
+  /** Deployments grouped by model family for the single deployment picker. */
+  const deploymentFamilyGroups = useMemo(() => groupDeploymentsByFamily(deployments), [deployments])
+
+  /** Show a transient toast notification that auto-dismisses after 3 seconds. */
+  const showToast = useCallback((message: string) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    setToastMessage(message)
+    toastTimerRef.current = setTimeout(() => setToastMessage(null), 3000)
+  }, [])
+
+  /** Toggle a deployment checkbox within a model group (consolidation mode). */
+  const toggleConsolidationDeployment = useCallback((deployName: string, groupKey: string) => {
+    // If selecting in a different group, switch group and start fresh
+    if (selectedModelGroup !== groupKey) {
+      setSelectedModelGroup(groupKey)
+      setSelectedDeployments([deployName])
+      showToast('Switched model group — previous selection cleared. PTU capacity is model-specific.')
+      return
+    }
+    // Same group — toggle the checkbox
+    setSelectedDeployments((prev) =>
+      prev.includes(deployName) ? prev.filter((n) => n !== deployName) : [...prev, deployName]
+    )
+  }, [selectedModelGroup, showToast])
+
+  /** Reset consolidation state when switching analysis mode. */
+  const handleAnalysisModeChange = useCallback((newMode: AnalysisMode) => {
+    setAnalysisMode(newMode)
+    setSelectedDeployments([])
+    setSelectedModelGroup(null)
+    setConsolidationSummary(null)
+    setAnalysis(null)
+    if (newMode !== 'consolidation') setDeploymentPreviews([])
+  }, [])
+
+  // Fetch lightweight preview data when entering consolidation mode (demo only — live requires workspace)
+  useEffect(() => {
+    if (analysisMode !== 'consolidation') return
+    if (mode !== 'demo') { setDeploymentPreviews([]); return }
+    let cancelled = false
+    api.deploymentPreview({ mode: 'demo', focusTopic: focusTopic, lookbackDays: lookbackDays })
+      .then((items) => { if (!cancelled) setDeploymentPreviews(items) })
+      .catch(() => { if (!cancelled) setDeploymentPreviews([]) })
+    return () => { cancelled = true }
+  }, [analysisMode, mode, focusTopic, lookbackDays])
 
   useEffect(() => {
     api.focusTopics()
@@ -474,17 +621,47 @@ function App() {
 
   useEffect(() => {
     if (mode !== 'live') {
+      setAuthStatus(null)
       return
     }
+    emitAzureConnectStarted({ policy_version: POLICY_VERSION, tenant_id_hash: '' })
+    api.authStatus()
+      .then((status) => {
+        setAuthStatus(status)
+        const tidHash = hashTenantId(status.tenant_id || '')
+        if (status.authenticated) {
+          emitAzureConnectSucceeded({ policy_version: POLICY_VERSION, tenant_id_hash: tidHash, display_name: status.display_name })
+        } else {
+          emitAzureConnectFailed({ policy_version: POLICY_VERSION, tenant_id_hash: tidHash, error_type: status.error || 'auth_failed' })
+        }
+      })
+      .catch((e) => {
+        setAuthStatus({ authenticated: false, display_name: '', email: '', tenant_id: '', error: 'Failed to check authentication status.' })
+        emitAzureConnectFailed({ policy_version: POLICY_VERSION, tenant_id_hash: '', error_type: e instanceof Error ? e.message : 'network_error' })
+      })
+  }, [mode, discoveryKey])
+
+  useEffect(() => {
+    if (mode !== 'live') {
+      return
+    }
+    setSubscriptionsLoading(true)
+    const t0 = performance.now()
     api.subscriptions()
       .then((items) => {
+        const elapsed = performance.now() - t0
         setSubscriptions(items)
+        emitDiscoverySubscriptionsLoaded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), subscription_count: items.length })
+        if (elapsed > PERF_BUDGET.FULL_DISCOVERY_MS) {
+          emitPerformanceBudgetExceeded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), operation: 'subscriptions_load', budget_ms: PERF_BUDGET.FULL_DISCOVERY_MS, actual_ms: elapsed })
+        }
         if (items.length > 0) {
           setSubscriptionId((current) => current || items[0].subscription_id)
         }
       })
       .catch((e: Error) => setError(e.message))
-  }, [mode])
+      .finally(() => setSubscriptionsLoading(false))
+  }, [mode, discoveryKey])
 
   useEffect(() => {
     if (mode !== 'live' || !subscriptionId) {
@@ -495,9 +672,15 @@ function App() {
     setDeployments([])
     setDeploymentName('')
 
+    const t0 = performance.now()
     api.accounts(subscriptionId)
       .then((items) => {
+        const elapsed = performance.now() - t0
         setAccounts(items)
+        emitDiscoveryAccountsLoaded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), account_count: items.length })
+        if (elapsed > PERF_BUDGET.CACHED_CHANGE_MS) {
+          emitPerformanceBudgetExceeded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), operation: 'accounts_load', budget_ms: PERF_BUDGET.CACHED_CHANGE_MS, actual_ms: elapsed })
+        }
         if (items.length > 0) {
           const first = `${items[0].resource_group}|${items[0].name}`
           setAccountKey(first)
@@ -523,11 +706,26 @@ function App() {
       setSelectedRegion(loc)
     }
 
+    const t0 = performance.now()
     api.deployments(subscriptionId, selectedAccount.resource_group, selectedAccount.name)
       .then((items) => {
-        setDeployments(items)
-        if (items.length > 0) {
-          setDeploymentName(items[0].name)
+        const elapsed = performance.now() - t0
+        // Sort: PTU-eligible first, then alphabetical within each group
+        const sorted = [...items].sort((a, b) => {
+          if (a.ptu_eligible !== b.ptu_eligible) return a.ptu_eligible ? -1 : 1
+          return a.name.localeCompare(b.name)
+        })
+        setDeployments(sorted)
+        emitDiscoveryDeploymentsLoaded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), deployment_count: sorted.length })
+        if (elapsed > PERF_BUDGET.CACHED_CHANGE_MS) {
+          emitPerformanceBudgetExceeded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), operation: 'deployments_load', budget_ms: PERF_BUDGET.CACHED_CHANGE_MS, actual_ms: elapsed })
+        }
+        // Auto-select the first eligible deployment
+        const firstEligible = sorted.find((d) => d.ptu_eligible)
+        if (firstEligible) {
+          setDeploymentName(firstEligible.name)
+        } else if (sorted.length > 0) {
+          setDeploymentName('')  // No eligible deployments — don't select any
         }
       })
       .catch((e: Error) => setError(e.message))
@@ -536,17 +734,94 @@ function App() {
   const runAnalysis = useCallback(async ({ preserveCurrent = false, timeWindow = null, updateCharts = true }: RunAnalysisOptions = {}) => {
     setLoading(true)
     setError('')
+    emitAnalysisRunStarted({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), mode })
     if (!preserveCurrent) {
       setAnalysis(null)
       setBaseAnalysis(null)
       setBaselinePtu(null) // Reset so next analysis picks its own default
       resetZoom()
       setSelectedTimestamp(null)
+      setConsolidationSummary(null)
     }
     try {
       // Only send baseline_ptu when known (after first analysis sets the default)
       const ptuParam = baselinePtu != null ? { baseline_ptu: baselinePtu } : {}
       const windowParams = timeWindow ? { window_start: timeWindow.start, window_end: timeWindow.end } : {}
+      const overrideParams: Record<string, number> = {}
+      if (paygInputOverride != null) overrideParams.payg_input_rate_override = paygInputOverride
+      if (paygOutputOverride != null) overrideParams.payg_output_rate_override = paygOutputOverride
+      if (ptuHourlyOverride != null) overrideParams.ptu_hourly_rate_override = ptuHourlyOverride
+
+      // ── Consolidation mode ──
+      if (analysisMode === 'consolidation') {
+        if (mode === 'demo') {
+          const result = await api.analyzeConsolidation({
+            mode: 'demo',
+            focus_topic: focusTopic,
+            lookback_days: lookbackDays,
+            granularity_minutes: granularityMinutes,
+            reservation_type: reservationType,
+            region: selectedRegion,
+            deployment_type: selectedDeploymentType,
+            include_throttle: includeThrottle,
+            ...windowParams,
+            ...ptuParam,
+            ...overrideParams,
+          })
+          if (baselinePtu == null) {
+            setBaselinePtu(result.cost_analysis.hybrid.baseline_ptu)
+          }
+          setConsolidationSummary(result.consolidation_summary)
+          if (updateCharts || !analysis) {
+            setAnalysis(result)
+            setBaseAnalysis(result)
+          } else {
+            setAnalysis((current) => {
+              if (!current) return result
+              return { ...current, recommendation: result.recommendation, confidence: result.confidence, summary: result.summary, explanation: result.explanation, what_would_change: result.what_would_change, data_quality: result.data_quality, analysis_period: result.analysis_period, dimensions: result.dimensions, metrics: result.metrics, cost_analysis: result.cost_analysis, insights: result.insights, charts: { ...current.charts, daily_cost: result.charts.daily_cost } }
+            })
+          }
+          return
+        }
+
+        // Live consolidation
+        if (!subscriptionId || !selectedAccount || selectedDeployments.length < 2) {
+          throw new Error('Please select subscription, account, and at least 2 deployments.')
+        }
+        const result = await api.analyzeConsolidation({
+          mode: 'live',
+          lookback_days: lookbackDays,
+          granularity_minutes: granularityMinutes,
+          subscription_id: subscriptionId,
+          resource_group: selectedAccount.resource_group,
+          workspace: selectedAccount.name,
+          deployments: selectedDeployments,
+          focus_topic: focusTopic,
+          reservation_type: reservationType,
+          region: selectedRegion,
+          deployment_type: selectedDeploymentType,
+          include_throttle: includeThrottle,
+          ...windowParams,
+          ...ptuParam,
+          ...overrideParams,
+        })
+        if (baselinePtu == null) {
+          setBaselinePtu(result.cost_analysis.hybrid.baseline_ptu)
+        }
+        setConsolidationSummary(result.consolidation_summary)
+        if (updateCharts || !analysis) {
+          setAnalysis(result)
+          setBaseAnalysis(result)
+        } else {
+          setAnalysis((current) => {
+            if (!current) return result
+            return { ...current, recommendation: result.recommendation, confidence: result.confidence, summary: result.summary, explanation: result.explanation, what_would_change: result.what_would_change, data_quality: result.data_quality, analysis_period: result.analysis_period, dimensions: result.dimensions, metrics: result.metrics, cost_analysis: result.cost_analysis, insights: result.insights, charts: { ...current.charts, cost_curves: result.charts.cost_curves } }
+          })
+        }
+        return
+      }
+
+      // ── Single deployment mode (existing flow) ──
       if (mode === 'demo') {
         const result = await api.analyze({
           mode: 'demo',
@@ -559,6 +834,7 @@ function App() {
           include_throttle: includeThrottle,
           ...windowParams,
           ...ptuParam,
+          ...overrideParams,
         })
         // Initialise the PTU slider on first analysis load
         if (baselinePtu == null) {
@@ -612,6 +888,7 @@ function App() {
         include_throttle: includeThrottle,
         ...windowParams,
         ...ptuParam,
+        ...overrideParams,
       })
       // Initialise the PTU slider on first analysis load
       if (baselinePtu == null) {
@@ -650,6 +927,7 @@ function App() {
     }
   }, [
     mode,
+    analysisMode,
     focusTopic,
     lookbackDays,
     granularityMinutes,
@@ -660,7 +938,11 @@ function App() {
     subscriptionId,
     selectedAccount,
     deploymentName,
+    selectedDeployments,
     analysis,
+    paygInputOverride,
+    paygOutputOverride,
+    ptuHourlyOverride,
   ])
 
   const previousAssumptionKey = useRef('')
@@ -682,8 +964,11 @@ function App() {
       selectedDeploymentType,
       granularityMinutes,
       includeThrottle: includeThrottle ? 1 : 0,
+      paygInputOverride: paygInputOverride ?? -1,
+      paygOutputOverride: paygOutputOverride ?? -1,
+      ptuHourlyOverride: ptuHourlyOverride ?? -1,
     }
-    const currentKey = `${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}|${granularityMinutes}|${includeThrottle}`
+    const currentKey = `${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}|${granularityMinutes}|${includeThrottle}|${paygInputOverride}|${paygOutputOverride}|${ptuHourlyOverride}`
     if (!previousAssumptionKey.current) {
       previousAssumptionKey.current = currentKey
       previousAssumptionParts.current = parts
@@ -719,7 +1004,7 @@ function App() {
     }, 250)
 
     return () => clearTimeout(timer)
-  }, [analysis, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, includeThrottle, loading, runAnalysis, getReAnalyzeWindow])
+  }, [analysis, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, includeThrottle, paygInputOverride, paygOutputOverride, ptuHourlyOverride, loading, runAnalysis, getReAnalyzeWindow])
 
   // ── Telemetry: cost_recalculated ──
   const previousCostKey = useRef('')
@@ -836,6 +1121,15 @@ function App() {
       hybrid: c.ptu_spill_monthly[idx] ?? 0,
     }))
   }, [analysis])
+
+  // ── Per-deployment chart data (consolidation mode only) ──
+  const perDepCharts = useMemo<ConsolidationCharts | null>(() => {
+    if (!analysis || !consolidationSummary) return null
+    const charts = analysis.charts as ConsolidationCharts
+    // Guard: only if per_deployment data is present
+    if (!charts.tokens?.per_deployment) return null
+    return charts
+  }, [analysis, consolidationSummary])
 
   // ── Auto re-analyze when zoom window changes (debounced) ──
   const previousZoomKey = useRef('')
@@ -1057,6 +1351,12 @@ function App() {
 
   return (
     <div className="app-shell">
+      {toastMessage && (
+        <div className="toast-notification" role="status" aria-live="polite">
+          <span>{toastMessage}</span>
+          <button type="button" className="toast-dismiss" onClick={() => setToastMessage(null)} aria-label="Dismiss">&times;</button>
+        </div>
+      )}
       <div className="container">
         {!analysis && (
           <>
@@ -1165,24 +1465,66 @@ function App() {
               </button>
             </div>
 
+            {/* Auth Status Banner (PRD §4.1) */}
+            {mode === 'live' && authStatus && (
+              <div className={`auth-status-banner ${authStatus.authenticated ? 'auth-status-ok' : 'auth-status-error'}`} role="status" aria-live="polite">
+                {authStatus.authenticated ? (
+                  <>
+                    <span className="auth-status-icon" aria-hidden="true">{'\u2713'}</span>
+                    <span>Signed in as <strong>{authStatus.email || authStatus.display_name}</strong>{authStatus.tenant_id ? ` \u00B7 Tenant: ${authStatus.tenant_id.slice(0, 8)}\u2026` : ''}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className="auth-status-icon" aria-hidden="true">{'\u2717'}</span>
+                    <span>{authStatus.error || 'Not authenticated. Please run `az login` in your terminal, then refresh this page.'}</span>
+                  </>
+                )}
+                <button type="button" className="refresh-discovery-btn" onClick={refreshDiscovery} title="Re-discover Azure resources (clears cache)">
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1 1v5h5"/><path d="M3.51 10a5 5 0 1 0 .49-5.37L1 7.5"/></svg>
+                  Refresh
+                </button>
+              </div>
+            )}
+
             <div className="form-grid advisor-form-grid">
               {mode === 'demo' ? (
-                <label>
-                  Focus Topic
-                  <select value={focusTopic} onChange={(e) => setFocusTopic(e.target.value)}>
-                    {focusTopics.map((topic) => (
-                      <option key={topic.name} value={topic.name}>
-                        {topic.name}
-                      </option>
-                    ))}
-                  </select>
-                </label>
+                <>
+                  <label>
+                    Focus Topic
+                    <select value={focusTopic} onChange={(e) => setFocusTopic(e.target.value)}>
+                      {focusTopics.map((topic) => (
+                        <option key={topic.name} value={topic.name}>
+                          {topic.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <fieldset>
+                    <legend>Analysis Mode</legend>
+                    <div className="mode-toggle">
+                      <button type="button" className={analysisMode === 'single' ? 'active' : ''} onClick={() => handleAnalysisModeChange('single')} aria-pressed={analysisMode === 'single'}>
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="5"/><path d="M8 5v3l2 1"/></svg>
+                        Single Deployment
+                      </button>
+                      <button type="button" className={analysisMode === 'consolidation' ? 'active' : ''} onClick={() => handleAnalysisModeChange('consolidation')} aria-pressed={analysisMode === 'consolidation'}>
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="1.5" width="5" height="5" rx="1"/><rect x="9.5" y="1.5" width="5" height="5" rx="1"/><rect x="5.5" y="9.5" width="5" height="5" rx="1"/></svg>
+                        Consolidation
+                      </button>
+                    </div>
+                  </fieldset>
+                </>
               ) : (
                 <>
                   <fieldset>
                     <legend>Subscription</legend>
                     <div className="deployments-box subscription-box">
-                      {subscriptions.length === 0 && (
+                      {subscriptionsLoading && subscriptions.length === 0 && (
+                        <FormStateMessage
+                          title="Loading subscriptions\u2026"
+                          detail="Discovering Azure subscriptions for your account."
+                        />
+                      )}
+                      {!subscriptionsLoading && subscriptions.length === 0 && (
                         <FormStateMessage
                           title="No subscriptions found"
                           detail="Confirm Azure sign-in and that this account has at least one enabled subscription."
@@ -1256,43 +1598,209 @@ function App() {
 
                   <fieldset>
                     <legend>Deployment</legend>
-                    <div className="deployments-box">
-                      {!selectedAccount && (
-                        <FormStateMessage
-                          title="Select an account"
-                          detail="Choose an Azure OpenAI account to load deployments."
-                        />
-                      )}
-                      {selectedAccount && deployments.length === 0 && (
-                        <FormStateMessage
-                          title="No deployments found"
-                          detail="Create a deployment in this account, then rerun analysis."
-                        />
-                      )}
-                      {deployments.map((deployment) => {
-                        const meta = getDeploymentMetaParts(deployment)
-                        return (
-                          <label
-                            key={deployment.name}
-                            className={`radio-option deployment-option ${deploymentName === deployment.name ? 'is-selected' : ''}`}
-                          >
-                            <input
-                              type="radio"
-                              name="deployment"
-                              checked={deploymentName === deployment.name}
-                              onChange={() => setDeploymentName(deployment.name)}
-                            />
-                            <span className="deployment-text">
-                              <span className="deployment-title">{formatDeploymentTitle(deployment)}</span>
-                              <span className="deployment-meta deployment-labels">
-                                <span className="deployment-chip">SKU: {meta.sku}</span>
-                                <span className="deployment-chip">Capacity: {meta.capacity}</span>
-                              </span>
-                            </span>
-                          </label>
-                        )
-                      })}
+
+                    {/* Analysis Mode Toggle */}
+                    <div className="mode-toggle">
+                      <button type="button" className={analysisMode === 'single' ? 'active' : ''} onClick={() => handleAnalysisModeChange('single')} aria-pressed={analysisMode === 'single'}>
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="8" cy="8" r="5"/><path d="M8 5v3l2 1"/></svg>
+                        Single Deployment
+                      </button>
+                      <button type="button" className={analysisMode === 'consolidation' ? 'active' : ''} onClick={() => handleAnalysisModeChange('consolidation')} aria-pressed={analysisMode === 'consolidation'}>
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="1.5" y="1.5" width="5" height="5" rx="1"/><rect x="9.5" y="1.5" width="5" height="5" rx="1"/><rect x="5.5" y="9.5" width="5" height="5" rx="1"/></svg>
+                        Consolidation
+                      </button>
                     </div>
+
+                    {analysisMode === 'single' ? (
+                      /* ── Single deployment picker (radio buttons, grouped by model family) ── */
+                      <div className="deployments-box">
+                        {!selectedAccount && (
+                          <FormStateMessage
+                            title="Select an account"
+                            detail="Choose an Azure OpenAI account to load deployments."
+                          />
+                        )}
+                        {selectedAccount && deployments.length === 0 && (
+                          <FormStateMessage
+                            title="No deployments found"
+                            detail="Create a deployment in this account, then rerun analysis."
+                          />
+                        )}
+                        {selectedAccount && deployments.length > 0 && !deployments.some((d) => d.ptu_eligible) && (
+                          <div className="no-eligible-banner">
+                            <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.5"/><path d="M8 4.5v4M8 10.5v.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                            <div>
+                              <strong>No PTU-Eligible Deployments</strong>
+                              <p>This account has {deployments.length} deployment{deployments.length !== 1 ? 's' : ''}, but none use models that support Provisioned Throughput Units.</p>
+                              <p>PTU-eligible models: GPT-4o, GPT-4.1, GPT-5, o1, o3-mini, o4-mini (and their variants).</p>
+                              <p>Deploy a supported model to use PTU Advisor analysis, or switch to Demo Mode to explore the tool.</p>
+                            </div>
+                          </div>
+                        )}
+                        {deploymentFamilyGroups.map(({ family, deployments: familyDeps, allIneligible }) => (
+                          <div key={family} className={`family-group${allIneligible ? ' is-all-ineligible' : ''}`} data-family={family}>
+                            <div className="family-group-header">
+                              <span className="family-group-label">{family}</span>
+                              <span className="family-group-count">
+                                {familyDeps.length} deployment{familyDeps.length !== 1 ? 's' : ''}
+                                {allIneligible && <span className="eligibility-chip ineligible" style={{ marginLeft: 6 }}>PTU Not Available</span>}
+                              </span>
+                            </div>
+                            {familyDeps.map((deployment) => {
+                              const meta = getDeploymentMetaParts(deployment)
+                              const isIneligible = !deployment.ptu_eligible
+                              const isAlreadyPtu = /provisioned/i.test(deployment.sku_type || '')
+                              const isWhyExpanded = expandedWhyDeployment === deployment.name
+                              return (
+                                <div key={deployment.name} className="family-group-item">
+                                  <label
+                                    className={`radio-option deployment-option${deploymentName === deployment.name ? ' is-selected' : ''}${isIneligible ? ' is-ineligible' : ''}`}
+                                    title={isIneligible ? `PTU is not available for ${deployment.model}. Provisioned Throughput Units are only supported for select Azure OpenAI chat and reasoning models.` : undefined}
+                                  >
+                                    <input
+                                      type="radio"
+                                      name="deployment"
+                                      checked={deploymentName === deployment.name}
+                                      disabled={isIneligible}
+                                      onChange={() => setDeploymentName(deployment.name)}
+                                    />
+                                    <span className="deployment-text">
+                                      <span className="deployment-title">{formatDeploymentTitle(deployment)}</span>
+                                      <span className="deployment-meta deployment-labels">
+                                        <span className="deployment-chip">SKU: {meta.sku}</span>
+                                        <span className="deployment-chip">Capacity: {meta.capacity}</span>
+                                        {isIneligible
+                                          ? <span className="eligibility-chip ineligible">PTU Not Available</span>
+                                          : isAlreadyPtu
+                                            ? <span className="eligibility-chip already-ptu">Already on PTU</span>
+                                            : <span className="eligibility-chip eligible">PTU Eligible</span>
+                                        }
+                                      </span>
+                                      {isAlreadyPtu && !isIneligible && (
+                                        <span className="ptu-validate-hint">Analyze to validate sizing</span>
+                                      )}
+                                    </span>
+                                  </label>
+                                  {isIneligible && (
+                                    <button
+                                      type="button"
+                                      className="why-toggle"
+                                      aria-expanded={isWhyExpanded}
+                                      onClick={(e) => { e.preventDefault(); setExpandedWhyDeployment(isWhyExpanded ? null : deployment.name) }}
+                                    >
+                                      {isWhyExpanded ? 'Hide details' : 'Why?'}
+                                    </button>
+                                  )}
+                                  {isIneligible && isWhyExpanded && (
+                                    <div className="why-panel" role="note">
+                                      <p>{deployment.ineligibility_reason || 'This model does not support Provisioned Throughput Units. PTU is available for select Azure OpenAI chat and reasoning models.'}</p>
+                                      <p className="why-panel-eligible">PTU-eligible models: GPT-4o, GPT-4.1, GPT-5, o1, o3-mini, o4-mini (and their variants).</p>
+                                      <a className="why-panel-link" href="https://learn.microsoft.com/azure/ai-services/openai/concepts/provisioned-throughput" target="_blank" rel="noopener noreferrer">Learn more</a>
+                                    </div>
+                                  )}
+                                </div>
+                              )
+                            })}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      /* ── Consolidation picker (grouped checkboxes) ── */
+                      <div className="consolidation-picker">
+                        <p className="consolidation-picker-hint">Select 2 or more deployments of the same model to consolidate. Deployments are grouped by model — you can only select within one group.</p>
+                        {!selectedAccount && (
+                          <FormStateMessage
+                            title="Select an account"
+                            detail="Choose an Azure OpenAI account to load deployments."
+                          />
+                        )}
+                        {selectedAccount && deployments.length === 0 && (
+                          <FormStateMessage
+                            title="No deployments found"
+                            detail="Create a deployment in this account, then rerun analysis."
+                          />
+                        )}
+                        {Object.entries(deploymentGroups).map(([groupKey, groupDeployments]) => {
+                          const [model, skuType] = groupKey.split('::')
+                          const isSingletonGroup = groupDeployments.length < 2
+                          const isActiveGroup = selectedModelGroup === groupKey
+                          const isOtherGroupActive = selectedModelGroup != null && selectedModelGroup !== groupKey
+                          const groupAllIneligible = groupDeployments.every((d) => !d.ptu_eligible)
+                          return (
+                            <div key={groupKey} className={`consolidation-group${isActiveGroup ? ' is-active-group' : ''}${isSingletonGroup ? ' is-singleton' : ''}${isOtherGroupActive ? ' is-dimmed' : ''}${groupAllIneligible ? ' is-all-ineligible' : ''}`}>
+                              <div className="consolidation-group-header" title="PTU capacity is model-specific — only same-model, same-SKU deployments can share a PTU allocation.">
+                                <span className="consolidation-group-label">{model} · {skuType || 'Standard'}</span>
+                                <span className="consolidation-group-count">
+                                  {groupDeployments.length} deployment{groupDeployments.length !== 1 ? 's' : ''}
+                                  {groupAllIneligible && <span className="eligibility-chip ineligible" style={{ marginLeft: 6 }}>PTU Not Available</span>}
+                                </span>
+                              </div>
+                              {groupDeployments.map((deployment) => {
+                                const meta = getDeploymentMetaParts(deployment)
+                                const isChecked = selectedDeployments.includes(deployment.name)
+                                const isIneligible = !deployment.ptu_eligible
+                                const isDisabled = isIneligible || isSingletonGroup || (isOtherGroupActive && !isChecked)
+                                return (
+                                  <label
+                                    key={deployment.name}
+                                    className={`checkbox-option deployment-option ${isChecked ? 'is-selected' : ''}${isDisabled ? ' is-disabled' : ''}${isIneligible ? ' is-ineligible' : ''}`}
+                                    title={isIneligible ? `PTU is not available for ${deployment.model}. Provisioned Throughput Units are only supported for select Azure OpenAI chat and reasoning models.` : isSingletonGroup ? 'Only 1 deployment — nothing to consolidate' : undefined}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isChecked}
+                                      disabled={isDisabled}
+                                      onChange={() => toggleConsolidationDeployment(deployment.name, groupKey)}
+                                    />
+                                    <span className="deployment-text">
+                                      <span className="deployment-title">{formatDeploymentTitle(deployment)}</span>
+                                      <span className="deployment-meta deployment-labels">
+                                        <span className="deployment-chip">SKU: {meta.sku}</span>
+                                        <span className="deployment-chip">Capacity: {meta.capacity}</span>
+                                        {isIneligible
+                                          ? <span className="eligibility-chip ineligible">PTU Not Available</span>
+                                          : <span className="eligibility-chip eligible">PTU Eligible</span>
+                                        }
+                                        {(() => {
+                                          // Post-analysis data (from consolidation summary) takes precedence
+                                          const depSummary = consolidationSummary?.individual_deployments.find((d) => d.name === deployment.name)
+                                          if (depSummary) return (
+                                            <>
+                                              <span className="deployment-chip deployment-chip-metric">{formatNumber(depSummary.avg_tpm)} TPM avg</span>
+                                              <span className="deployment-chip deployment-chip-metric">{depSummary.throttling_rate_pct.toFixed(1)}% 429</span>
+                                            </>
+                                          )
+                                          // Pre-analysis preview data (from lightweight endpoint)
+                                          const preview = deploymentPreviews.find((p) => p.name === deployment.name)
+                                          if (preview) return (
+                                            <>
+                                              <span className="deployment-chip deployment-chip-preview" title="Estimated from preview — run analysis for precise values">{formatNumber(preview.avg_tpm)} TPM avg</span>
+                                              <span className="deployment-chip deployment-chip-preview" title="Estimated from preview — run analysis for precise values">{preview.throttling_rate_pct.toFixed(1)}% 429</span>
+                                            </>
+                                          )
+                                          return null
+                                        })()}
+                                      </span>
+                                    </span>
+                                  </label>
+                                )
+                              })}
+                              {isSingletonGroup && (
+                                <span className="consolidation-singleton-note">Only 1 deployment — nothing to consolidate</span>
+                              )}
+                            </div>
+                          )
+                        })}
+                        {selectedDeployments.length > 0 && selectedModelGroup && (
+                          <div className="consolidation-selection-summary">
+                            Selected: {selectedDeployments.length} of {deploymentGroups[selectedModelGroup]?.length ?? 0} deployments
+                            {consolidationSummary && (
+                              <span className="consolidation-selection-tpm"> · {formatNumber(consolidationSummary.combined_avg_tpm)} TPM combined avg</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </fieldset>
                 </>
               )}
@@ -1334,9 +1842,11 @@ function App() {
             )}
 
             <div className="advisor-actions">
-              <button className="primary run-btn" onClick={() => runAnalysis()} disabled={loading}>
+              <button className="primary run-btn" onClick={() => runAnalysis()} disabled={loading || (analysisMode === 'consolidation' && mode === 'live' && selectedDeployments.length < 2) || (analysisMode === 'single' && mode === 'live' && !!deploymentName && !deployments.find((d) => d.name === deploymentName)?.ptu_eligible)}>
                 {loading ? (
                   <><span className="run-btn-spinner" /> Analyzing...</>
+                ) : analysisMode === 'consolidation' ? (
+                  <><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polygon points="5,3 13,8 5,13" fill="currentColor" stroke="none"/></svg> Analyze Consolidation{mode === 'live' && selectedDeployments.length >= 2 ? ` (${selectedDeployments.length} deployments)` : ''}</>
                 ) : (
                   <><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polygon points="5,3 13,8 5,13" fill="currentColor" stroke="none"/></svg> Run Analysis</>
                 )}
@@ -1499,11 +2009,122 @@ function App() {
               <div className="result-banner-top">
                 <RecBadge recommendation={analysis.recommendation} />
                 <p className="confidence">Confidence score: {(analysis.confidence * 100).toFixed(1)}%</p>
-                <ExportReport analysis={analysis} baseAnalysis={baseAnalysis} isZoomed={zoomState.isDirty} />
+                <ExportReport analysis={analysis} baseAnalysis={baseAnalysis} isZoomed={zoomState.isDirty} consolidationSummary={consolidationSummary} />
               </div>
               <h2 className="result-banner-title">{recommendationTitle}</h2>
               <p className="result-banner-summary">{recommendationSummary}</p>
             </div>
+
+            {/* ── Consolidation Summary Card ── */}
+            {consolidationSummary && (
+              <article className="consolidation-summary-card">
+                <div className="consolidation-summary-header">
+                  <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><rect x="1" y="1" width="6" height="6" rx="1.5"/><rect x="11" y="1" width="6" height="6" rx="1.5"/><rect x="6" y="11" width="6" height="6" rx="1.5"/><path d="M4 7v2.5a1.5 1.5 0 001.5 1.5h2M14 7v2.5a1.5 1.5 0 01-1.5 1.5h-2"/></svg>
+                  <span>Consolidation Analysis — {consolidationSummary.deployment_count} {consolidationSummary.model_name} deployments</span>
+                </div>
+
+                <div className="consolidation-deployments-grid">
+                  {consolidationSummary.individual_deployments.map((dep) => (
+                    <div key={dep.name} className="consolidation-dep-card">
+                      <strong className="consolidation-dep-name">{dep.name}</strong>
+                      <div className="consolidation-dep-stats">
+                        <span>Avg TPM: {formatNumber(dep.avg_tpm)}</span>
+                        <span>Peak TPM: {formatNumber(dep.peak_tpm)}</span>
+                        <span>Throttling: {dep.throttling_rate_pct.toFixed(1)}%</span>
+                        <span>Requests: {formatNumber(dep.total_requests)}</span>
+                        <span>PAYG: {formatCurrency(dep.payg_monthly_cost)}/mo</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="consolidation-combined-stats">
+                  <span>Combined: Avg TPM {formatNumber(consolidationSummary.combined_avg_tpm)}</span>
+                  <span className="consolidation-stat-sep">{"\u00B7"}</span>
+                  <span>Peak TPM {formatNumber(consolidationSummary.combined_peak_tpm)}</span>
+                  <span className="consolidation-stat-sep">{"\u00B7"}</span>
+                  <span>Throttling {consolidationSummary.combined_throttling_rate_pct.toFixed(1)}%</span>
+                </div>
+
+                {/* ── Consolidation Warnings ── */}
+                {consolidationSummary.warnings.length > 0 && (
+                  <div className="consolidation-warnings" data-testid="consolidation-warnings">
+                    {consolidationSummary.warnings.map((w, i) => (
+                      <div key={i} className="consolidation-warning-item">
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#d4a017" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M8 1.5L1.5 13h13L8 1.5z"/><path d="M8 6v3"/><circle cx="8" cy="11" r="0.5" fill="#d4a017" stroke="none"/></svg>
+                        <span>{w}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className={`consolidation-verdict ${consolidationSummary.savings > 0 ? 'consolidation-verdict-positive' : 'consolidation-verdict-negative'}`}>
+                  {consolidationSummary.all_on_ptu ? (
+                    <p>All selected deployments already use PTU. {consolidationSummary.savings > 0 ? (
+                      <>Consolidating onto a single PTU allocation saves an estimated <strong>{formatCurrency(consolidationSummary.savings)}/month ({consolidationSummary.savings_pct.toFixed(1)}%)</strong> vs the current combined PTU spend.</>
+                    ) : (
+                      <>The current separate PTU allocations are already cost-effective. Consolidation would cost <strong>{formatCurrency(Math.abs(consolidationSummary.savings))}/month</strong> more.</>
+                    )}</p>
+                  ) : consolidationSummary.savings > 0 ? (
+                    <p>Consolidating these deployments onto a single PTU saves an estimated <strong>{formatCurrency(consolidationSummary.savings)}/month ({consolidationSummary.savings_pct.toFixed(1)}%)</strong> vs running each on PAYG.</p>
+                  ) : (
+                    <p>Consolidation does not save money here. Individual PAYG is more cost-effective by <strong>{formatCurrency(Math.abs(consolidationSummary.savings))}/month</strong>.</p>
+                  )}
+                </div>
+
+                <div className="consolidation-cost-table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Metric</th>
+                        <th>Individual PAYG</th>
+                        <th>Consolidated PTU + Spillover</th>
+                        <th>Savings</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {consolidationSummary.individual_deployments.map((dep) => (
+                        <tr key={dep.name} className="consolidation-cost-row-deployment">
+                          <td className="consolidation-cost-indent">{dep.name}</td>
+                          <td>{formatCurrency(dep.payg_monthly_cost)}</td>
+                          <td className="consolidation-cost-na">—</td>
+                          <td className="consolidation-cost-na">—</td>
+                        </tr>
+                      ))}
+                      <tr className="consolidation-cost-row-total">
+                        <td><strong>Monthly Cost</strong></td>
+                        <td><strong>{formatCurrency(consolidationSummary.individual_payg_total)}</strong></td>
+                        <td><strong>{formatCurrency(consolidationSummary.consolidated_hybrid_cost)}</strong></td>
+                        <td className={consolidationSummary.savings > 0 ? 'consolidation-savings-positive' : 'consolidation-savings-negative'}>
+                          <strong>{consolidationSummary.savings > 0 ? '-' : '+'}{formatCurrency(Math.abs(consolidationSummary.savings))} ({Math.abs(consolidationSummary.savings_pct).toFixed(1)}%)</strong>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td>Annual Savings</td>
+                        <td colSpan={2} className="consolidation-cost-na">—</td>
+                        <td className={consolidationSummary.savings > 0 ? 'consolidation-savings-positive' : 'consolidation-savings-negative'}>
+                          {consolidationSummary.savings > 0 ? '-' : '+'}{formatCurrency(Math.abs(consolidationSummary.savings * 12))}/yr
+                        </td>
+                      </tr>
+                      {analysis.cost_analysis.commitment_safety && (
+                        <tr>
+                          <td>Spillover Traffic</td>
+                          <td className="consolidation-cost-na">N/A</td>
+                          <td>{analysis.cost_analysis.commitment_safety.spillover_pct.toFixed(1)}%</td>
+                          <td className="consolidation-cost-na">—</td>
+                        </tr>
+                      )}
+                      {analysis.cost_analysis.comparison.break_even_tpm && (
+                        <tr>
+                          <td>Break-Even TPM</td>
+                          <td colSpan={3}>{formatNumber(analysis.cost_analysis.comparison.break_even_tpm)} TPM</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </article>
+            )}
 
             <h3 className="section-title section-title-with-icon stagger-1"><img src={RESULTS_ICON_URLS.glance} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-1">At a Glance</span></h3>
             <div className="glance-grid stagger-2">
@@ -1565,6 +2186,7 @@ function App() {
                   onDataZoom={onDataZoom}
                   selectedTimestamp={selectedTimestamp}
                   groupId="time-sync"
+                  perDeployment={perDepCharts?.tokens.per_deployment}
                 />
                 )}
               </article>
@@ -1580,6 +2202,7 @@ function App() {
                   zoomState={zoomState}
                   onDataZoom={onDataZoom}
                   selectedTimestamp={selectedTimestamp}
+                  perDeployment={perDepCharts?.requests.per_deployment}
                 />
                 )}
               </article>
@@ -1619,6 +2242,7 @@ function App() {
                   zoomState={zoomState}
                   onDataZoom={onDataZoom}
                   selectedTimestamp={selectedTimestamp}
+                  perDeployment={perDepCharts?.throttling.per_deployment}
                 />
                 )}
               </article>
@@ -1637,9 +2261,25 @@ function App() {
                 zoomState={zoomState}
                 onDataZoom={onDataZoom}
                 selectedTimestamp={selectedTimestamp}
+                perDeployment={perDepCharts?.tpm.per_deployment}
               />
               )}
             </article>
+
+            {perDepCharts?.latency && (
+            <article className="chart-card wide-card">
+              <WidgetHeader title="Latency Overlay (P50 / P95)" tip="Shows per-deployment P95 latency as solid lines and combined P50/P95 as dashed white lines. Use this to identify which deployments contribute most to overall latency." />
+              <LatencyOverlayChart
+                timestamps={perDepCharts.latency.timestamps}
+                combined={perDepCharts.latency.combined}
+                perDeployment={perDepCharts.latency.per_deployment}
+                height={280}
+                zoomState={zoomState}
+                onDataZoom={onDataZoom}
+                selectedTimestamp={selectedTimestamp}
+              />
+            </article>
+            )}
 
             <h3 className="section-title section-title-with-icon stagger-5"><img src={RESULTS_ICON_URLS.traffic} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-5">Traffic Shape Signals</span></h3>
             <div className="metrics-grid">
@@ -1661,7 +2301,13 @@ function App() {
               </article>
             </div>
 
-            <h3 className="section-title section-title-with-icon stagger-6"><img src={RESULTS_ICON_URLS.financial} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-6">Financial Decision</span></h3>
+            <h3 className="section-title section-title-with-icon stagger-6"><img src={RESULTS_ICON_URLS.financial} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-6">Financial Decision</span> <PricingSourceBadge source={analysis.cost_analysis.pricing.pricing_source} asOf={analysis.cost_analysis.pricing.pricing_as_of} /></h3>
+
+            {analysis.cost_analysis.pricing.pricing_source === 'fallback' && (
+              <div className="pricing-fallback-banner" role="alert">
+                <strong>Using default pricing</strong> — live pricing unavailable. Cost figures are based on static fallback rates and may not reflect current Azure pricing.
+              </div>
+            )}
             <article className="chart-card cost-controls-card cost-controls-card-v2">
               <WidgetHeader title="Assumptions" tip="Adjust PTU pricing term and baseline coverage, then recompute costs and recommendation." />
               <div className="cost-controls cost-controls-v2">
@@ -1763,6 +2409,54 @@ function App() {
                 <div className="assumption-status" aria-live="polite">
                   {loading ? 'Updating calculations…' : 'Changes apply automatically after each adjustment'}
                 </div>
+
+                <details className="advanced-pricing-section">
+                  <summary>Advanced Pricing <InfoTip text="Override the auto-resolved rates to model custom pricing agreements, EAs, or what-if scenarios. Leave blank to use auto-resolved rates." /></summary>
+                  <div className="advanced-pricing-grid">
+                    <label>
+                      PAYG Input Rate ($/1M tokens)
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.01}
+                        placeholder={analysis.cost_analysis.pricing?.payg_input_rate_per_million?.toFixed(2) ?? '0.00'}
+                        value={paygInputOverride ?? ''}
+                        onChange={(e) => setPaygInputOverride(e.target.value === '' ? null : Number(e.target.value))}
+                      />
+                    </label>
+                    <label>
+                      PAYG Output Rate ($/1M tokens)
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.01}
+                        placeholder={analysis.cost_analysis.pricing?.payg_output_rate_per_million?.toFixed(2) ?? '0.00'}
+                        value={paygOutputOverride ?? ''}
+                        onChange={(e) => setPaygOutputOverride(e.target.value === '' ? null : Number(e.target.value))}
+                      />
+                    </label>
+                    <label>
+                      PTU Hourly Rate ($/PTU/hr)
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.01}
+                        placeholder={analysis.cost_analysis.pricing?.ptu_hourly_rate?.toFixed(2) ?? '0.00'}
+                        value={ptuHourlyOverride ?? ''}
+                        onChange={(e) => setPtuHourlyOverride(e.target.value === '' ? null : Number(e.target.value))}
+                      />
+                    </label>
+                    {(paygInputOverride != null || paygOutputOverride != null || ptuHourlyOverride != null) && (
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => { setPaygInputOverride(null); setPaygOutputOverride(null); setPtuHourlyOverride(null) }}
+                      >
+                        Reset to auto-resolved rates
+                      </button>
+                    )}
+                  </div>
+                </details>
               </div>
             </article>
 
@@ -1944,7 +2638,7 @@ function App() {
               document.body
             )}
 
-            <button className="secondary stagger-8" onClick={() => { setExpandedChart(null); resetZoom(); setSelectedTimestamp(null); setBaseAnalysis(null); setAnalysis(null) }}>
+            <button className="secondary stagger-8" onClick={() => { setExpandedChart(null); resetZoom(); setSelectedTimestamp(null); setBaseAnalysis(null); setAnalysis(null); setConsolidationSummary(null) }}>
               {"\u2190"} Back to Setup
             </button>
           </section>

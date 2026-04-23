@@ -1,7 +1,10 @@
 import type {
   AccountInfo,
   AnalysisResponse,
+  AuthStatus,
+  ConsolidationResponse,
   DeploymentInfo,
+  DeploymentPreview,
   PricingOptions,
   FocusTopic,
   SubscriptionInfo,
@@ -11,13 +14,29 @@ function toSnippet(text: string): string {
   return text.replace(/\s+/g, ' ').trim().slice(0, 180)
 }
 
+/**
+ * Extract a user-friendly message from an HTTP error body.
+ * FastAPI HTTPException returns JSON `{"detail":"..."}` — we prefer that.
+ * Falls back to the raw text (truncated) or a generic status message.
+ */
+function extractErrorMessage(text: string, status: number): string {
+  if (!text) return `Request failed (HTTP ${status})`
+  try {
+    const parsed = JSON.parse(text)
+    if (typeof parsed.detail === 'string') return parsed.detail
+  } catch {
+    // Not JSON — use raw text
+  }
+  return toSnippet(text) || `Request failed (HTTP ${status})`
+}
+
 async function getJson<T>(url: string): Promise<T> {
   const response = await fetch(url)
   const contentType = response.headers.get('content-type') ?? ''
 
   if (!response.ok) {
     const text = await response.text()
-    throw new Error(text || `Request failed: ${response.status}`)
+    throw new Error(extractErrorMessage(text, response.status))
   }
 
   if (!contentType.includes('application/json')) {
@@ -43,7 +62,7 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 
   if (!response.ok) {
     const text = await response.text()
-    throw new Error(text || `Request failed: ${response.status}`)
+    throw new Error(extractErrorMessage(text, response.status))
   }
 
   if (!contentType.includes('application/json')) {
@@ -60,6 +79,8 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 }
 
 export const api = {
+  authStatus: () => getJson<AuthStatus>('/api/discovery/auth-status'),
+  refreshDiscoveryCache: () => postJson<{ status: string }>('/api/discovery/refresh', {}),
   focusTopics: () => getJson<FocusTopic[]>('/api/focus-topics'),
   pricingOptions: () => getJson<PricingOptions>('/api/pricing/options'),
   subscriptions: () => getJson<SubscriptionInfo[]>('/api/discovery/subscriptions'),
@@ -70,4 +91,12 @@ export const api = {
       `/api/discovery/deployments?subscription_id=${encodeURIComponent(subscriptionId)}&resource_group=${encodeURIComponent(resourceGroup)}&account_name=${encodeURIComponent(accountName)}`,
     ),
   analyze: (payload: Record<string, unknown>) => postJson<AnalysisResponse>('/api/analyze', payload),
+  analyzeConsolidation: (payload: Record<string, unknown>) =>
+    postJson<ConsolidationResponse>('/api/analyze-consolidation', payload),
+  deploymentPreview: (params: { mode: string; focusTopic?: string; lookbackDays?: number }) => {
+    const qs = new URLSearchParams({ mode: params.mode })
+    if (params.focusTopic) qs.set('focus_topic', params.focusTopic)
+    if (params.lookbackDays != null) qs.set('lookback_days', String(params.lookbackDays))
+    return getJson<DeploymentPreview[]>(`/api/deployments/preview?${qs}`)
+  },
 }

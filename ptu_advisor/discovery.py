@@ -1,21 +1,71 @@
 """Azure resource discovery for PTU Advisor dashboard.
 
-Provides cached, Streamlit-friendly functions to discover Azure subscriptions,
+Provides cached functions to discover Azure subscriptions,
 Cognitive Services / AI Services accounts, and model deployments — so the
 dashboard can present cascading dropdowns with zero manual typing.
+
+Includes TTL-based caching (PRD §3.3) to avoid redundant ARM API calls:
+  - Subscriptions: 300s
+  - Accounts: 300s
+  - Deployments: 120s
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from azure.core.credentials import TokenCredential
 
 
 # ---------------------------------------------------------------------------
+# TTL Cache (PRD §3.3)
+# ---------------------------------------------------------------------------
+
+
+class _TTLCache:
+    """Simple in-memory TTL cache for discovery results."""
+
+    def __init__(self) -> None:
+        self._store: Dict[str, Tuple[float, Any]] = {}
+
+    def get(self, key: str, ttl: float) -> Any:
+        """Return cached value if within TTL, else None."""
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        ts, value = entry
+        if time.monotonic() - ts > ttl:
+            del self._store[key]
+            return None
+        return value
+
+    def set(self, key: str, value: Any) -> None:
+        self._store[key] = (time.monotonic(), value)
+
+    def invalidate(self, prefix: str = "") -> None:
+        """Remove all entries matching a key prefix (or all if empty)."""
+        if not prefix:
+            self._store.clear()
+        else:
+            keys = [k for k in self._store if k.startswith(prefix)]
+            for k in keys:
+                del self._store[k]
+
+
+_cache = _TTLCache()
+
+# TTL values in seconds (PRD §3.3)
+_TTL_SUBSCRIPTIONS = 300
+_TTL_ACCOUNTS = 300
+_TTL_DEPLOYMENTS = 120
+
+
+# ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class UserInfo:
@@ -80,6 +130,7 @@ def azure_sdk_available() -> bool:
         import azure.identity  # noqa: F401
         import azure.mgmt.subscription  # noqa: F401
         import azure.mgmt.cognitiveservices  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -88,6 +139,7 @@ def azure_sdk_available() -> bool:
 # ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
+
 
 def authenticate() -> Tuple[TokenCredential, UserInfo]:
     """Authenticate using the local Azure CLI credential chain.
@@ -136,12 +188,18 @@ def _extract_user_info(credential: TokenCredential) -> UserInfo:
 # Subscription discovery
 # ---------------------------------------------------------------------------
 
+
 def list_subscriptions(credential: TokenCredential) -> List[SubscriptionInfo]:
     """List all Azure subscriptions accessible by the credential.
 
     Returns subscriptions sorted by display name.  Enabled subscriptions
-    appear first.
+    appear first.  Results are cached for 300s (PRD §3.3).
     """
+    cache_key = "subs"
+    cached = _cache.get(cache_key, _TTL_SUBSCRIPTIONS)
+    if cached is not None:
+        return cached
+
     from azure.mgmt.subscription import SubscriptionClient
 
     client = SubscriptionClient(credential)
@@ -158,12 +216,14 @@ def list_subscriptions(credential: TokenCredential) -> List[SubscriptionInfo]:
 
     # Sort: enabled first, then alphabetical.
     subs.sort(key=lambda x: (x.state != "Enabled", x.display_name.lower()))
+    _cache.set(cache_key, subs)
     return subs
 
 
 # ---------------------------------------------------------------------------
 # Account discovery
 # ---------------------------------------------------------------------------
+
 
 def list_ai_accounts(
     credential: TokenCredential,
@@ -172,8 +232,13 @@ def list_ai_accounts(
     """List all Cognitive Services / AI Services accounts in a subscription.
 
     Returns accounts sorted by name, filtered to relevant kinds
-    (OpenAI, AIServices, CognitiveServices).
+    (OpenAI, AIServices, CognitiveServices).  Results are cached for 300s (PRD §3.3).
     """
+    cache_key = f"accounts_{subscription_id}"
+    cached = _cache.get(cache_key, _TTL_ACCOUNTS)
+    if cached is not None:
+        return cached
+
     from azure.mgmt.cognitiveservices import CognitiveServicesManagementClient
 
     client = CognitiveServicesManagementClient(credential, subscription_id)
@@ -199,6 +264,7 @@ def list_ai_accounts(
             )
 
     accounts.sort(key=lambda a: a.name.lower())
+    _cache.set(cache_key, accounts)
     return accounts
 
 
@@ -216,6 +282,7 @@ def _extract_resource_group(resource_id: str) -> str:
 # Deployment discovery
 # ---------------------------------------------------------------------------
 
+
 def list_deployments(
     credential: TokenCredential,
     subscription_id: str,
@@ -225,13 +292,25 @@ def list_deployments(
     """List all model deployments in a Cognitive Services account.
 
     Wraps the existing ``list_workspace_deployments`` collector function
-    for API consistency within this module.
+    for API consistency within this module.  Results are cached for 120s (PRD §3.3).
     """
+    cache_key = f"deps_{subscription_id}_{resource_group}_{account_name}"
+    cached = _cache.get(cache_key, _TTL_DEPLOYMENTS)
+    if cached is not None:
+        return cached
+
     from ptu_advisor.metrics.collector import list_workspace_deployments
 
-    return list_workspace_deployments(
+    result = list_workspace_deployments(
         credential=credential,
         subscription_id=subscription_id,
         resource_group=resource_group,
         workspace=account_name,
     )
+    _cache.set(cache_key, result)
+    return result
+
+
+def invalidate_discovery_cache() -> None:
+    """Clear all discovery caches.  Used by the Refresh button (PRD Phase 2)."""
+    _cache.invalidate()

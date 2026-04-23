@@ -22,6 +22,12 @@ export function fmtNum(v: number | undefined | null): string {
   return Math.round(v).toLocaleString()
 }
 
+/** Format a percentage value for tooltip display (e.g., "42%"). Returns "—" for NaN/null. */
+export function fmtPct(part: number, total: number): string {
+  if (total === 0 || isNaN(part) || isNaN(total)) return '—'
+  return `${Math.round((part / total) * 100)}%`
+}
+
 /** Build an adaptive X-axis label formatter based on timestamp span/density. */
 export function makeAxisDateFormatter(timestamps: string[]): (iso: string) => string {
   if (timestamps.length === 0) return (iso) => {
@@ -53,6 +59,43 @@ export const CHART_COLORS = {
   neutral: '#9DAAC0',
   accent: '#A78BFA',
 } as const
+
+/**
+ * Color palette for per-deployment chart traces in consolidation mode.
+ * Colors assigned by index within the selected group.
+ * The "Combined" trace uses `CHART_COLORS.neutral` with higher opacity.
+ */
+export const DEPLOYMENT_COLORS = [
+  '#5B7FFF',  // blue
+  '#2F9E77',  // green
+  '#C58A2A',  // amber
+  '#A78BFA',  // purple
+  '#B35252',  // red
+  '#4DC9F6',  // cyan
+  '#F28E2B',  // orange
+  '#59A14F',  // forest
+  '#B07AA1',  // mauve
+  '#FF9DA7',  // pink
+] as const
+
+/** Combined trace color (used for "Combined" series in consolidation charts). */
+export const COMBINED_TRACE_COLOR = '#e8ecf2'
+
+/**
+ * Get the deployment color for a given index (wraps around palette).
+ * Returns an rgba string for area fills at the specified opacity.
+ */
+export function getDeploymentColor(index: number): string {
+  return DEPLOYMENT_COLORS[index % DEPLOYMENT_COLORS.length]
+}
+
+/** Convert a hex color to an rgba string. */
+export function hexToRgba(hex: string, alpha: number): string {
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
 
 export const PTU_CHART_THEME = {
   color: [CHART_COLORS.primary, CHART_COLORS.success, CHART_COLORS.warning, CHART_COLORS.danger, CHART_COLORS.accent, CHART_COLORS.secondary],

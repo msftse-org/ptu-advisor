@@ -1,9 +1,10 @@
 # PRD: Live Model Pricing Fetch
 
-> **Version**: 1.0  
-> **Date**: March 16, 2026  
+> **Version**: 1.1  
+> **Date**: April 1, 2026  
 > **Author**: PTU Advisor Team  
-> **Status**: ✅ Phase 1 Complete (12/12 items done)
+> **Status**: ✅ Phase 1 Complete (12/12 items done)  
+> **Changelog**: v1.1 — corrected 6 drift items to match actual implementation (implementation is source of truth)
 
 ---
 
@@ -26,7 +27,7 @@ Azure OpenAI pricing changes with new model releases, regional adjustments, and 
 
 Implement a **pricing resolution pipeline** that, for every analysis run, resolves current model-specific rates through a layered strategy:
 
-1. **Azure Retail Prices API** (primary) — live query against `https://prices.azure.com/api/retail/prices` filtered by service = "Azure OpenAI Service", model, and region
+1. **Azure Retail Prices API** (primary) — live query against `https://prices.azure.com/api/retail/prices` filtered by service name (tries `"Foundry Models"` first, then `"Azure OpenAI Service"` for backwards compatibility — Azure rebranded in early 2026), model, and region
 2. **Cached pricing layer** — TTL-based cache (24h) to avoid redundant API calls
 3. **Static fallback** — current hardcoded rates as the last-resort default, ensuring the tool never breaks
 
@@ -62,41 +63,41 @@ The frontend will display the **pricing source** (live / cached / fallback) and 
 > As a **FinOps Engineer**, I want PTU Advisor to automatically fetch the current Azure OpenAI pricing for the model I'm analyzing, so that my cost projections are always accurate.
 
 **Acceptance Criteria:**
-- [ ] On every analysis request, the backend resolves PAYG input/output rates and PTU hourly rates for the detected model + region + deployment type
-- [ ] Resolution follows the priority chain: live API → cache → static fallback
-- [ ] The resolved rates are used in all downstream calculations (PAYG cost, hybrid cost, break-even, spillover, cost curves, formula blocks)
-- [ ] No user action required — pricing resolution is transparent and automatic
+- [x] On every analysis request, the backend resolves PAYG input/output rates and PTU hourly rates for the detected model + region + deployment type
+- [x] Resolution follows the priority chain: live API → cache → static fallback
+- [x] The resolved rates are used in all downstream calculations (PAYG cost, hybrid cost, break-even, spillover, cost curves, formula blocks)
+- [x] No user action required — pricing resolution is transparent and automatic
 
 #### US-2: Pricing Source Transparency
 
 > As a **Cloud Architect**, I want to see where the pricing data came from and when it was last updated, so I can assess the reliability of the cost comparison.
 
 **Acceptance Criteria:**
-- [ ] The API response `cost_analysis.pricing` section includes:
+- [x] The API response `cost_analysis.pricing` section includes:
   - `pricing_source`: `"live"` | `"cached"` | `"fallback"`
   - `pricing_as_of`: ISO 8601 timestamp of when the pricing was fetched or last confirmed
   - `pricing_currency`: `"USD"` (default)
-- [ ] The frontend displays a subtle indicator next to cost figures showing pricing source (e.g., a badge: "Live pricing as of Mar 16, 2026")
-- [ ] If using fallback rates, a warning banner is shown: "Using default pricing — live pricing unavailable"
+- [x] The frontend displays a subtle indicator next to cost figures showing pricing source (e.g., a badge: "Live pricing as of Mar 16, 2026")
+- [x] If using fallback rates, a warning banner is shown: "Using default pricing — live pricing unavailable"
 
 #### US-3: Pricing Override
 
 > As a **Solution Engineer**, I want to manually override any rate (PAYG or PTU) so I can model custom pricing agreements or EAs.
 
 **Acceptance Criteria:**
-- [ ] The `AnalyzeRequest` accepts optional fields: `payg_input_rate_override`, `payg_output_rate_override`, `ptu_hourly_rate_override`
-- [ ] When overrides are provided, they take highest priority (above live API)
-- [ ] `pricing_source` is set to `"manual"` when any override is active
-- [ ] Formula blocks reflect the overridden values with a "(custom)" annotation
+- [x] The `AnalyzeRequest` accepts optional fields: `payg_input_rate_override`, `payg_output_rate_override`, `ptu_hourly_rate_override`
+- [x] When overrides are provided, they take highest priority (above live API)
+- [x] `pricing_source` is set to `"manual"` when any override is active
+- [x] Formula blocks reflect the overridden values with a "(custom)" annotation
 
 #### US-4: New Model Support Without Code Changes
 
 > As a **Platform Team Lead**, I want PTU Advisor to automatically support pricing for new Azure OpenAI models as they become available, without requiring a code deployment.
 
 **Acceptance Criteria:**
-- [ ] The pricing resolution uses the Azure Retail Prices API `armSkuName` / `skuName` / `meterName` fields to match models dynamically
-- [ ] If a model is not in `MODEL_CAPACITY_CONFIGS` but exists in the Retail API, pricing is still resolved (capacity defaults apply)
-- [ ] A log entry is emitted when a model is resolved from live API but has no local capacity config
+- [x] The pricing resolution uses the Azure Retail Prices API `armSkuName` / `skuName` / `meterName` fields to match models dynamically
+- [x] If a model is not in `MODEL_CAPACITY_CONFIGS` but exists in the Retail API, pricing is still resolved (capacity defaults apply)
+- [x] A log entry is emitted when a model is resolved from live API but has no local capacity config
 
 ### Non-Goals
 
@@ -134,9 +135,10 @@ The frontend will display the **pricing source** (live / cached / fallback) and 
        │
        ├──► Azure Retail Prices API
        │    GET https://prices.azure.com/api/retail/prices
-       │    ?$filter=serviceName eq 'Azure OpenAI Service'
-       │           and armRegionName eq '{region}'
-       │           and contains(meterName, '{model}')
+│    ?$filter=serviceName eq '{svc_name}'
+│           and armRegionName eq '{region}'
+│           and contains(meterName, '{model}')
+│    (tries "Foundry Models" first, then "Azure OpenAI Service")
        │    → parse PAYG input/output rates from meter names
        │    → cache result (TTL 24h)
        │    → return PricingResult(source="live")
@@ -159,26 +161,7 @@ class PricingResult:
     currency: str = "USD"
     model_name: str = ""
     region: str = ""
-
-
-class PricingResolver:
-    """Resolves current pricing through a layered strategy."""
-
-    def __init__(self, cache_ttl_hours: int = 24):
-        self._cache: Dict[str, Tuple[PricingResult, datetime]] = {}
-        self._ttl = timedelta(hours=cache_ttl_hours)
-
-    def resolve(
-        self,
-        model_name: str,
-        region: str,
-        deployment_type: str,
-        *,
-        payg_input_override: Optional[float] = None,
-        payg_output_override: Optional[float] = None,
-        ptu_hourly_override: Optional[float] = None,
-    ) -> PricingResult:
-        ...
+    deployment_type: str = ""       # "global", "data_zone", or "regional"
 ```
 
 ### 3.3 Azure Retail Prices API Integration
@@ -189,7 +172,7 @@ class PricingResolver:
 
 | Filter | Purpose |
 |--------|---------|
-| `serviceName eq 'Azure OpenAI Service'` | Scope to Azure OpenAI |
+| `serviceName eq '{svc_name}'` | Scope to Azure OpenAI (tries `"Foundry Models"` first, then `"Azure OpenAI Service"` for backwards compatibility) |
 | `armRegionName eq '{region}'` | Region-specific rates |
 | `priceType eq 'Consumption'` | PAYG rates only |
 | `contains(meterName, '{model_pattern}')` | Model-specific meters |
@@ -209,17 +192,19 @@ The resolver must:
 
 **Model-to-Meter Mapping**:
 
+Each model maps to a *list* of candidate search patterns (tried in order). The first pattern that returns results from the API is used. This accounts for inconsistent Azure meter naming across models and versions.
+
 ```python
-MODEL_METER_PATTERNS: Dict[str, str] = {
-    "gpt-5":        "GPT-5",
-    "gpt-4.1":      "GPT-4.1",
-    "gpt-4.1-mini": "GPT-4.1 Mini",
-    "gpt-4.1-nano": "GPT-4.1 Nano",
-    "gpt-4o":       "GPT-4o",
-    "gpt-4o-mini":  "GPT-4o Mini",
-    "o1":           "o1",
-    "o3-mini":      "o3 Mini",
-    "o4-mini":      "o4 Mini",
+MODEL_METER_PATTERNS: Dict[str, List[str]] = {
+    "gpt-5":        ["GPT 5 Chat", "GPT 5 Inpt"],
+    "gpt-4.1":      ["gpt 4.1 Inp", "gpt-4.1 Inp"],
+    "gpt-4.1-mini": ["gpt 4.1 mini Inp", "gpt-4.1-mini Inp"],
+    "gpt-4.1-nano": ["gpt 4.1 nano Inp", "gpt-4.1-nano Inp"],
+    "gpt-4o":       ["gpt 4o 1120", "gpt 4o 0806", "gpt 4o 0513"],
+    "gpt-4o-mini":  ["gpt-4o-mini-0718"],
+    "o1":           ["o1 1217"],
+    "o3-mini":      ["o3 mini 0131", "o3-mini"],
+    "o4-mini":      ["o4-mini 0416", "o4-mini"],
 }
 ```
 
@@ -382,7 +367,7 @@ User clicks "Run Analysis"
 | API rate limiting or outages | Unable to fetch live pricing | Low | 24h cache + static fallback ensures zero downtime |
 | Meter name format changes for new models | New model pricing not resolved | Medium | Fuzzy matching on model names; `MODEL_METER_PATTERNS` mapping is configurable |
 | Unit price normalization errors | Incorrect rates (e.g., 1000× off) | Medium | Sanity checks: if resolved rate is >100× or <0.01× of fallback rate, log warning and use fallback |
-| Network latency in restricted environments | Analysis response time increases | Medium | Cache hit path adds 0ms; only cold start has API latency. Timeout of 3s on API call. |
+| Network latency in restricted environments | Analysis response time increases | Medium | Cache hit path adds 0ms; only cold start has API latency. Timeout of 5s on API call. |
 
 ---
 
@@ -409,19 +394,19 @@ User clicks "Run Analysis"
 
 **Scope**: Frontend indicators + manual override support
 
-- [ ] Frontend: pricing source badge (live ✓ / cached ⏱ / fallback ⚠ / manual ✎)
-- [ ] Frontend: warning banner when `pricing_source === "fallback"`
-- [ ] Frontend: "Advanced Pricing" collapsible with rate override inputs
-- [ ] Formula blocks show "(custom rate)" annotation when overrides are active
+- [x] Frontend: pricing source badge (live ✓ / cached ⏱ / fallback ⚠ / manual ✎)
+- [x] Frontend: warning banner when `pricing_source === "fallback"`
+- [x] Frontend: "Advanced Pricing" collapsible with rate override inputs
+- [x] Formula blocks show "(custom rate)" annotation when overrides are active
 
 ### Phase 3: Monitoring & Expansion
 
 **Scope**: Observability and broader coverage
 
-- [ ] Structured logging for pricing resolution events (source, latency, model)
-- [ ] `/api/pricing/rates` endpoint to expose resolved rates without running a full analysis
-- [ ] Periodic background cache warm-up for popular model/region combos
-- [ ] Documentation: pricing accuracy validation runbook
+- [x] Structured logging for pricing resolution events (source, latency, model)
+- [x] `/api/pricing/rates` endpoint to expose resolved rates without running a full analysis
+- [x] Periodic background cache warm-up for popular model/region combos
+- [x] Documentation: pricing accuracy validation runbook
 
 ---
 
@@ -477,18 +462,19 @@ User clicks "Run Analysis"
 }
 ```
 
-### C. Current Hardcoded Rates (to become static fallback)
+### C. Current Hardcoded Rates (static fallback — `STATIC_PAYG_RATES` in `price_resolver.py`)
 
-| Model | Input ($/1M) | Output ($/1M) | Source File |
-|-------|-------------|---------------|-------------|
-| gpt-5 | $10.00 | $30.00 | `report/generator.py` |
-| gpt-4.1 | $2.00 | $8.00 | `report/generator.py` |
-| gpt-4.1-mini | — | — | Not defined (needs resolution) |
-| gpt-4.1-nano | — | — | Not defined (needs resolution) |
-| gpt-4o | $2.50 | $10.00 | `server.py`, `dashboard/app.py` |
-| gpt-4o-mini | — | — | Not defined (needs resolution) |
-| o1 | — | — | Not defined (needs resolution) |
-| o3-mini | $1.10 | $4.40 | `report/generator.py` |
-| o4-mini | $1.10 | $4.40 | `report/generator.py` |
+| Model | Input ($/1M) | Output ($/1M) | Notes |
+|-------|-------------|---------------|-------|
+| gpt-5 | $1.25 | $10.00 | Corrected from earlier draft ($10/$30 was wrong by 8x/3x) |
+| gpt-4.1 | $2.00 | $8.00 | |
+| gpt-4.1-mini | $0.40 | $1.60 | |
+| gpt-4.1-nano | $0.10 | $0.40 | |
+| gpt-4o | $2.50 | $10.00 | |
+| gpt-4o-mini | $0.15 | $0.60 | |
+| gpt-3.5-turbo | $0.50 | $1.50 | Legacy model — included for completeness |
+| o1 | $15.00 | $60.00 | |
+| o3-mini | $1.10 | $4.40 | |
+| o4-mini | $1.10 | $4.40 | |
 
-> ⚠ **4 of 9 supported models have no local PAYG rates** — live pricing fetch would immediately close this coverage gap.
+> All 10 supported models now have local PAYG rates. The live pricing fetch provides an additional accuracy layer on top of these fallbacks.
