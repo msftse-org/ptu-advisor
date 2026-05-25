@@ -100,6 +100,11 @@ export type AnalysisResponse = {
       p95: number
       p99: number
     }
+    cache_match_rate?: {
+      avg_pct: number
+      p95_pct: number
+      available: boolean
+    }
     utilization: {
       peak_to_average_ratio: number
       sustained_utilization_rate: number

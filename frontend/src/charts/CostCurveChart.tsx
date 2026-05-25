@@ -189,7 +189,6 @@ export function CostCurveChart({ sustainedTpm, payg, hybrid, breakEvenTpm, break
           api: {
             value: (idx: number, dimIdx?: number) => number
             coord: (point: number[]) => number[]
-            size: () => number[]
           },
         ) => {
           // Each data point contributes a vertical strip from hybrid (bottom) to payg (top).
@@ -199,14 +198,18 @@ export function CostCurveChart({ sustainedTpm, payg, hybrid, breakEvenTpm, break
           const yHybrid = api.value(2)
           const topLeft = api.coord([x, yPayg])
           const bottomLeft = api.coord([x, yHybrid])
-          // Width: span to next sample point (approximate with pixel size of one data step)
-          const stepPx = api.size ? (api.size() as number[])[0] / (sustainedTpm.length || 1) : 2
+          // Width: pixel distance to the next sustained-TPM sample on x-axis.
+          // api.size() without args is undefined in some echarts versions, so derive
+          // the step from two coord lookups on the value axis.
+          const stepX = sustainedTpm.length > 1 ? sustainedTpm[1] - sustainedTpm[0] : 0
+          const nextPx = stepX > 0 ? api.coord([x + stepX, yPayg])[0] : topLeft[0] + 2
+          const stepPx = Math.max(nextPx - topLeft[0], 1.5)
           return {
             type: 'rect' as const,
             shape: {
               x: topLeft[0],
               y: topLeft[1],
-              width: Math.max(stepPx, 1.5),
+              width: stepPx,
               height: Math.max(bottomLeft[1] - topLeft[1], 0),
             },
             style: {

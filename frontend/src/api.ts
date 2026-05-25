@@ -93,6 +93,8 @@ export const api = {
   analyze: (payload: Record<string, unknown>) => postJson<AnalysisResponse>('/api/analyze', payload),
   analyzeConsolidation: (payload: Record<string, unknown>) =>
     postJson<ConsolidationResponse>('/api/analyze-consolidation', payload),
+  exportTokenSnapshot: (payload: Record<string, unknown>) =>
+    postJson<Record<string, unknown>>('/api/export/token-snapshot', payload),
   deploymentPreview: (params: { mode: string; focusTopic?: string; lookbackDays?: number }) => {
     const qs = new URLSearchParams({ mode: params.mode })
     if (params.focusTopic) qs.set('focus_topic', params.focusTopic)

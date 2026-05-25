@@ -1,12 +1,25 @@
 import { useCallback, useRef, useState } from 'react'
 import type { AnalysisResponse, ConsolidationSummary } from './types'
+import { api } from './api'
 import './export-report.css'
+
+export interface TokenSnapshotContext {
+  mode: 'demo' | 'live'
+  focusTopic?: string
+  days?: number
+  interval?: 'PT1M' | 'PT5M' | 'PT15M' | 'PT1H'
+  subscription_id?: string
+  resource_group?: string
+  workspace?: string
+  deployment?: string
+}
 
 interface ExportReportProps {
   analysis: AnalysisResponse
   baseAnalysis: AnalysisResponse | null
   isZoomed: boolean
   consolidationSummary?: ConsolidationSummary | null
+  tokenSnapshotContext?: TokenSnapshotContext
 }
 
 /* ── Formatting helpers ── */
@@ -586,9 +599,10 @@ function printReport(reportEl: HTMLElement) {
 
 /* ── Public component ── */
 
-export function ExportReport({ analysis, baseAnalysis, isZoomed, consolidationSummary }: ExportReportProps) {
+export function ExportReport({ analysis, baseAnalysis, isZoomed, consolidationSummary, tokenSnapshotContext }: ExportReportProps) {
   const reportRef = useRef<HTMLDivElement>(null)
   const [dropdownOpen, setDropdownOpen] = useState(false)
+  const [snapshotBusy, setSnapshotBusy] = useState(false)
   const isConsolidated = consolidationSummary != null
 
   const handlePDF = useCallback(() => {
@@ -608,6 +622,43 @@ export function ExportReport({ analysis, baseAnalysis, isZoomed, consolidationSu
     downloadBlob(html, name)
   }, [analysis.metrics.deployment_name, isConsolidated, consolidationSummary])
 
+  const handleTokenSnapshot = useCallback(async () => {
+    setDropdownOpen(false)
+    if (!tokenSnapshotContext) return
+    setSnapshotBusy(true)
+    try {
+      const payload: Record<string, unknown> = {
+        mode: tokenSnapshotContext.mode,
+        focus_topic: tokenSnapshotContext.focusTopic ?? 'Cost Reduction',
+        days: tokenSnapshotContext.days ?? 7,
+        interval: tokenSnapshotContext.interval ?? 'PT1M',
+      }
+      if (tokenSnapshotContext.mode === 'live') {
+        payload.subscription_id = tokenSnapshotContext.subscription_id
+        payload.resource_group = tokenSnapshotContext.resource_group
+        payload.workspace = tokenSnapshotContext.workspace
+        payload.deployment = tokenSnapshotContext.deployment
+      }
+      const data = await api.exportTokenSnapshot(payload)
+      const jsonStr = JSON.stringify(data, null, 2)
+      const blob = new Blob([jsonStr], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const deploymentName = analysis.metrics.deployment_name || 'deployment'
+      a.download = `token-usage-${deploymentName}-${new Date().toISOString().slice(0, 10)}.json`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      const message = e instanceof Error ? e.message : 'Snapshot export failed'
+      alert(`Token snapshot failed: ${message}`)
+    } finally {
+      setSnapshotBusy(false)
+    }
+  }, [analysis.metrics.deployment_name, tokenSnapshotContext])
+
   return (
     <>
       {/* Export dropdown button */}
@@ -624,6 +675,13 @@ export function ExportReport({ analysis, baseAnalysis, isZoomed, consolidationSu
           <ul className="export-menu" role="menu">
             <li role="menuitem"><button onClick={handlePDF}>Download PDF</button></li>
             <li role="menuitem"><button onClick={handleHTML}>Download HTML</button></li>
+            {tokenSnapshotContext && (
+              <li role="menuitem">
+                <button onClick={handleTokenSnapshot} disabled={snapshotBusy} title="JSON matching the GBB az monitor metrics list output (InputTokens, OutputTokens, prompt-cache hit rate)">
+                  {snapshotBusy ? 'Building…' : 'Download GBB Token Snapshot (JSON)'}
+                </button>
+              </li>
+            )}
           </ul>
         )}
       </div>

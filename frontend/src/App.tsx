@@ -2009,7 +2009,27 @@ function App() {
               <div className="result-banner-top">
                 <RecBadge recommendation={analysis.recommendation} />
                 <p className="confidence">Confidence score: {(analysis.confidence * 100).toFixed(1)}%</p>
-                <ExportReport analysis={analysis} baseAnalysis={baseAnalysis} isZoomed={zoomState.isDirty} consolidationSummary={consolidationSummary} />
+                <ExportReport
+                  analysis={analysis}
+                  baseAnalysis={baseAnalysis}
+                  isZoomed={zoomState.isDirty}
+                  consolidationSummary={consolidationSummary}
+                  tokenSnapshotContext={
+                    mode === 'demo'
+                      ? { mode: 'demo', focusTopic, days: lookbackDays, interval: 'PT1M' }
+                      : (subscriptionId && selectedAccount && analysis.metrics.deployment_name)
+                        ? {
+                            mode: 'live',
+                            days: lookbackDays,
+                            interval: 'PT1M',
+                            subscription_id: subscriptionId,
+                            resource_group: selectedAccount.resource_group,
+                            workspace: selectedAccount.name,
+                            deployment: analysis.metrics.deployment_name,
+                          }
+                        : undefined
+                  }
+                />
               </div>
               <h2 className="result-banner-title">{recommendationTitle}</h2>
               <p className="result-banner-summary">{recommendationSummary}</p>
@@ -2158,6 +2178,13 @@ function App() {
                 <span className="glance-value">{analysis.metrics.throttling_rate_pct.toFixed(2)}%</span>
                 <span className="glance-sub">HTTP 429 rate</span>
               </article>
+              {analysis.metrics.cache_match_rate?.available && (
+                <article className="glance-card">
+                  <span className="glance-label">Prompt Cache Hit Rate <InfoTip text="Average percentage of input tokens served from the prompt-context cache. Higher rates lower PAYG token cost (cached input ~50% off) and reduce PTU token-throughput consumption." /></span>
+                  <span className="glance-value">{analysis.metrics.cache_match_rate.avg_pct.toFixed(1)}%</span>
+                  <span className="glance-sub">avg context-token cache match</span>
+                </article>
+              )}
             </div>
 
             <h3 className="section-title section-title-with-icon stagger-3"><img src={RESULTS_ICON_URLS.evidence} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-3">Evidence</span></h3>
