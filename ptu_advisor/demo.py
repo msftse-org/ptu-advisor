@@ -589,6 +589,9 @@ def generate_demo_metrics(
     # Generate token breakdown
     prompt_tokens, completion_tokens = _generate_token_series(config, timestamps, tpm_values)
 
+    # Synthesize prompt-cache hit rate
+    cache_match_values = _generate_cache_match_series(config, timestamps)
+
     metrics = DeploymentMetrics(
         deployment_name=config.deployment_name,
         model_name=config.model_name,
@@ -648,6 +651,12 @@ def generate_demo_metrics(
             values=p99_values,
             metric_name="TimeToFirstByte_P99",
             unit="Milliseconds",
+        ),
+        cache_match_rate=TimeSeries(
+            timestamps=timestamps,
+            values=cache_match_values,
+            metric_name="AzureOpenAIContextTokensCacheMatchRate",
+            unit="Percent",
         ),
     )
 
@@ -733,6 +742,7 @@ def generate_consolidation_demo_metrics(
         prompt_tokens, completion_tokens = _generate_token_series(
             sibling_config, timestamps, tpm_values
         )
+        cache_match_values = _generate_cache_match_series(sibling_config, timestamps)
 
         sib_metrics = DeploymentMetrics(
             deployment_name=sibling_config.deployment_name,
@@ -793,6 +803,12 @@ def generate_consolidation_demo_metrics(
                 values=p99_values,
                 metric_name="TimeToFirstByte_P99",
                 unit="Milliseconds",
+            ),
+            cache_match_rate=TimeSeries(
+                timestamps=timestamps,
+                values=cache_match_values,
+                metric_name="AzureOpenAIContextTokensCacheMatchRate",
+                unit="Percent",
             ),
         )
 
@@ -1009,6 +1025,34 @@ def _generate_token_series(
         completion_tokens.append(completion)
 
     return prompt_tokens, completion_tokens
+
+
+def _generate_cache_match_series(
+    config: ScenarioConfig,
+    timestamps: List[datetime],
+) -> List[float]:
+    """Synthesize a prompt-cache hit ratio (0-1) series.
+
+    Stable, high-volume workloads typically have higher cache match rates
+    (system prompts and retrieval contexts repeat). Bursty/low workloads see
+    lower rates. We derive a baseline from throttling stability and TPM scale.
+    """
+    # Baseline: stable, high-volume workloads cache better.
+    if config.tpm_mean >= 80_000 and config.throttling_rate <= 0.05:
+        baseline = 0.45
+    elif config.tpm_mean >= 30_000:
+        baseline = 0.32
+    else:
+        baseline = 0.18
+
+    series: List[float] = []
+    for ts in timestamps:
+        # Daily seasonality: business hours have higher cache reuse.
+        hour_factor = 1.0 + 0.15 * np.sin((ts.hour - 6) / 24.0 * 2 * np.pi)
+        noise = np.random.normal(0, 0.04)
+        val = baseline * hour_factor + noise
+        series.append(float(max(0.0, min(0.95, val))))
+    return series
 
 
 def display_scenario_info(config: ScenarioConfig) -> None:

@@ -169,6 +169,7 @@ class MetricsCollector:
                 (MetricName.TOTAL_TOKENS, AggregationType.TOTAL, "tokens_per_minute"),
                 (MetricName.TIME_TO_FIRST_BYTE, AggregationType.AVERAGE, "time_to_first_byte_p50"),
                 (MetricName.PTU_UTILIZATION, AggregationType.AVERAGE, "ptu_utilization"),
+                (MetricName.CACHE_MATCH_RATE, AggregationType.AVERAGE, "cache_match_rate"),
             ]
             
             # Collect each metric

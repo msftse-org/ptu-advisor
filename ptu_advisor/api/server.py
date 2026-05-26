@@ -81,6 +81,26 @@ class AnalyzeRequest(BaseModel):
     ptu_hourly_rate_override: Optional[float] = Field(default=None, ge=0)
 
 
+class TokenSnapshotRequest(BaseModel):
+    """Request body for the GBB-style token-usage snapshot export.
+
+    Mirrors the PowerShell ``az monitor metrics list`` call that GBB
+    distributes to customers (InputTokens, OutputTokens, and the
+    AzureOpenAIContextTokensCacheMatchRate metric over a 7-day window
+    at 1-minute granularity).
+    """
+
+    mode: Literal["demo", "live"] = "live"
+    focus_topic: str = "Cost Reduction"
+    days: int = Field(default=7, ge=1, le=30)
+    interval: Literal["PT1M", "PT5M", "PT15M", "PT1H"] = "PT1M"
+
+    subscription_id: Optional[str] = None
+    resource_group: Optional[str] = None
+    workspace: Optional[str] = None
+    deployment: Optional[str] = None
+
+
 class AnalyzeResponse(BaseModel):
     recommendation: str
     confidence: float
@@ -438,6 +458,7 @@ def _serialize_analysis(
     p50 = metrics.time_to_first_byte_p50
     p95 = metrics.time_to_first_byte_p95
     p99 = metrics.time_to_first_byte_p99
+    cache_match = metrics.cache_match_rate
 
     lookback_days = max(1, lookback_days)
     avg_tpm = float(tpm.mean) if tpm else 0.0
@@ -901,6 +922,11 @@ def _serialize_analysis(
                 "p95": float(p95.mean) if p95 else 0.0,
                 "p99": float(p99.mean) if p99 else 0.0,
             },
+            "cache_match_rate": {
+                "avg_pct": float(cache_match.mean * 100) if cache_match else 0.0,
+                "p95_pct": float(cache_match.p95 * 100) if cache_match else 0.0,
+                "available": cache_match is not None and len(cache_match) > 0,
+            },
             "utilization": utilization,
             "series_summary": {
                 "tpm": _series_payload(tpm),
@@ -912,6 +938,7 @@ def _serialize_analysis(
                 "latency_p50": _series_payload(p50),
                 "latency_p95": _series_payload(p95),
                 "latency_p99": _series_payload(p99),
+                "cache_match_rate": _series_payload(cache_match),
             },
         },
         charts={
@@ -1426,6 +1453,164 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         payg_input_rate_override=payload.payg_input_rate_override,
         payg_output_rate_override=payload.payg_output_rate_override,
         ptu_hourly_rate_override=payload.ptu_hourly_rate_override,
+    )
+
+
+def _interval_to_minutes(interval: str) -> int:
+    return {"PT1M": 1, "PT5M": 5, "PT15M": 15, "PT1H": 60}.get(interval, 1)
+
+
+def _series_to_az_data_points(
+    series: Optional[TimeSeries],
+    *,
+    include_total: bool,
+    include_average: bool,
+) -> List[Dict[str, Any]]:
+    """Serialize a TimeSeries into the az-CLI ``data`` array shape."""
+    if series is None:
+        return []
+    points: List[Dict[str, Any]] = []
+    for ts, val in zip(series.timestamps, series.values):
+        point: Dict[str, Any] = {
+            "timeStamp": ts.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        }
+        if include_total:
+            point["total"] = float(val)
+        if include_average:
+            point["average"] = float(val)
+        points.append(point)
+    return points
+
+
+def _build_token_snapshot_payload(
+    metrics: DeploymentMetrics,
+    *,
+    resource_id: str,
+    interval: str,
+    namespace: str = "microsoft.cognitiveservices/accounts",
+) -> Dict[str, Any]:
+    """Build a JSON payload matching ``az monitor metrics list`` output for the
+    three GBB metrics: InputTokens, OutputTokens, AzureOpenAIContextTokensCacheMatchRate.
+    """
+    timespan = (
+        f"{metrics.start_time.strftime('%Y-%m-%dT%H:%M:%S+00:00')}/"
+        f"{metrics.end_time.strftime('%Y-%m-%dT%H:%M:%S+00:00')}"
+    )
+
+    def metric_entry(
+        name: str,
+        localized: str,
+        unit: str,
+        series: Optional[TimeSeries],
+        description: str,
+    ) -> Dict[str, Any]:
+        return {
+            "displayDescription": description,
+            "errorCode": "Success",
+            "id": f"{resource_id}/providers/Microsoft.Insights/metrics/{name}",
+            "name": {"localizedValue": localized, "value": name},
+            "timeseries": [
+                {
+                    "data": _series_to_az_data_points(
+                        series, include_total=True, include_average=True
+                    ),
+                    "metadatavalues": [],
+                }
+            ],
+            "type": "Microsoft.Insights/metrics",
+            "unit": unit,
+        }
+
+    return {
+        "cost": 0,
+        "interval": interval,
+        "namespace": namespace,
+        "resourceregion": "",
+        "timespan": timespan,
+        "value": [
+            metric_entry(
+                "InputTokens",
+                "Input Tokens",
+                "Count",
+                metrics.prompt_tokens,
+                "Number of prompt tokens processed (input) on a model deployment.",
+            ),
+            metric_entry(
+                "OutputTokens",
+                "Output Tokens",
+                "Count",
+                metrics.completion_tokens,
+                "Number of tokens generated (output) from a model deployment.",
+            ),
+            metric_entry(
+                "AzureOpenAIContextTokensCacheMatchRate",
+                "Azure OpenAI Context Tokens Cache Match Rate",
+                "Percent",
+                metrics.cache_match_rate,
+                "The percentage of context tokens that hit the prompt cache.",
+            ),
+        ],
+        "_meta": {
+            "deployment_name": metrics.deployment_name,
+            "model_name": metrics.model_name,
+            "source": "ptu-advisor",
+        },
+    }
+
+
+@app.post("/api/export/token-snapshot")
+def export_token_snapshot(payload: TokenSnapshotRequest) -> Dict[str, Any]:
+    """Produce a GBB-style JSON snapshot of token + cache-hit metrics.
+
+    Mirrors the literal output of the PowerShell script GBB ships:
+    ``az monitor metrics list --metric "InputTokens,OutputTokens,
+    AzureOpenAIContextTokensCacheMatchRate" --interval PT1M``.
+    """
+    interval_minutes = _interval_to_minutes(payload.interval)
+
+    if payload.mode == "demo":
+        scenario = _pick_demo_scenario(payload.focus_topic)
+        metrics, _scenario_cfg = generate_demo_metrics(
+            scenario,
+            lookback_days=payload.days,
+            granularity_minutes=interval_minutes if interval_minutes in (1, 5, 15, 30) else 5,
+        )
+        resource_id = (
+            "/subscriptions/00000000-0000-0000-0000-000000000000/"
+            "resourceGroups/demo-rg/providers/Microsoft.CognitiveServices/"
+            f"accounts/demo-workspace"
+        )
+        return _build_token_snapshot_payload(
+            metrics,
+            resource_id=resource_id,
+            interval=payload.interval,
+        )
+
+    if not payload.subscription_id or not payload.resource_group or not payload.workspace:
+        raise HTTPException(
+            status_code=400,
+            detail="subscription_id, resource_group, and workspace are required in live mode",
+        )
+    if not payload.deployment:
+        raise HTTPException(status_code=400, detail="deployment is required in live mode")
+
+    credential = get_azure_credential()
+    config = AnalysisConfig(
+        resource_group=payload.resource_group,
+        workspace=payload.workspace,
+        deployment=payload.deployment,
+        subscription_id=payload.subscription_id,
+        lookback_days=payload.days,
+        aggregation_interval_minutes=interval_minutes if interval_minutes in (1, 5, 15, 30) else 5,
+    )
+    collector = MetricsCollector(credential, config)
+    metrics = collector.collect()
+    diagnostics = collector.get_diagnostics()
+    resource_id = str(diagnostics.get("context", {}).get("resource_id", ""))
+    return _build_token_snapshot_payload(
+        metrics,
+        resource_id=resource_id,
+        interval=payload.interval,
     )
 
 

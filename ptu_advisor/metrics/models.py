@@ -32,6 +32,7 @@ class MetricName(str, Enum):
     TOKENS_PER_MINUTE = TOTAL_TOKENS  # backward-compatible alias
     INPUT_TOKENS = "InputTokens"  # model-level input tokens
     OUTPUT_TOKENS = "OutputTokens"  # model-level output tokens
+    CACHE_MATCH_RATE = "AzureOpenAIContextTokensCacheMatchRate"  # prompt cache hit ratio (0–1)
 
     # Latency metrics
     TIME_TO_FIRST_BYTE = "AzureOpenAITimeToResponse"  # First token latency
@@ -328,6 +329,9 @@ class DeploymentMetrics:
     # PTU metrics
     ptu_utilization: Optional[TimeSeries] = None
 
+    # Prompt-cache hit ratio (0–1) for context-cache enabled models
+    cache_match_rate: Optional[TimeSeries] = None
+
     # Deployment metadata (populated by collector or demo)
     deployment_info: Optional["DeploymentInfo"] = None
 
@@ -380,6 +384,7 @@ class DeploymentMetrics:
             time_to_first_byte_p95=_filter_ts(self.time_to_first_byte_p95),
             time_to_first_byte_p99=_filter_ts(self.time_to_first_byte_p99),
             ptu_utilization=_filter_ts(self.ptu_utilization),
+            cache_match_rate=_filter_ts(self.cache_match_rate),
             deployment_info=self.deployment_info,
         )
 
