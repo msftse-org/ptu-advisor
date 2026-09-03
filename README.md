@@ -92,6 +92,8 @@ The compose file mounts your host `~/.azure` into the container and sets `AZURE_
 
 If you only want demo mode, Azure login is not required.
 
+The web service is published on host loopback only and uses `PTU_ADVISOR_AUTH_MODE=local`. For an Azure App Service deployment, enable App Service Authentication with **Require authentication**, prevent direct access that bypasses App Service, and set `PTU_ADVISOR_AUTH_MODE=easy_auth`. In that mode, every API endpoint except `/api/health` requires the authenticated `X-MS-CLIENT-PRINCIPAL-ID` header injected by App Service.
+
 ### 1. Launch the full application
 
 ```shell
@@ -104,7 +106,7 @@ The app is available at `http://localhost:8000`.
 
 ```shell
 docker build -t ptu-advisor .
-docker run -p 8000:8000 ptu-advisor
+docker run -p 127.0.0.1:8000:8000 ptu-advisor
 ```
 
 ### 3. Verify

@@ -12,7 +12,9 @@ import {
   GridComponent,
   MarkLineComponent,
   MarkPointComponent,
+  MarkAreaComponent,
   LegendComponent,
+  TitleComponent,
   ToolboxComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -29,7 +31,9 @@ echarts.use([
   GridComponent,
   MarkLineComponent,
   MarkPointComponent,
+  MarkAreaComponent,
   LegendComponent,
+  TitleComponent,
   ToolboxComponent,
 ])
 

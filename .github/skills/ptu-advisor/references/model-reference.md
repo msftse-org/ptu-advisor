@@ -63,7 +63,19 @@ Source: [Azure OpenAI Pricing](https://azure.microsoft.com/en-us/pricing/details
 | GPT-4o-mini Global | $0.15 | $0.075 | $0.60 |
 | GPT-4.1 Global | $2 | $0.50 | $8 |
 | GPT-4.1-mini Global | $0.40 | $0.10 | $1.60 |
-| GPT-5 Global | $1.25 | $0.13 | $10 |
+| GPT-4.1-nano Global | $0.10 | $0.025 | $0.40 |
+| GPT-5 Global | $1.25 | $0.125 | $10 |
+| GPT-5.1 Global | $1.25 | $0.125 | $10 |
+| GPT-5.2 Global | $1.75 | $0.175 | $14 |
+| GPT-5.3-codex Global | $1.75 | $0.175 | $14 |
+| GPT-5.4 Global | $2.50 | $0.25 | $15 |
+| GPT-5.4-mini Global | $0.75 | $0.075 | $4.50 |
+| GPT-5.5 Global (short context) | $5.00 | $0.50 | $30 |
+| o1 Global | $15 | $7.50 | $60 |
+| o3-mini Global | $1.10 | $0.55 | $4.40 |
+| o4-mini Global | $1.10 | $0.275 | $4.40 |
+
+Data Zone token rates are generally 10% above the corresponding Global meters for the models listed above. Regional Standard rates are region-specific and must come from the Azure Retail Prices API; when unavailable, PTU Advisor conservatively prices cached input at the resolved standard-input rate.
 
 ### Reserved Pricing Discounts
 - **1-Year Reserved**: ~70% discount vs hourly

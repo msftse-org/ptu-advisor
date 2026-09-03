@@ -122,6 +122,173 @@ class TestMetricsCollector:
         assert result.timestamps == [t1, t2]
         assert result.values == [200.0, 150.0]
 
+    def test_collect_metric_normalizes_cache_percent_to_ratio(
+        self,
+        mock_credential,
+        config,
+    ):
+        """Azure reports cache match as Percent; the domain stores a 0-1 ratio."""
+        with patch('ptu_advisor.metrics.collector.get_subscription_id', return_value="test-sub"):
+            with patch('ptu_advisor.metrics.collector.MonitorManagementClient'):
+                with patch('ptu_advisor.metrics.collector.CognitiveServicesManagementClient'):
+                    collector = MetricsCollector(mock_credential, config)
+
+        timestamp = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+        point = MagicMock(
+            time_stamp=timestamp,
+            total=None,
+            average=58.4,
+            minimum=None,
+            maximum=None,
+            count=None,
+        )
+        response = MagicMock(
+            value=[MagicMock(timeseries=[MagicMock(data=[point])], unit="Percent")]
+        )
+        collector._monitor_client = MagicMock()
+        collector._monitor_client.metrics.list.return_value = response
+
+        result = collector._collect_metric(
+            resource_id="/subscriptions/test/resource",
+            metric_name=MetricName.CACHE_MATCH_RATE,
+            aggregation=AggregationType.AVERAGE,
+            start_time=timestamp,
+            end_time=timestamp,
+        )
+
+        assert result is not None
+        assert result.values == pytest.approx([0.584])
+        assert result.unit == "Ratio"
+
+    def test_active_tokens_metric_name(self):
+        assert MetricName.ACTIVE_TOKENS.value == "ActiveTokens"
+
+    @pytest.mark.parametrize("value", [None, -1.0, float("nan"), float("inf")])
+    def test_active_tokens_metric_rejects_missing_or_invalid_values(
+        self,
+        mock_credential,
+        config,
+        value,
+    ):
+        with patch('ptu_advisor.metrics.collector.get_subscription_id', return_value="test-sub"):
+            with patch('ptu_advisor.metrics.collector.MonitorManagementClient'):
+                with patch('ptu_advisor.metrics.collector.CognitiveServicesManagementClient'):
+                    collector = MetricsCollector(mock_credential, config)
+
+        timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        point = MagicMock(
+            time_stamp=timestamp,
+            total=value,
+            average=None,
+            minimum=None,
+            maximum=None,
+            count=None,
+        )
+        collector._monitor_client = MagicMock()
+        collector._monitor_client.metrics.list.return_value = MagicMock(
+            value=[MagicMock(timeseries=[MagicMock(data=[point])], unit="Count")]
+        )
+
+        result = collector._collect_metric(
+            resource_id="/subscriptions/test/resource",
+            metric_name=MetricName.ACTIVE_TOKENS,
+            aggregation=AggregationType.TOTAL,
+            start_time=timestamp,
+            end_time=timestamp,
+        )
+
+        assert result is None
+
+    def test_active_tokens_validation_rejects_unaligned_and_out_of_bounds_points(
+        self,
+        mock_credential,
+        config,
+    ):
+        with patch('ptu_advisor.metrics.collector.get_subscription_id', return_value="test-sub"):
+            with patch('ptu_advisor.metrics.collector.MonitorManagementClient'):
+                with patch('ptu_advisor.metrics.collector.CognitiveServicesManagementClient'):
+                    collector = MetricsCollector(mock_credential, config)
+
+        t1 = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+        active = TimeSeries([t1, t2], [10.0, 120.0], "ActiveTokens")
+        prompt = TimeSeries([t1], [100.0], "InputTokens")
+        completion = TimeSeries([t1], [20.0], "OutputTokens")
+
+        validated = collector._validate_active_tokens(active, prompt, completion)
+
+        assert validated is None
+        assert collector.get_diagnostics()["metrics"][-1]["status"] == "invalid"
+
+    def test_active_tokens_metric_records_invalid_partial_data(
+        self,
+        mock_credential,
+        config,
+    ):
+        with patch('ptu_advisor.metrics.collector.get_subscription_id', return_value="test-sub"):
+            with patch('ptu_advisor.metrics.collector.MonitorManagementClient'):
+                with patch('ptu_advisor.metrics.collector.CognitiveServicesManagementClient'):
+                    collector = MetricsCollector(mock_credential, config)
+
+        t1 = datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc)
+        t2 = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+        valid = MagicMock(time_stamp=t1, total=50.0)
+        invalid = MagicMock(time_stamp=t2, total=-1.0)
+        collector._monitor_client = MagicMock()
+        collector._monitor_client.metrics.list.return_value = MagicMock(
+            value=[MagicMock(timeseries=[MagicMock(data=[valid, invalid])], unit="Count")]
+        )
+
+        result = collector._collect_metric(
+            resource_id="/subscriptions/test/resource",
+            metric_name=MetricName.ACTIVE_TOKENS,
+            aggregation=AggregationType.TOTAL,
+            start_time=t1,
+            end_time=t2,
+        )
+
+        assert result is not None
+        assert result.values == [50.0]
+        assert any(
+            item["status"] == "invalid" for item in collector.get_diagnostics()["metrics"]
+        )
+
+    @pytest.mark.parametrize("value", [None, -1.0, 101.0])
+    def test_cache_metric_rejects_missing_or_invalid_percent(
+        self,
+        mock_credential,
+        config,
+        value,
+    ):
+        with patch('ptu_advisor.metrics.collector.get_subscription_id', return_value="test-sub"):
+            with patch('ptu_advisor.metrics.collector.MonitorManagementClient'):
+                with patch('ptu_advisor.metrics.collector.CognitiveServicesManagementClient'):
+                    collector = MetricsCollector(mock_credential, config)
+
+        timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        point = MagicMock(
+            time_stamp=timestamp,
+            total=None,
+            average=value,
+            minimum=None,
+            maximum=None,
+            count=None,
+        )
+        collector._monitor_client = MagicMock()
+        collector._monitor_client.metrics.list.return_value = MagicMock(
+            value=[MagicMock(timeseries=[MagicMock(data=[point])], unit="Percent")]
+        )
+
+        result = collector._collect_metric(
+            resource_id="/subscriptions/test/resource",
+            metric_name=MetricName.CACHE_MATCH_RATE,
+            aggregation=AggregationType.AVERAGE,
+            start_time=timestamp,
+            end_time=timestamp,
+        )
+
+        assert result is None
+
     def test_collect_metric_records_missing_diagnostic(self, mock_credential, config):
         """No points should produce a missing diagnostic entry."""
         with patch('ptu_advisor.metrics.collector.get_subscription_id', return_value="test-sub"):

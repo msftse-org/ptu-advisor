@@ -1,7 +1,15 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ExportReport } from './ExportReport'
 import type { AnalysisResponse, ConsolidationSummary } from './types'
+
+const { exportTokenSnapshotMock } = vi.hoisted(() => ({
+  exportTokenSnapshotMock: vi.fn(),
+}))
+
+vi.mock('./api', () => ({
+  api: { exportTokenSnapshot: exportTokenSnapshotMock },
+}))
 
 /* ── Shared mock data ── */
 
@@ -47,6 +55,9 @@ function buildAnalysis(overrides: Partial<AnalysisResponse> = {}): AnalysisRespo
       daily_cost: { dates: [], input_cost: [], output_cost: [], total_cost: [], avg_daily_cost: 0, ptu_daily_cost: 0 },
       tpm: { timestamps: [], values: [], avg: 42300, p25: 30000, p95: 78500 },
       throttling: { timestamps: [], values: [] },
+      prompt_cache: {
+        timestamps: [], match_rate_pct: [], prompt_tokens: [], cached_prompt_tokens: [], active_prompt_tokens: [], source: 'observed' as const,
+      },
       cost_curves: {
         sustained_tpm: [], payg_monthly: [], ptu_spill_monthly: [],
         break_even_tpm: 38000, break_even_reason: 'exists' as const, ptu_capacity_tpm: 37500, avg_tpm: 42300, selected_ptu: 15, payg_at_avg: 12450, hybrid_at_avg: 8200,
@@ -59,6 +70,8 @@ function buildAnalysis(overrides: Partial<AnalysisResponse> = {}): AnalysisRespo
         reservation_discount_pct: 64,
         payg_blended_rate_per_million: 4.75,
         payg_input_rate_per_million: 2.50,
+        payg_cached_input_rate_per_million: 1.25,
+        cached_input_pricing_source: 'fallback' as const,
         payg_output_rate_per_million: 10.00,
         output_ratio: 0.3,
         ptu_hourly_rate: 1,
@@ -94,6 +107,23 @@ function buildAnalysis(overrides: Partial<AnalysisResponse> = {}): AnalysisRespo
       full_ptu: { ptu_needed_full: 60, ptu_monthly_full: 22000, ptu_committed_cost: 8000 },
       comparison: { savings: 4250, savings_pct: 34, break_even_tpm: 38000, cheaper_strategy: 'PTU + Spillover' },
       commitment_safety: { savings_margin_pct: 34, spillover_pct: 2, capacity_coverage_pct: 98, safety_verdict: 'safe' as const },
+      cache_impact: {
+        applied: true,
+        source: 'observed' as const,
+        quality: 'good' as const,
+        coverage_pct: 100,
+        no_cache_normalized_avg_tpm: 45000,
+        cache_adjusted_normalized_avg_tpm: 42300,
+        normalized_tpm_reduction_pct: 6,
+        no_cache_recommended_ptu: 50,
+        cache_aware_recommended_ptu: 50,
+        ptu_avoided: 0,
+        no_cache_payg_monthly: 13200,
+        cache_aware_payg_monthly: 12450,
+        payg_cache_savings: 750,
+        fixed_ptu_cost_changed: false,
+        calculation_note: 'Observed prompt-cache usage is included in capacity and cost estimates.',
+      },
       formula_blocks: { payg: '', hybrid: '' },
     },
     insights: { break_even_message: '', focus_topic: 'Cost Reduction', analysis_notes: [] },
@@ -101,19 +131,31 @@ function buildAnalysis(overrides: Partial<AnalysisResponse> = {}): AnalysisRespo
   }
 }
 
+function expectDecorativeRecommendationIcon(container: Element, kind: string) {
+  const icon = container.querySelector(`svg[data-recommendation-icon="${kind}"]`)
+  expect(icon).not.toBeNull()
+  expect(icon).toHaveAttribute('aria-hidden', 'true')
+  expect(icon).toHaveAttribute('focusable', 'false')
+  expect(icon).toHaveAttribute('fill', 'none')
+  expect(icon).toHaveAttribute('stroke', 'currentColor')
+}
+
 /* ────────────────────────────────────────────────────
    Dropdown button
    ──────────────────────────────────────────────────── */
 
 describe('Export dropdown', () => {
-  it('renders the Export Report button', () => {
+  it('renders the Export Report button with the shared SVG icon language', () => {
     render(<ExportReport analysis={buildAnalysis()} baseAnalysis={null} isZoomed={false} />)
-    expect(screen.getByText('Export Report ▾')).toBeInTheDocument()
+    const button = screen.getByRole('button', { name: 'Export Report' })
+    expect(button).toBeInTheDocument()
+    expect(button.querySelector('svg')).not.toBeNull()
+    expect(button).not.toHaveTextContent('▾')
   })
 
   it('shows menu items on click', () => {
     render(<ExportReport analysis={buildAnalysis()} baseAnalysis={null} isZoomed={false} />)
-    fireEvent.click(screen.getByText('Export Report ▾'))
+    fireEvent.click(screen.getByRole('button', { name: 'Export Report' }))
 
     expect(screen.getByText('Download PDF')).toBeInTheDocument()
     expect(screen.getByText('Download HTML')).toBeInTheDocument()
@@ -121,7 +163,7 @@ describe('Export dropdown', () => {
 
   it('toggles dropdown open/closed', () => {
     render(<ExportReport analysis={buildAnalysis()} baseAnalysis={null} isZoomed={false} />)
-    const btn = screen.getByText('Export Report ▾')
+    const btn = screen.getByRole('button', { name: 'Export Report' })
 
     fireEvent.click(btn)
     expect(screen.getByText('Download PDF')).toBeInTheDocument()
@@ -132,7 +174,7 @@ describe('Export dropdown', () => {
 
   it('has proper aria attributes', () => {
     render(<ExportReport analysis={buildAnalysis()} baseAnalysis={null} isZoomed={false} />)
-    const btn = screen.getByText('Export Report ▾')
+    const btn = screen.getByRole('button', { name: 'Export Report' })
 
     expect(btn).toHaveAttribute('aria-haspopup', 'true')
     expect(btn).toHaveAttribute('aria-expanded', 'false')
@@ -168,6 +210,9 @@ describe('Report content sections', () => {
     expect(root.getByText('PTU Recommended')).toBeInTheDocument()
     expect(root.getByText(/82\.0%/)).toBeInTheDocument()
     expect(root.getByText('Steady high throughput with measurable rate-limiting.')).toBeInTheDocument()
+    const banner = report.querySelector('.report-rec-banner')!
+    expectDecorativeRecommendationIcon(banner, 'recommended')
+    expect(banner).not.toHaveTextContent('✅')
   })
 
   it('renders all 6 key evidence metrics', () => {
@@ -265,6 +310,7 @@ describe('Recommendation variant banners', () => {
 
     const banner = document.querySelector('.report-rec-banner')!
     expect(banner).toHaveClass('report-rec--green')
+    expectDecorativeRecommendationIcon(banner, 'recommended')
   })
 
   it('shows amber banner for borderline', () => {
@@ -273,6 +319,7 @@ describe('Recommendation variant banners', () => {
     const banner = document.querySelector('.report-rec-banner')!
     expect(banner).toHaveClass('report-rec--amber')
     expect(banner.textContent).toContain('Borderline')
+    expectDecorativeRecommendationIcon(banner, 'borderline')
   })
 
   it('shows blue banner for ptu_not_recommended', () => {
@@ -281,6 +328,16 @@ describe('Recommendation variant banners', () => {
     const banner = document.querySelector('.report-rec-banner')!
     expect(banner).toHaveClass('report-rec--blue')
     expect(banner.textContent).toContain('Stay on PAYG')
+    expectDecorativeRecommendationIcon(banner, 'info')
+  })
+
+  it('shows a readable insufficient-data banner with the fallback SVG language', () => {
+    render(<ExportReport analysis={buildAnalysis({ recommendation: 'insufficient_data' })} baseAnalysis={null} isZoomed={false} />)
+
+    const banner = document.querySelector('.report-rec-banner')!
+    expect(banner).toHaveClass('report-rec--blue')
+    expect(banner).toHaveTextContent('Insufficient Data')
+    expectDecorativeRecommendationIcon(banner, 'insufficient')
   })
 
   it('renders borderline next steps', () => {
@@ -345,6 +402,56 @@ describe('Zoom-aware export', () => {
   })
 })
 
+describe('Token snapshot export', () => {
+  afterEach(() => {
+    exportTokenSnapshotMock.mockReset()
+  })
+
+  it('exports cache-aware snapshot evidence with the active analysis assumptions', async () => {
+    const createObjectURL = vi.fn(() => 'blob:snapshot')
+    const revokeObjectURL = vi.fn()
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    global.URL.createObjectURL = createObjectURL
+    global.URL.revokeObjectURL = revokeObjectURL
+    exportTokenSnapshotMock.mockResolvedValue({ series: [] })
+
+    render(
+      <ExportReport
+        analysis={buildAnalysis()}
+        baseAnalysis={null}
+        isZoomed={false}
+        tokenSnapshotContext={{
+          mode: 'demo',
+          focusTopic: 'Cost Reduction',
+          days: 14,
+          interval: 'PT1M',
+          cache_mode: 'override',
+          cache_match_rate_override_pct: 62,
+        }}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Export Report' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Download GBB Token Snapshot (JSON)' }))
+
+    await waitFor(() => {
+      expect(exportTokenSnapshotMock).toHaveBeenCalledWith({
+        mode: 'demo',
+        focus_topic: 'Cost Reduction',
+        days: 14,
+        interval: 'PT1M',
+        cache_mode: 'override',
+        cache_match_rate_override_pct: 62,
+      })
+    })
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
+    expect(anchorClick).toHaveBeenCalledTimes(1)
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:snapshot')
+
+    anchorClick.mockRestore()
+  })
+})
+
 /* ────────────────────────────────────────────────────
    Export actions
    ──────────────────────────────────────────────────── */
@@ -353,22 +460,40 @@ describe('Export actions', () => {
   beforeEach(() => { vi.useFakeTimers() })
   afterEach(() => { vi.useRealTimers() })
 
-  it('triggers HTML download on "Download HTML" click', () => {
+  it('serializes the authored recommendation SVG into the self-contained HTML download', () => {
     const createObjectURL = vi.fn(() => 'blob:mock')
     const revokeObjectURL = vi.fn()
+    const NativeBlob = global.Blob
+    let serializedHtml = ''
+    class CapturingBlob extends NativeBlob {
+      constructor(parts: BlobPart[] = [], options?: BlobPropertyBag) {
+        super(parts, options)
+        serializedHtml = parts.filter((part): part is string => typeof part === 'string').join('')
+      }
+    }
+    global.Blob = CapturingBlob
     global.URL.createObjectURL = createObjectURL
     global.URL.revokeObjectURL = revokeObjectURL
 
-    render(<ExportReport analysis={buildAnalysis()} baseAnalysis={null} isZoomed={false} />)
+    try {
+      render(<ExportReport analysis={buildAnalysis()} baseAnalysis={null} isZoomed={false} />)
 
-    fireEvent.click(screen.getByText('Export Report ▾'))
-    fireEvent.click(screen.getByText('Download HTML'))
+      fireEvent.click(screen.getByRole('button', { name: 'Export Report' }))
+      fireEvent.click(screen.getByText('Download HTML'))
 
-    expect(createObjectURL).toHaveBeenCalledTimes(1)
-    // revokeObjectURL is deferred via setTimeout
-    expect(revokeObjectURL).not.toHaveBeenCalled()
-    vi.advanceTimersByTime(1000)
-    expect(revokeObjectURL).toHaveBeenCalledTimes(1)
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(serializedHtml).toContain('<svg')
+      expect(serializedHtml).toContain('data-recommendation-icon="recommended"')
+      expect(serializedHtml).toContain('aria-hidden="true"')
+      expect(serializedHtml).not.toContain('✅')
+      expect(serializedHtml).not.toMatch(/<script\b/i)
+      // revokeObjectURL is deferred via setTimeout
+      expect(revokeObjectURL).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(1000)
+      expect(revokeObjectURL).toHaveBeenCalledTimes(1)
+    } finally {
+      global.Blob = NativeBlob
+    }
   })
 
   it('triggers print window on "Download PDF" click', () => {
@@ -386,7 +511,7 @@ describe('Export actions', () => {
 
     render(<ExportReport analysis={buildAnalysis()} baseAnalysis={null} isZoomed={false} />)
 
-    fireEvent.click(screen.getByText('Export Report ▾'))
+    fireEvent.click(screen.getByRole('button', { name: 'Export Report' }))
     fireEvent.click(screen.getByText('Download PDF'))
 
     expect(window.open).toHaveBeenCalledWith('', '_blank', 'width=900,height=700')
@@ -413,7 +538,7 @@ describe('Export actions', () => {
 
     render(<ExportReport analysis={buildAnalysis()} baseAnalysis={null} isZoomed={false} />)
 
-    fireEvent.click(screen.getByText('Export Report ▾'))
+    fireEvent.click(screen.getByRole('button', { name: 'Export Report' }))
     expect(screen.getByText('Download HTML')).toBeInTheDocument()
 
     fireEvent.click(screen.getByText('Download HTML'))
@@ -632,7 +757,7 @@ describe('Consolidation export — filename and HTML title', () => {
       />,
     )
 
-    fireEvent.click(screen.getByText('Export Report ▾'))
+    fireEvent.click(screen.getByRole('button', { name: 'Export Report' }))
     fireEvent.click(screen.getByText('Download HTML'))
 
     const anchor = appendSpy.mock.calls.find(
@@ -659,7 +784,7 @@ describe('Consolidation export — filename and HTML title', () => {
 
     render(<ExportReport analysis={buildAnalysis()} baseAnalysis={null} isZoomed={false} />)
 
-    fireEvent.click(screen.getByText('Export Report ▾'))
+    fireEvent.click(screen.getByRole('button', { name: 'Export Report' }))
     fireEvent.click(screen.getByText('Download HTML'))
 
     const anchor = appendSpy.mock.calls.find(

@@ -32,6 +32,8 @@ export type TelemetryEventName =
   | 'discovery_deployments_loaded'
   | 'analysis_run_started'
   | 'performance_budget_exceeded'
+  | 'cache_adjustment_applied'
+  | 'cache_data_limited'
 
 /** Required dimensions attached to every event (PRD §10). */
 export interface TelemetryDimensions {
@@ -61,6 +63,7 @@ export interface CostRecalculatedPayload extends TelemetryDimensions {
 
 export interface BreakEvenMarkerRenderedPayload extends TelemetryDimensions {
   break_even_tpm: number
+  upper_break_even_tpm?: number | null
   avg_tpm: number
   distance_pct: number
   tone: 'positive' | 'neutral' | 'negative'
@@ -77,7 +80,7 @@ export interface DiscoveryDimensions {
   tenant_id_hash: string
 }
 
-export interface AzureConnectStartedPayload extends DiscoveryDimensions {}
+export type AzureConnectStartedPayload = DiscoveryDimensions
 
 export interface AzureConnectSucceededPayload extends DiscoveryDimensions {
   display_name: string
@@ -111,6 +114,13 @@ export interface PerformanceBudgetExceededPayload extends DiscoveryDimensions {
   actual_ms: number
 }
 
+export interface CacheTelemetryPayload extends TelemetryDimensions {
+  cache_source: 'observed' | 'inferred' | 'mixed' | 'override' | 'disabled' | 'unavailable'
+  cache_quality: 'good' | 'partial' | 'limited' | 'unavailable'
+  coverage_bucket: '0' | '1-49' | '50-79' | '80-100'
+  ptu_avoided_bucket: '0' | '1-5' | '6-15' | '16+'
+}
+
 type EventPayloadMap = {
   assumption_changed: AssumptionChangedPayload
   cost_recalculated: CostRecalculatedPayload
@@ -124,6 +134,8 @@ type EventPayloadMap = {
   discovery_deployments_loaded: DiscoveryDeploymentsLoadedPayload
   analysis_run_started: AnalysisRunStartedPayload
   performance_budget_exceeded: PerformanceBudgetExceededPayload
+  cache_adjustment_applied: CacheTelemetryPayload
+  cache_data_limited: CacheTelemetryPayload
 }
 
 // ── Core emit function ─────────────────────────────────────────────
@@ -165,7 +177,6 @@ export function emitTelemetry<E extends TelemetryEventName>(
   }
 
   if (debugEnabled) {
-    // eslint-disable-next-line no-console
     console.debug(`[telemetry] ${event}`, envelope)
   }
 }
@@ -266,8 +277,14 @@ export function emitPerformanceBudgetExceeded(
 ): void {
   emitTelemetry('performance_budget_exceeded', payload)
   // Always warn in console regardless of debug flag — these are actionable
-  // eslint-disable-next-line no-console
   console.warn(
     `[perf] ${payload.operation} exceeded budget: ${payload.actual_ms.toFixed(0)}ms > ${payload.budget_ms}ms`,
   )
+}
+
+export function emitCacheTelemetry(
+  event: 'cache_adjustment_applied' | 'cache_data_limited',
+  payload: CacheTelemetryPayload,
+): void {
+  emitTelemetry(event, payload)
 }

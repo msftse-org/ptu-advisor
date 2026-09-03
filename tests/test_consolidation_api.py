@@ -342,6 +342,7 @@ def _make_stub_metrics(
     end: datetime,
     sku_type: str = "Standard",
     model_name: str = "gpt-4o",
+    model_version: str | None = None,
     num_points: int = 100,
 ) -> DeploymentMetrics:
     """Create a minimal but valid DeploymentMetrics for testing consolidation logic."""
@@ -382,6 +383,7 @@ def _make_stub_metrics(
         name=name,
         model=model_name,
         sku_type=sku_type,
+        model_version=model_version,
     )
     return m
 
@@ -479,6 +481,26 @@ class TestTimeWindowMismatchWarnings:
         result = analyze_consolidation(_make_request())
         time_warnings = [w for w in result.consolidation_summary.warnings if "no data for" in w]
         assert time_warnings == []
+
+
+class TestModelVersionValidation:
+    def test_rejects_different_model_versions_with_422(self):
+        now = datetime.now(timezone.utc)
+        start = now - timedelta(days=7)
+        metrics = [
+            _make_stub_metrics("dep-a", start, now, model_version="2024-08-06"),
+            _make_stub_metrics("dep-b", start, now, model_version="2024-11-20"),
+        ]
+
+        with patch(
+            "ptu_advisor.api.server.generate_consolidation_demo_metrics",
+            return_value=metrics,
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                analyze_consolidation(_make_request())
+
+        assert exc_info.value.status_code == 422
+        assert "model versions" in str(exc_info.value.detail)
 
 
 # ---------------------------------------------------------------------------

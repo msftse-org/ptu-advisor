@@ -11,7 +11,7 @@ services:
   app:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./outputs:/app/outputs          # persist generated reports
       - ${HOME}/.azure:/home/advisor/.azure
@@ -22,6 +22,8 @@ services:
       - AZURE_CLIENT_ID=${AZURE_CLIENT_ID:-}
       - AZURE_CLIENT_SECRET=${AZURE_CLIENT_SECRET:-}
       - AZURE_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID:-}
+      # Local mode is safe because port 8000 is published only on host loopback.
+      - PTU_ADVISOR_AUTH_MODE=local
       # LLM features (optional – for AI-generated explanations)
       - AZURE_OPENAI_ENDPOINT=${AZURE_OPENAI_ENDPOINT:-}
       - AZURE_OPENAI_DEPLOYMENT=${AZURE_OPENAI_DEPLOYMENT:-gpt-4o}

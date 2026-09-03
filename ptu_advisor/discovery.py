@@ -13,6 +13,9 @@ Includes TTL-based caching (PRD §3.3) to avoid redundant ARM API calls:
 from __future__ import annotations
 
 import time
+import base64
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -60,6 +63,28 @@ _cache = _TTLCache()
 _TTL_SUBSCRIPTIONS = 300
 _TTL_ACCOUNTS = 300
 _TTL_DEPLOYMENTS = 120
+
+
+def _credential_cache_key(credential: TokenCredential) -> str:
+    """Return a privacy-safe, stable principal fingerprint for cache isolation."""
+    try:
+        token = credential.get_token("https://management.azure.com/.default").token
+        if isinstance(token, str) and token:
+            parts = token.split(".")
+            if len(parts) >= 2:
+                payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+                payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+                principal = "|".join(
+                    str(payload.get(field, "")) for field in ("tid", "oid", "sub", "upn")
+                )
+                if not principal.strip("|"):
+                    principal = token
+            else:
+                principal = token
+            return hashlib.sha256(principal.encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        pass
+    return f"object-{id(credential)}"
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +220,7 @@ def list_subscriptions(credential: TokenCredential) -> List[SubscriptionInfo]:
     Returns subscriptions sorted by display name.  Enabled subscriptions
     appear first.  Results are cached for 300s (PRD §3.3).
     """
-    cache_key = "subs"
+    cache_key = f"subs_{_credential_cache_key(credential)}"
     cached = _cache.get(cache_key, _TTL_SUBSCRIPTIONS)
     if cached is not None:
         return cached
@@ -234,7 +259,7 @@ def list_ai_accounts(
     Returns accounts sorted by name, filtered to relevant kinds
     (OpenAI, AIServices, CognitiveServices).  Results are cached for 300s (PRD §3.3).
     """
-    cache_key = f"accounts_{subscription_id}"
+    cache_key = f"accounts_{_credential_cache_key(credential)}_{subscription_id}"
     cached = _cache.get(cache_key, _TTL_ACCOUNTS)
     if cached is not None:
         return cached
@@ -294,7 +319,10 @@ def list_deployments(
     Wraps the existing ``list_workspace_deployments`` collector function
     for API consistency within this module.  Results are cached for 120s (PRD §3.3).
     """
-    cache_key = f"deps_{subscription_id}_{resource_group}_{account_name}"
+    cache_key = (
+        f"deps_{_credential_cache_key(credential)}_"
+        f"{subscription_id}_{resource_group}_{account_name}"
+    )
     cached = _cache.get(cache_key, _TTL_DEPLOYMENTS)
     if cached is not None:
         return cached

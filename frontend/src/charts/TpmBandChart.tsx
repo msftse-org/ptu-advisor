@@ -1,6 +1,6 @@
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from './echarts-setup'
-import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, fmtTooltipDate, fmtNum, fmtPct, makeAxisDateFormatter, getDeploymentColor, hexToRgba } from './theme'
+import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, fmtTooltipDate, fmtNum, fmtPct, makeAxisDateFormatter, makeCompactChartMedia, getDeploymentColor, hexToRgba } from './theme'
 import type { ZoomState } from './use-chart-zoom'
 
 type Props = {
@@ -9,6 +9,7 @@ type Props = {
   avg: number
   refLine: number
   refLabel: string
+  upperRefLine?: number | null
   height: number
   zoomState: ZoomState
   onDataZoom: (params: { start?: number; end?: number; batch?: Array<{ start?: number; end?: number }> }) => void
@@ -16,8 +17,42 @@ type Props = {
   perDeployment?: Record<string, number[]>
 }
 
-export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, zoomState, onDataZoom, selectedTimestamp, perDeployment }: Props) {
+export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, upperRefLine, height, zoomState, onDataZoom, selectedTimestamp, perDeployment }: Props) {
   const isConsolidated = perDeployment != null && Object.keys(perDeployment).length > 0
+  const averageMarkers: Array<Record<string, unknown>> = [{
+    yAxis: avg,
+    lineStyle: { color: 'transparent', width: 0 },
+    label: { show: true, formatter: `Avg: ${fmtNum(avg)} TPM`, color: CHART_COLORS.success, fontSize: 10, position: 'insideEndTop' as const },
+  }]
+  const referenceMarkers: Array<Record<string, unknown>> = [
+    {
+      yAxis: refLine,
+      lineStyle: { color: 'transparent', width: 0 },
+      label: { show: true, formatter: `${refLabel}: ${fmtNum(refLine)} TPM`, color: CHART_COLORS.warning, fontSize: 10, position: 'insideEndBottom' as const },
+    },
+    ...(upperRefLine ? [{
+      yAxis: upperRefLine,
+      lineStyle: { color: '#d83b01', type: 'dashed' as const, width: 1 },
+      label: { show: true, formatter: `Upper: ${fmtNum(upperRefLine)} TPM`, color: '#d83b01', fontSize: 10, position: 'insideEndTop' as const },
+    }] : []),
+    ...(selectedTimestamp && timestamps.includes(selectedTimestamp) ? [{
+      xAxis: selectedTimestamp,
+      lineStyle: { color: 'rgba(215, 225, 255, 0.7)', type: 'dashed' as const, width: 1 },
+      label: { show: false },
+    }] : []),
+  ]
+  const hideMarkerLabels = (markers: Array<Record<string, unknown>>) => markers.map((marker) => ({
+    ...marker,
+    label: {
+      ...((marker.label as Record<string, unknown> | undefined) ?? {}),
+      show: false,
+    },
+  }))
+  const compactMarkerSeries = (leadingSeriesCount: number) => [
+    ...Array.from({ length: leadingSeriesCount }, () => ({})),
+    { markLine: { data: hideMarkerLabels(averageMarkers) } },
+    { markLine: { data: hideMarkerLabels(referenceMarkers) } },
+  ]
 
   const buildSingleDeploymentOption = () => ({
     ...PTU_CHART_THEME,
@@ -38,6 +73,7 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, 
         result += `<div style="margin-top:4px;border-top:1px solid rgba(255,255,255,0.1);padding-top:4px">`
         result += `<span style="color:${CHART_COLORS.success}">Avg: ${fmtNum(avg)}</span>`
         result += ` &nbsp;·&nbsp; <span style="color:${CHART_COLORS.warning}">${refLabel}: ${fmtNum(refLine)}</span>`
+        if (upperRefLine) result += ` &nbsp;·&nbsp; <span style="color:#d83b01">Upper: ${fmtNum(upperRefLine)}</span>`
         result += `</div>`
         return result
       },
@@ -93,11 +129,7 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, 
         markLine: {
           silent: true,
           symbol: 'none',
-          data: [{
-            yAxis: avg,
-            lineStyle: { color: 'transparent', width: 0 },
-            label: { show: true, formatter: `Avg: ${fmtNum(avg)} TPM`, color: CHART_COLORS.success, fontSize: 10, position: 'insideEndTop' as const },
-          }],
+          data: averageMarkers,
         },
       },
       {
@@ -111,21 +143,14 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, 
         markLine: {
           silent: true,
           symbol: 'none',
-          data: [
-            {
-              yAxis: refLine,
-              lineStyle: { color: 'transparent', width: 0 },
-              label: { show: true, formatter: `${refLabel}: ${fmtNum(refLine)} TPM`, color: CHART_COLORS.warning, fontSize: 10, position: 'insideEndBottom' as const },
-            },
-            ...(selectedTimestamp && timestamps.includes(selectedTimestamp) ? [{
-              xAxis: selectedTimestamp,
-              lineStyle: { color: 'rgba(215, 225, 255, 0.7)', type: 'dashed' as const, width: 1 },
-              label: { show: false },
-            }] : []),
-          ],
+          data: referenceMarkers,
         },
       },
     ],
+    media: makeCompactChartMedia({
+      grid: { top: 42, bottom: 66 },
+      series: compactMarkerSeries(1),
+    }),
   })
 
   const buildConsolidatedOption = () => {
@@ -178,11 +203,7 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, 
       markLine: {
         silent: true,
         symbol: 'none',
-        data: [{
-          yAxis: avg,
-          lineStyle: { color: 'transparent', width: 0 },
-          label: { show: true, formatter: `Avg: ${fmtNum(avg)} TPM`, color: CHART_COLORS.success, fontSize: 10, position: 'insideEndTop' as const },
-        }],
+        data: averageMarkers,
       },
     }
 
@@ -198,18 +219,7 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, 
       markLine: {
         silent: true,
         symbol: 'none',
-        data: [
-          {
-            yAxis: refLine,
-            lineStyle: { color: 'transparent', width: 0 },
-            label: { show: true, formatter: `${refLabel}: ${fmtNum(refLine)} TPM`, color: CHART_COLORS.warning, fontSize: 10, position: 'insideEndBottom' as const },
-          },
-          ...(selectedTimestamp && timestamps.includes(selectedTimestamp) ? [{
-            xAxis: selectedTimestamp,
-            lineStyle: { color: 'rgba(215, 225, 255, 0.7)', type: 'dashed' as const, width: 1 },
-            label: { show: false },
-          }] : []),
-        ],
+        data: referenceMarkers,
       },
     }
 
@@ -236,6 +246,7 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, 
           result += `<div style="margin-top:4px;border-top:1px solid rgba(255,255,255,0.1);padding-top:4px">`
           result += `<span style="color:${CHART_COLORS.success}">Avg: ${fmtNum(avg)}</span>`
           result += ` &nbsp;·&nbsp; <span style="color:${CHART_COLORS.warning}">${refLabel}: ${fmtNum(refLine)}</span>`
+          if (upperRefLine) result += ` &nbsp;·&nbsp; <span style="color:#d83b01">Upper: ${fmtNum(upperRefLine)}</span>`
           result += `</div>`
           return result
         },
@@ -264,6 +275,10 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, height, 
         { type: 'inside' as const, xAxisIndex: [0], start: zoomState.range[0], end: zoomState.range[1], zoomOnMouseWheel: true, moveOnMouseMove: false },
       ],
       series: [...depSeries, combinedSeries, avgSeries, refSeries],
+      media: makeCompactChartMedia({
+        grid: { top: 42, bottom: 66 },
+        series: compactMarkerSeries(depSeries.length + 1),
+      }),
     }
   }
 

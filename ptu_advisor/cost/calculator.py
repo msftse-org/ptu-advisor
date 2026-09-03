@@ -10,10 +10,13 @@ from UI presentation. Contains all cost-related computations:
 
 from __future__ import annotations
 
-from typing import Dict, Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+
+from ptu_advisor.config import get_model_config
+from ptu_advisor.cost.pricing import get_deployment_config
 
 
 def calculate_spillover_cost(
@@ -346,46 +349,45 @@ def calculate_ptu_costs(
     completion_ratio: float = 0.4,
 ) -> Dict[str, Any]:
     """Calculate PTU sizing and costs for a given model."""
-    ptu_configs = {
-        "gpt-5": {"tpm_per_ptu": 3400, "output_ratio": 8, "global_min": 15, "regional_min": 50},
-        "gpt-4.1": {"tpm_per_ptu": 4750, "output_ratio": 4, "global_min": 15, "regional_min": 50},
-        "gpt-4o": {"tpm_per_ptu": 2500, "output_ratio": 3, "global_min": 15, "regional_min": 50},
-        "gpt-4o-mini": {
-            "tpm_per_ptu": 37000,
-            "output_ratio": 3,
-            "global_min": 15,
-            "regional_min": 25,
-        },
-        "gpt-3.5-turbo": {
-            "tpm_per_ptu": 37000,
-            "output_ratio": 3,
-            "global_min": 15,
-            "regional_min": 25,
-        },
-    }
-
-    config = ptu_configs.get(model.lower(), ptu_configs["gpt-4o"])
+    model_config = get_model_config(model) or get_model_config("gpt-4o")
+    if model_config is None:  # pragma: no cover - canonical fallback is always configured
+        raise ValueError("Missing canonical GPT-4o capacity configuration")
+    global_config = get_deployment_config("global")
+    regional_config = get_deployment_config("regional")
 
     prompt_ratio = 1 - completion_ratio
-    effective_multiplier = prompt_ratio + (completion_ratio * config["output_ratio"])
+    effective_multiplier = prompt_ratio + (completion_ratio * model_config.output_ratio)
 
     safety_margin = 1.2
-    raw_ptu = (peak_tpm * effective_multiplier * safety_margin) / config["tpm_per_ptu"]
+    raw_ptu = (
+        peak_tpm * effective_multiplier * safety_margin
+    ) / model_config.input_tpm_per_ptu
 
-    global_ptu = max(config["global_min"], int((raw_ptu // 5 + 1) * 5))
-    regional_ptu = max(config["regional_min"], int((raw_ptu // 50 + 1) * 50))
+    global_ptu = max(
+        model_config.global_min_ptu,
+        int(np.ceil(raw_ptu / model_config.global_increment) * model_config.global_increment),
+    )
+    regional_ptu = max(
+        model_config.regional_min_ptu,
+        int(np.ceil(raw_ptu / model_config.regional_increment) * model_config.regional_increment),
+    )
 
-    global_hourly = 2.00
-    regional_hourly = 1.50
     reservation_discount = 0.35
+    hours_per_month = 720
 
     return {
         "raw_ptu": raw_ptu,
         "global_ptu": global_ptu,
         "regional_ptu": regional_ptu,
-        "global_monthly": global_ptu * global_hourly * 730,
-        "global_reserved": global_ptu * global_hourly * 730 * reservation_discount,
-        "regional_monthly": regional_ptu * regional_hourly * 730,
-        "regional_reserved": regional_ptu * regional_hourly * 730 * reservation_discount,
-        "tpm_per_ptu": config["tpm_per_ptu"],
+        "global_monthly": global_ptu * global_config.base_hourly_rate * hours_per_month,
+        "global_reserved": global_ptu
+        * global_config.base_hourly_rate
+        * hours_per_month
+        * reservation_discount,
+        "regional_monthly": regional_ptu * regional_config.base_hourly_rate * hours_per_month,
+        "regional_reserved": regional_ptu
+        * regional_config.base_hourly_rate
+        * hours_per_month
+        * reservation_discount,
+        "tpm_per_ptu": model_config.input_tpm_per_ptu,
     }

@@ -19,7 +19,7 @@ from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 from ptu_advisor.cost.calculator import (
-    calculate_break_even,
+    calculate_break_even_for_fixed_ptu,
     calculate_ptu_costs,
     calculate_spillover_cost,
     generate_cost_curves,
@@ -2052,14 +2052,12 @@ The time window used for this analysis.
         st.rerun()
 
     # ── Compute break-even and cost curves ──
-    break_even_tpm = calculate_break_even(
+    break_even_tpm = calculate_break_even_for_fixed_ptu(
+        selected_ptu=baseline_ptu,
         ptu_capacity_per_unit=ptu_capacity,
         ptu_hourly_rate=ptu_hourly,
         payg_blended_rate=payg_blended_rate,
         reservation_discount=reservation_discount,
-        min_ptu=15,
-        ptu_increment=5,
-        max_search_tpm=max(peak_tpm * 3, 100_000) if peak_tpm > 0 else 200_000,
     )
 
     cost_curves = generate_cost_curves(

@@ -1,6 +1,7 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
+import { calculateBreakEvenRange } from './calculator'
 
 const mockAnalysisResponse = {
   recommendation: 'ptu_recommended',
@@ -202,6 +203,30 @@ describe('Results UX parity checks', () => {
     }) as unknown as typeof fetch
   })
 
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('opens as an operational analysis workspace', () => {
+    render(<App />)
+
+    expect(screen.getByRole('banner', { name: 'PTU Advisor analysis workspace' })).toBeInTheDocument()
+    expect(screen.getByRole('main', { name: 'PTU Advisor workspace' })).toBeInTheDocument()
+    expect(screen.queryByText('Usage Assessment')).not.toBeInTheDocument()
+    expect(screen.queryByText('Azure OpenAI economics')).not.toBeInTheDocument()
+    expect(screen.queryByText('Decision workspace')).not.toBeInTheDocument()
+    expect(screen.getByText('Configure Analysis')).toBeInTheDocument()
+  })
+
+  it('gives the calculator comparison an accessible table name', () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'PTU Calculator' }))
+
+    expect(screen.getByRole('table', { name: 'PTU strategy comparison' })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'PTU strategy comparison table' })).toBeInTheDocument()
+  })
+
   it('renders info tooltips for widgets', async () => {
     render(<App />)
 
@@ -211,8 +236,54 @@ describe('Results UX parity checks', () => {
     const allMatches = await screen.findAllByText(/PTU RECOMMENDED/i)
     expect(allMatches.length).toBeGreaterThan(0)
 
-    const tooltipNotes = screen.getAllByLabelText(/^Info:/i)
-    expect(tooltipNotes.length).toBeGreaterThan(8)
+    const tooltipControls = screen.getAllByRole('button', { name: /^Info:/i })
+    expect(tooltipControls.length).toBeGreaterThan(8)
+  })
+
+  it('discloses the cache-aware Cost Explorer slope assumptions in its ordinary info tooltip', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByText('Demo Mode'))
+    fireEvent.click(screen.getByRole('button', { name: /run analysis/i }))
+
+    const explorer = await screen.findByRole('region', { name: 'Cost Explorer analytical widget' })
+    expect(within(explorer).getByRole('button', {
+      name: /PAYG includes observed cached-input pricing.*conservatively prices spillover as uncached.*green line can therefore rise slightly faster.*upper break-even/i,
+    })).toBeInTheDocument()
+  })
+
+  it('puts decision context and report navigation before detailed evidence', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByText('Demo Mode'))
+    fireEvent.click(screen.getByRole('button', { name: /run analysis/i }))
+
+    const sectionNavigation = await screen.findByRole('navigation', { name: 'Analysis sections' })
+    expect(within(sectionNavigation).getByRole('link', { name: 'Overview' })).toHaveAttribute('href', '#overview')
+    expect(within(sectionNavigation).getByRole('link', { name: 'Evidence' })).toHaveAttribute('href', '#evidence')
+    expect(within(sectionNavigation).getByRole('link', { name: 'Economics' })).toHaveAttribute('href', '#economics')
+    expect(within(sectionNavigation).getByRole('link', { name: 'Rationale' })).toHaveAttribute('href', '#rationale')
+
+    const snapshot = screen.getByRole('region', { name: 'Decision snapshot' })
+    expect(within(snapshot).getByText('PAYG monthly')).toBeInTheDocument()
+    expect(within(snapshot).getByText('PTU + spillover')).toBeInTheDocument()
+    expect(within(snapshot).getByText('Monthly difference')).toBeInTheDocument()
+    expect(within(snapshot).getByText('Commitment safety')).toBeInTheDocument()
+  })
+
+  it('moves the viewport and focus to newly rendered analysis results', async () => {
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    render(<App />)
+
+    fireEvent.click(screen.getByText('Demo Mode'))
+    fireEvent.click(screen.getByRole('button', { name: /run analysis/i }))
+
+    const results = await screen.findByRole('region', { name: 'Analysis results' })
+
+    await waitFor(() => {
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0, left: 0, behavior: 'auto' })
+      expect(results).toHaveFocus()
+    })
   })
 
   it('renders expandable Dimension Breakdown entries', async () => {
@@ -262,14 +333,60 @@ describe('Results UX parity checks', () => {
     expect(screen.getByText(/changes apply automatically/i)).toBeInTheDocument()
   })
 
+  it('keeps detailed cost formulas collapsed until requested', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByText('Demo Mode'))
+    fireEvent.click(screen.getByRole('button', { name: /run analysis/i }))
+
+    const detailsHeading = await screen.findByRole('heading', { name: 'Calculation Details' })
+    expect(detailsHeading.closest('details')).not.toHaveAttribute('open')
+  })
+
+  it('advertises auditable calculation inputs and updates its disclosure action', async () => {
+    render(<App />)
+
+    fireEvent.click(screen.getByText('Demo Mode'))
+    fireEvent.click(screen.getByRole('button', { name: /run analysis/i }))
+
+    const detailsHeading = await screen.findByRole('heading', { name: 'Calculation Details' })
+    const details = detailsHeading.closest('details')
+    const summary = detailsHeading.closest('summary')
+
+    expect(details).not.toHaveAttribute('open')
+    expect(summary).not.toBeNull()
+    expect(within(summary!).getByText('Actual rates, token volumes, and step-by-step cost math')).toBeInTheDocument()
+    expect(within(summary!).getByText('Expand')).toBeInTheDocument()
+
+    fireEvent.click(summary!)
+
+    await waitFor(() => {
+      expect(details).toHaveAttribute('open')
+      expect(within(summary!).getByText('Collapse')).toBeInTheDocument()
+    })
+  })
+
   it('renders interactive chart guidance text', async () => {
     render(<App />)
 
     fireEvent.click(screen.getByText('Demo Mode'))
     fireEvent.click(screen.getByRole('button', { name: /run analysis/i }))
 
-    await screen.findByText('Evidence')
+    await screen.findByRole('heading', { name: 'Evidence' })
 
     expect(screen.getAllByLabelText(/Hover to inspect exact/i).length).toBeGreaterThan(0)
+  })
+})
+
+describe('PTU calculator break-even math', () => {
+  it('ignores floating-point noise between parallel cost slopes', () => {
+    const result = calculateBreakEvenRange({
+      ptuFixed: 100,
+      ptuCapacityRaw: 100,
+      paygRatePerMillion: 10.000000000001,
+      spilloverRatePerMillion: 10,
+    })
+
+    expect(result).toEqual({ lower: null, upper: null })
   })
 })

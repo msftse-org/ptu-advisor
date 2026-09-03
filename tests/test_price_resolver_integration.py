@@ -97,7 +97,7 @@ class TestLiveAPIResolution:
         result = resolver.resolve("gpt-4o-2024-11-20", region="eastus", deployment_type="global")
         self._assert_close(result.payg_input_rate, 2.50, "GPT-4o (versioned) PAYG input")
         self._assert_close(result.payg_output_rate, 10.00, "GPT-4o (versioned) PAYG output")
-        assert result.model_name == "gpt-4o"
+        assert result.model_name == "gpt-4o-2024-11-20"
 
     # --- GPT-4o-mini / eastus / global ------------------------------------
 

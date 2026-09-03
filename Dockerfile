@@ -6,7 +6,7 @@
 #
 # Usage:
 #   docker build -t ptu-advisor .
-#   docker run -p 8000:8000 ptu-advisor                        # app
+#   docker run -p 127.0.0.1:8000:8000 ptu-advisor              # app
 #   docker run ptu-advisor ptu-advisor demo --scenario ptu-recommended  # CLI
 # ============================================================
 

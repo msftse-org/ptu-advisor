@@ -10,6 +10,23 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 
+def infer_cache_match_rate(
+    prompt_tokens: float,
+    completion_tokens: float,
+    active_tokens: float,
+) -> Optional[float]:
+    """Infer cache match only when ActiveTokens satisfies documented bounds."""
+    values = (float(prompt_tokens), float(completion_tokens), float(active_tokens))
+    if not all(np.isfinite(value) for value in values):
+        return None
+    prompt, completion, active = values
+    if prompt < 0 or completion < 0 or active < completion or active > prompt + completion:
+        return None
+    if prompt == 0:
+        return 0.0 if active == completion else None
+    return (prompt + completion - active) / prompt
+
+
 class MetricName(str, Enum):
     """Available metrics from Azure Monitor for Foundry deployments.
 
@@ -33,6 +50,7 @@ class MetricName(str, Enum):
     INPUT_TOKENS = "InputTokens"  # model-level input tokens
     OUTPUT_TOKENS = "OutputTokens"  # model-level output tokens
     CACHE_MATCH_RATE = "AzureOpenAIContextTokensCacheMatchRate"  # prompt cache hit ratio (0–1)
+    ACTIVE_TOKENS = "ActiveTokens"  # total inference tokens minus cached prompt tokens
 
     # Latency metrics
     TIME_TO_FIRST_BYTE = "AzureOpenAITimeToResponse"  # First token latency
@@ -331,6 +349,10 @@ class DeploymentMetrics:
 
     # Prompt-cache hit ratio (0–1) for context-cache enabled models
     cache_match_rate: Optional[TimeSeries] = None
+    active_tokens: Optional[TimeSeries] = None
+    cache_coverage_pct: Optional[float] = None
+    cache_source: Optional[str] = None
+    cache_missing_as_zero: bool = False
 
     # Deployment metadata (populated by collector or demo)
     deployment_info: Optional["DeploymentInfo"] = None
@@ -385,6 +407,10 @@ class DeploymentMetrics:
             time_to_first_byte_p99=_filter_ts(self.time_to_first_byte_p99),
             ptu_utilization=_filter_ts(self.ptu_utilization),
             cache_match_rate=_filter_ts(self.cache_match_rate),
+            active_tokens=_filter_ts(self.active_tokens),
+            cache_coverage_pct=self.cache_coverage_pct,
+            cache_source=self.cache_source,
+            cache_missing_as_zero=self.cache_missing_as_zero,
             deployment_info=self.deployment_info,
         )
 
@@ -436,6 +462,7 @@ class DeploymentInfo:
     name: str
     model: str
     sku_type: str  # "Standard" or "ProvisionedManaged"
+    model_version: Optional[str] = None
     sku_capacity: Optional[int] = None
     created_date: Optional[datetime] = None
     ptu_eligible: bool = False  # Set by discovery layer via get_model_config()

@@ -18,6 +18,7 @@ from ptu_advisor.discovery import (
     azure_sdk_available,
     list_ai_accounts,
     list_subscriptions,
+    _credential_cache_key,
 )
 
 
@@ -172,6 +173,15 @@ class TestExtractUserInfo:
         assert info.display_name == "Azure User"
         assert info.email == ""
         assert info.tenant_id == ""
+
+
+def test_credential_cache_key_falls_back_to_full_token_when_identity_claims_missing():
+    first = MagicMock()
+    second = MagicMock()
+    first.get_token.return_value = _make_token({"nonce": "one"})
+    second.get_token.return_value = _make_token({"nonce": "two"})
+
+    assert _credential_cache_key(first) != _credential_cache_key(second)
 
 
 # ============================================================================

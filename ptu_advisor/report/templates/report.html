@@ -922,6 +922,42 @@
             
             <div class="section">
                 <h2 class="section-title">🔤 Token Metrics</h2>
+                <h3>Prompt Cache Benefit</h3>
+                {% if metrics_summary.cache_source != 'unavailable' %}
+                <div class="metrics-grid">
+                    <div class="metric-card success">
+                        <div class="value">{{ metrics_summary.cache_match_rate|format_percent }}</div>
+                        <div class="label">Average cache match</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.cached_prompt_tokens|format_number }}</div>
+                        <div class="label">Cached prompt tokens</div>
+                    </div>
+                    <div class="metric-card">
+                        <div class="value">{{ metrics_summary.active_prompt_tokens|format_number }}</div>
+                        <div class="label">Active prompt tokens</div>
+                    </div>
+                </div>
+                <div class="callout info">
+                    Cached prompt tokens reduce modeled PTU utilization. The fixed PTU deployment or reservation charge changes only when the selected PTU count is reduced.
+                </div>
+                <div class="callout info">
+                    No-cache sizing: {{ ptu_estimates.no_cache_recommended_ptu }} PTU; cache-aware sizing: {{ ptu_estimates.cache_aware_recommended_ptu }} PTU.
+                    No-cache PAYG: ${{ ptu_estimates.no_cache_payg_estimate|format_number }}/month; cache-aware PAYG: ${{ ptu_estimates.payg_monthly_estimate|format_number }}/month.
+                </div>
+                {% if metrics_summary.cache_quality in ['partial', 'limited', 'unavailable'] %}
+                <div class="callout warning">
+                    Cache evidence quality: {{ metrics_summary.cache_quality }} ({{ "%.1f"|format(metrics_summary.cache_coverage_pct) }}% coverage). Missing evidence receives no modeled cache benefit.
+                </div>
+                {% endif %}
+                {% for warning in metrics_summary.cache_validation_warnings %}
+                <div class="callout warning">{{ warning }}</div>
+                {% endfor %}
+                {% else %}
+                <div class="callout warning">
+                    Cache telemetry was unavailable. The report conservatively assumes no cache benefit.
+                </div>
+                {% endif %}
                 
                 <div class="metrics-grid">
                     <div class="metric-card">
@@ -1364,8 +1400,8 @@
                         </tbody>
                     </table>
                     <div style="padding: 12px 16px; background: #f5f5f5; font-size: 12px; color: var(--color-neutral);">
-                        <strong>Recommended:</strong> Based on P95 peak load with 1.2x safety margin • 
-                        <strong>Conservative:</strong> Based on average load with safety margin
+                        <strong>Recommended:</strong> Based on cache-aware P95 normalized load •
+                        <strong>Conservative:</strong> Based on cache-aware average normalized load
                     </div>
                 </div>
                 
@@ -1406,83 +1442,14 @@
                         </tbody>
                     </table>
                     <div style="padding: 12px 16px; background: #fff3e0; font-size: 12px; color: #e65100;">
-                        ⚠️ <strong>Disclaimer:</strong> Cost estimates use approximate rates (~$2.00/PTU/hr Global, ~$1.50/PTU/hr Regional).
-                        Actual pricing varies by region. Check <a href="https://azure.microsoft.com/pricing/details/cognitive-services/openai-service/" target="_blank">Azure Pricing</a> for current rates.
+                        ⚠️ <strong>Disclaimer:</strong> Cost estimates use resolved live, cached, or conservative fallback rates.
+                        Verify current prices in <a href="https://azure.microsoft.com/pricing/details/cognitive-services/openai-service/" target="_blank">Azure Pricing</a> before purchase.
                     </div>
                 </div>
                 
                 <!-- Model PTU Specs -->
                 <div class="data-table-section">
                     <h3>📋 Model-Specific PTU Specifications</h3>
-                    <table class="data-table">
-                        <thead>
-                            <tr>
-                                <th>Model</th>
-                                <th>Input TPM per PTU</th>
-                                <th>Output Ratio</th>
-                                <th>Global/Data Zone Min</th>
-                                <th>Regional Min</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <tr {% if ptu_estimates.model_detected == 'gpt-5' %}style="background: #e3f2fd;"{% endif %}>
-                                <td><strong>GPT-5</strong></td>
-                                <td>3,400 TPM</td>
-                                <td>1:8</td>
-                                <td>15 PTU</td>
-                                <td>50 PTU</td>
-                            </tr>
-                            <tr {% if ptu_estimates.model_detected == 'gpt-4.1' %}style="background: #e3f2fd;"{% endif %}>
-                                <td><strong>GPT-4.1</strong></td>
-                                <td>4,750 TPM</td>
-                                <td>1:4</td>
-                                <td>15 PTU</td>
-                                <td>50 PTU</td>
-                            </tr>
-                            <tr {% if ptu_estimates.model_detected == 'gpt-4.1-mini' %}style="background: #e3f2fd;"{% endif %}>
-                                <td><strong>GPT-4.1-mini</strong></td>
-                                <td>23,750 TPM</td>
-                                <td>1:4</td>
-                                <td>15 PTU</td>
-                                <td>25 PTU</td>
-                            </tr>
-                            <tr {% if ptu_estimates.model_detected == 'gpt-4o' %}style="background: #e3f2fd;"{% endif %}>
-                                <td><strong>GPT-4o</strong></td>
-                                <td>2,500 TPM</td>
-                                <td>1:3</td>
-                                <td>15 PTU</td>
-                                <td>50 PTU</td>
-                            </tr>
-                            <tr {% if ptu_estimates.model_detected == 'gpt-4o-mini' %}style="background: #e3f2fd;"{% endif %}>
-                                <td><strong>GPT-4o-mini</strong></td>
-                                <td>37,000 TPM</td>
-                                <td>1:3</td>
-                                <td>15 PTU</td>
-                                <td>25 PTU</td>
-                            </tr>
-                            <tr {% if ptu_estimates.model_detected == 'o1' %}style="background: #e3f2fd;"{% endif %}>
-                                <td><strong>o1</strong></td>
-                                <td>3,000 TPM</td>
-                                <td>1:4</td>
-                                <td>15 PTU</td>
-                                <td>50 PTU</td>
-                            </tr>
-                            <tr {% if ptu_estimates.model_detected == 'o3-mini' %}style="background: #e3f2fd;"{% endif %}>
-                                <td><strong>o3-mini</strong></td>
-                                <td>14,900 TPM</td>
-                                <td>1:4</td>
-                                <td>15 PTU</td>
-                                <td>25 PTU</td>
-                            </tr>
-                            <tr {% if ptu_estimates.model_detected == 'gpt-3.5-turbo' %}style="background: #e3f2fd;"{% endif %}>
-                                <td><strong>GPT-3.5-turbo</strong></td>
-                                <td>37,000 TPM</td>
-                                <td>1:3</td>
-                                <td>15 PTU</td>
-                                <td>25 PTU</td>
-                            </tr>
-                        </tbody>
-                    </table>
                     <div style="padding: 12px 16px; background: #e3f2fd; font-size: 12px;">
                         <strong>Your detected model ({{ ptu_estimates.model_detected }})</strong> provides 
                         <strong>{{ ptu_estimates.input_tpm_per_ptu | format_number }} input TPM per PTU</strong> 
@@ -1495,7 +1462,7 @@
                 <div class="section" style="margin-top: 20px;">
                     <h2 class="section-title">💡 Recommendations</h2>
                     
-                    <div class="dimension-card {% if recommendation.recommendation == 'PTU_RECOMMENDED' %}success{% elif recommendation.recommendation == 'FURTHER_ANALYSIS' %}warning{% else %}info{% endif %}">
+                    <div class="dimension-card {{ recommendation_class }}">
                         <h4>Which PTU Type Should You Choose?</h4>
                         <table class="threshold-table" style="margin-top: 12px;">
                             <tr>

@@ -30,7 +30,9 @@ function extractErrorMessage(text: string, status: number): string {
   return toSnippet(text) || `Request failed (HTTP ${status})`
 }
 
-async function getJson<T>(url: string): Promise<T> {
+const inFlightGets = new Map<string, Promise<unknown>>()
+
+async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url)
   const contentType = response.headers.get('content-type') ?? ''
 
@@ -50,6 +52,19 @@ async function getJson<T>(url: string): Promise<T> {
     const text = await response.text()
     throw new Error(`Invalid JSON from ${url}: ${toSnippet(text)}`)
   }
+}
+
+function getJson<T>(url: string): Promise<T> {
+  const existing = inFlightGets.get(url)
+  if (existing) return existing as Promise<T>
+
+  const request = fetchJson<T>(url)
+  inFlightGets.set(url, request)
+  const clear = () => {
+    if (inFlightGets.get(url) === request) inFlightGets.delete(url)
+  }
+  request.then(clear, clear)
+  return request
 }
 
 async function postJson<T>(url: string, body: unknown): Promise<T> {

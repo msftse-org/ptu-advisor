@@ -46,6 +46,9 @@ def full_metrics(sample_timestamps):
         time_to_first_byte_p50=TimeSeries(sample_timestamps, [500.0] * 200, "p50"),
         time_to_first_byte_p95=TimeSeries(sample_timestamps, [2000.0] * 200, "p95"),
         time_to_first_byte_p99=TimeSeries(sample_timestamps, [4000.0] * 200, "p99"),
+        prompt_tokens=TimeSeries(sample_timestamps, [30000.0] * 200, "prompt"),
+        completion_tokens=TimeSeries(sample_timestamps, [20000.0] * 200, "completion"),
+        cache_match_rate=TimeSeries(sample_timestamps, [0.6] * 200, "cache", unit="Ratio"),
     )
 
 
@@ -108,6 +111,7 @@ class TestChartGenerator:
         names = [c.name for c in charts]
         # At minimum: tpm, requests, latency, throttling, radar
         assert len(names) >= 4
+        assert "prompt_cache" in names
 
     def test_html_img_tag(self, generator, full_metrics, sample_result):
         charts = generator.generate(full_metrics, sample_result)

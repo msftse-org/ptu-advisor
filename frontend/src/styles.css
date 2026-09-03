@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Josefin+Sans:wght@300;400;500;600;700&display=swap');
-
 :root {
   font-family: 'Josefin Sans', Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
   color: #f2f6ff;
@@ -1775,42 +1773,6 @@ legend {
   font-weight: 500;
 }
 
-/* ── Detail cards row ── */
-.calc-details-row {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 12px;
-}
-
-.calc-detail-card {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 14px 16px;
-  background: rgba(6, 10, 23, 0.5);
-  border: 1px solid var(--border-soft);
-  border-radius: 10px;
-}
-
-.calc-detail-label {
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-muted);
-  font-weight: 500;
-}
-
-.calc-detail-value {
-  font-size: 1.15rem;
-  font-weight: 600;
-  color: var(--text-primary);
-}
-
-.calc-detail-sub {
-  font-size: 0.72rem;
-  color: var(--text-muted);
-}
-
 /* ── Panel header with step indicator ── */
 .panel-header {
   display: flex;
@@ -2279,8 +2241,7 @@ legend {
   .dimension-grid,
   .context-grid,
   .dimension-metrics,
-  .calc-form-grid,
-  .calc-details-row {
+  .calc-form-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2419,10 +2380,184 @@ legend {
 
 .results-v2 .chart-card {
   border-radius: 14px;
-  background: linear-gradient(180deg, rgba(15, 24, 42, 0.94), rgba(9, 15, 27, 0.96));
+  background: rgba(11, 18, 31, 0.96);
   border-color: rgba(86, 107, 158, 0.32);
   box-shadow: 0 10px 24px rgba(2, 6, 23, 0.3);
   padding: 12px;
+}
+
+.results-v2 .analytical-widget {
+  display: flex;
+  min-width: 0;
+  overflow: hidden;
+  flex-direction: column;
+  padding: 14px 16px 12px;
+  border-radius: 8px;
+  background: #0b121f;
+  box-shadow: 0 2px 8px rgba(2, 6, 23, 0.22);
+}
+
+.results-v2 .analytical-widget-heading {
+  display: grid;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(86, 107, 158, 0.24);
+}
+
+.results-v2 .analytical-widget .widget-header {
+  margin: 0;
+}
+
+.analytical-widget-kpi-row {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  gap: 10px 16px;
+}
+
+.analytical-widget-kpi {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.analytical-widget-kpi strong,
+.cost-comparison-fact strong {
+  color: #f3f6ff;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.analytical-widget-kpi strong {
+  font-size: clamp(1.1rem, 1.7vw, 1.35rem);
+  line-height: 1.15;
+}
+
+.analytical-widget-kpi span,
+.cost-comparison-fact span {
+  color: #8290aa;
+  font-size: 0.68rem;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.analytical-widget-context {
+  min-width: 0;
+  margin-left: auto;
+  color: #abb7cb;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+  text-align: right;
+}
+
+.analytical-widget-status {
+  flex: none;
+  padding: 3px 7px;
+  border: 1px solid rgba(122, 140, 174, 0.34);
+  border-radius: 5px;
+  color: #b9c4d7;
+  background: rgba(33, 43, 62, 0.55);
+  font-size: 0.67rem;
+  font-weight: 700;
+}
+
+.analytical-widget-status.status-positive {
+  border-color: rgba(54, 183, 149, 0.42);
+  color: #78d5bb;
+  background: rgba(32, 91, 77, 0.22);
+}
+
+.analytical-widget-status.status-warning {
+  border-color: rgba(214, 154, 69, 0.44);
+  color: #e6b773;
+  background: rgba(111, 72, 24, 0.22);
+}
+
+.analytical-widget-status.status-negative {
+  border-color: rgba(224, 103, 103, 0.44);
+  color: #ef9b9b;
+  background: rgba(112, 42, 49, 0.22);
+}
+
+.analytical-widget-body,
+.cost-explorer-chart-frame {
+  min-width: 0;
+  width: 100%;
+}
+
+.analytical-widget-body {
+  padding-top: 8px;
+}
+
+.cost-comparison-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0 0 8px;
+  border-top: 1px solid rgba(86, 107, 158, 0.28);
+  border-bottom: 1px solid rgba(86, 107, 158, 0.28);
+}
+
+.cost-comparison-fact {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 10px 12px;
+  border-left: 1px solid rgba(86, 107, 158, 0.24);
+}
+
+.cost-comparison-fact:first-child {
+  border-left: 0;
+}
+
+.cost-comparison-fact strong {
+  overflow-wrap: anywhere;
+  font-size: 0.88rem;
+  line-height: 1.3;
+}
+
+.cost-comparison-fact.is-winner {
+  background: rgba(54, 183, 149, 0.08);
+}
+
+.cost-comparison-fact.is-winner strong {
+  color: #78d5bb;
+}
+
+.cost-explorer-widget .analytical-widget-heading {
+  padding-bottom: 12px;
+}
+
+.cost-explorer-widget .break-even-callout {
+  margin-top: 8px;
+}
+
+@media (max-width: 700px) {
+  .analytical-widget-kpi-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .analytical-widget-context {
+    margin-left: auto;
+  }
+
+  .cost-comparison-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cost-comparison-fact:nth-child(3) {
+    border-left: 0;
+    border-top: 1px solid rgba(86, 107, 158, 0.24);
+  }
+
+  .cost-comparison-fact:nth-child(4) {
+    border-top: 1px solid rgba(86, 107, 158, 0.24);
+  }
 }
 
 .results-v2 .chart-grid-v2 {
@@ -2430,29 +2565,10 @@ legend {
   margin-bottom: 18px;
 }
 
-.results-v2 .chart-grid-v2 .chart-card,
-.results-v2 .wide-card.chart-card {
-  position: relative;
-}
-
-.results-v2 .chart-grid-v2 .chart-card::before,
-.results-v2 .wide-card.chart-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 2px;
-  background: linear-gradient(90deg, rgba(124, 140, 255, 0.72), rgba(93, 234, 255, 0.5));
-  opacity: 0.55;
-  border-radius: 16px 16px 0 0;
-  pointer-events: none;
-}
-
 .results-v2 .chart-grid-v2 .chart-card:hover,
 .results-v2 .wide-card.chart-card:hover {
   border-color: rgba(126, 150, 214, 0.52);
-  box-shadow: 0 14px 30px rgba(4, 10, 24, 0.42);
+  box-shadow: 0 4px 12px rgba(4, 10, 24, 0.3);
 }
 
 .results-v2 .widget-header {
@@ -3086,9 +3202,7 @@ body {
 }
 
 .glance-card::before,
-.results-v2 .glance-card::before,
-.results-v2 .chart-grid-v2 .chart-card::before,
-.results-v2 .wide-card.chart-card::before {
+.results-v2 .glance-card::before {
   opacity: 0.35;
 }
 

@@ -1,17 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { api } from './api'
-import {
-  TokenVolumeChart,
-  RequestOutcomesChart,
-  DailyCostChart,
-  ThrottleChart,
-  TpmBandChart,
-  CostCurveChart,
-  LatencyOverlayChart,
-  useChartZoom,
-} from './charts'
-import { ExportReport } from './ExportReport'
+import { useChartZoom } from './charts/use-chart-zoom'
 import type {
   AccountInfo,
   AnalysisMode,
@@ -26,6 +16,9 @@ import type {
   PricingRegion,
   SubscriptionInfo,
 } from './types'
+import { calculateBreakEvenRange } from './calculator'
+import { AnalyticalWidget } from './AnalyticalWidget'
+import { RecommendationIcon } from './RecommendationIcon'
 import {
   emitAssumptionChanged,
   emitCostRecalculated,
@@ -41,7 +34,19 @@ import {
   emitPerformanceBudgetExceeded,
   PERF_BUDGET,
   hashTenantId,
+  emitCacheTelemetry,
 } from './telemetry'
+
+const TokenVolumeChart = lazy(() => import('./charts/TokenVolumeChart').then((module) => ({ default: module.TokenVolumeChart })))
+const RequestOutcomesChart = lazy(() => import('./charts/RequestOutcomesChart').then((module) => ({ default: module.RequestOutcomesChart })))
+const DailyCostChart = lazy(() => import('./charts/DailyCostChart').then((module) => ({ default: module.DailyCostChart })))
+const ThrottleChart = lazy(() => import('./charts/ThrottleChart').then((module) => ({ default: module.ThrottleChart })))
+const TpmBandChart = lazy(() => import('./charts/TpmBandChart').then((module) => ({ default: module.TpmBandChart })))
+const CostCurveChart = lazy(() => import('./charts/CostCurveChart').then((module) => ({ default: module.CostCurveChart })))
+const LatencyOverlayChart = lazy(() => import('./charts/LatencyOverlayChart').then((module) => ({ default: module.LatencyOverlayChart })))
+const PromptCacheVolumeChart = lazy(() => import('./charts/PromptCacheChart').then((module) => ({ default: module.PromptCacheVolumeChart })))
+const CacheEfficiencyChart = lazy(() => import('./charts/PromptCacheChart').then((module) => ({ default: module.CacheEfficiencyChart })))
+const ExportReport = lazy(() => import('./ExportReport').then((module) => ({ default: module.ExportReport })))
 
 type Mode = 'demo' | 'live'
 
@@ -50,6 +55,12 @@ const RESERVATION_OPTIONS = [
   'Monthly Commitment (Estimated 64% off)',
   '1-Year Commitment (Estimated 69% off)',
 ] as const
+
+const RESERVATION_OPTION_LABELS: Record<(typeof RESERVATION_OPTIONS)[number], string> = {
+  'Hourly — No Commitment': 'Hourly · No commitment',
+  'Monthly Commitment (Estimated 64% off)': 'Monthly · Est. 64% off',
+  '1-Year Commitment (Estimated 69% off)': '1 year · Est. 69% off',
+}
 
 const FALLBACK_PRICING_REGIONS: PricingRegion[] = [
   { name: 'eastus', display_name: 'East US', multiplier: 1.0, zone: 'US' },
@@ -61,45 +72,26 @@ const FALLBACK_DEPLOYMENT_TYPES: DeploymentTypeOption[] = [
   { name: 'regional', label: 'Regional', increment: 50, default_min_ptu: 50, base_hourly_rate: 2.0 },
 ]
 
-const APP_ICON_URL = 'https://cdn-icons-png.flaticon.com/512/1864/1864521.png'
-
 /** Human-readable labels for snake_case safety verdicts */
 const VERDICT_LABELS: Record<string, string> = {
   safe: 'Safe',
   efficient_but_risky: 'Efficient but Risky',
   not_justified: 'Not Justified',
+  insufficient_data: 'Insufficient Data',
 }
 /** Convert snake_case verdict to CSS class suffix (underscores → hyphens) */
 const verdictCssClass = (v: string) => v.replace(/_/g, '-')
 
-const LANDING_ICON_URLS = {
-  usageAssessment: 'https://img.icons8.com/?size=96&id=0wd1lFcg9niE&format=png',
-  costComparison: 'https://img.icons8.com/?size=96&id=peEJxLfmwJqr&format=png',
-  recommendation: 'https://img.icons8.com/?size=96&id=KODlr2yUL7TT&format=png',
-  calculator: 'https://img.icons8.com/?size=96&id=hUpjEYQjaJDL&format=png',
-} as const
-
-const RESULTS_ICON_URLS = {
-  glance: 'https://img.icons8.com/?size=64&id=0wd1lFcg9niE&format=png',
-  evidence: 'https://img.icons8.com/?size=64&id=3v3XjKKrjWMK&format=png',
-  traffic: 'https://img.icons8.com/?size=64&id=spjDZODNvQqx&format=png',
-  financial: 'https://img.icons8.com/?size=64&id=peEJxLfmwJqr&format=png',
-  scoring: 'https://img.icons8.com/?size=64&id=6DLCmCMzHpAN&format=png',
-  rationale: 'https://img.icons8.com/?size=64&id=KODlr2yUL7TT&format=png',
-} as const
-
-
-
 /* ── PTU Calculator model catalog ── */
 const CALC_MODELS = [
-  { id: 'gpt-4o', label: 'GPT-4o', tpmPerPtu: 2500, inputPer1M: 2.50, outputPer1M: 10.00, outputRatio: 3, globalMin: 15, regionalMin: 50, globalInc: 5, regionalInc: 50 },
-  { id: 'gpt-4o-mini', label: 'GPT-4o Mini', tpmPerPtu: 37000, inputPer1M: 0.15, outputPer1M: 0.60, outputRatio: 3, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
-  { id: 'gpt-4.1', label: 'GPT-4.1', tpmPerPtu: 4750, inputPer1M: 2.00, outputPer1M: 8.00, outputRatio: 4, globalMin: 15, regionalMin: 50, globalInc: 5, regionalInc: 50 },
-  { id: 'gpt-4.1-mini', label: 'GPT-4.1 Mini', tpmPerPtu: 23750, inputPer1M: 0.40, outputPer1M: 1.60, outputRatio: 4, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
-  { id: 'gpt-4.1-nano', label: 'GPT-4.1 Nano', tpmPerPtu: 59400, inputPer1M: 0.10, outputPer1M: 0.40, outputRatio: 4, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
-  { id: 'gpt-5', label: 'GPT-5', tpmPerPtu: 3400, inputPer1M: 1.25, outputPer1M: 10.00, outputRatio: 8, globalMin: 15, regionalMin: 50, globalInc: 5, regionalInc: 50 },
-  { id: 'o3-mini', label: 'o3-mini', tpmPerPtu: 14900, inputPer1M: 1.10, outputPer1M: 4.40, outputRatio: 4, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
-  { id: 'o4-mini', label: 'o4-mini', tpmPerPtu: 5400, inputPer1M: 1.10, outputPer1M: 4.40, outputRatio: 4, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
+  { id: 'gpt-4o', label: 'GPT-4o', tpmPerPtu: 2500, tokenRates: { global: [2.50, 1.25, 10.00], data_zone: [2.75, 1.375, 11.00], regional: [2.75, 1.375, 11.00] }, outputRatio: 4, globalMin: 15, regionalMin: 50, globalInc: 5, regionalInc: 50 },
+  { id: 'gpt-4o-mini', label: 'GPT-4o Mini', tpmPerPtu: 37000, tokenRates: { global: [0.15, 0.075, 0.60], data_zone: [0.165, 0.0825, 0.66], regional: [0.165, 0.0825, 0.66] }, outputRatio: 4, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
+  { id: 'gpt-4.1', label: 'GPT-4.1', tpmPerPtu: 3000, tokenRates: { global: [2.00, 0.50, 8.00], data_zone: [2.20, 0.55, 8.80], regional: [2.20, 0.55, 8.80] }, outputRatio: 4, globalMin: 15, regionalMin: 50, globalInc: 5, regionalInc: 50 },
+  { id: 'gpt-4.1-mini', label: 'GPT-4.1 Mini', tpmPerPtu: 14900, tokenRates: { global: [0.40, 0.10, 1.60], data_zone: [0.44, 0.11, 1.76], regional: [0.44, 0.11, 1.76] }, outputRatio: 4, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
+  { id: 'gpt-4.1-nano', label: 'GPT-4.1 Nano', tpmPerPtu: 59400, tokenRates: { global: [0.10, 0.025, 0.40], data_zone: [0.11, 0.0275, 0.44], regional: [0.11, 0.0275, 0.44] }, outputRatio: 4, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
+  { id: 'gpt-5', label: 'GPT-5', tpmPerPtu: 4750, tokenRates: { global: [1.25, 0.125, 10.00], data_zone: [1.375, 0.1375, 11.00], regional: [1.25, 1.25, 10.00] }, outputRatio: 8, globalMin: 15, regionalMin: 50, globalInc: 5, regionalInc: 50 },
+  { id: 'o3-mini', label: 'o3-mini', tpmPerPtu: 2500, tokenRates: { global: [1.10, 0.55, 4.40], data_zone: [1.21, 0.605, 4.84], regional: [1.21, 0.605, 4.84] }, outputRatio: 4, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
+  { id: 'o4-mini', label: 'o4-mini', tpmPerPtu: 5400, tokenRates: { global: [1.10, 0.275, 4.40], data_zone: [1.21, 0.303, 4.84], regional: [1.21, 0.303, 4.84] }, outputRatio: 4, globalMin: 15, regionalMin: 25, globalInc: 5, regionalInc: 25 },
 ] as const
 
 /** Current cost-model policy version — surfaces in telemetry (PRD §10). */
@@ -127,8 +119,17 @@ function formatCurrency(value: number): string {
   return new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(value)
 }
 
+function formatCurrencyPrecise(value: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value)
+}
+
 /** Adaptive date label: date-only when dense, date+time when sparse. */
-function formatDateLabel(iso: string, _idx?: number, _allLabels?: string[]): string {
+function formatDateLabel(iso: string): string {
   const d = new Date(iso)
   const mon = d.getMonth() + 1
   const day = d.getDate()
@@ -307,12 +308,15 @@ function ThinkingOverlay() {
 
 function RecBadge({ recommendation }: { recommendation: string }) {
   if (recommendation === 'ptu_recommended') {
-    return <span className="rec-badge rec-badge-positive">{"\u2713"} PTU Recommended</span>
+    return <span className="rec-badge rec-badge-positive" role="status" aria-label="PTU Recommended"><RecommendationIcon kind="recommended" />PTU Recommended</span>
   }
   if (recommendation === 'ptu_not_recommended') {
-    return <span className="rec-badge rec-badge-negative">{"\u2014"} Stay on PAYG</span>
+    return <span className="rec-badge rec-badge-negative" role="status" aria-label="Stay on PAYG"><RecommendationIcon kind="info" />Stay on PAYG</span>
   }
-  return <span className="rec-badge rec-badge-borderline">{"\u26A0"} Borderline</span>
+  if (recommendation === 'insufficient_data') {
+    return <span className="rec-badge rec-badge-insufficient" role="status" aria-label="Insufficient Data"><RecommendationIcon kind="insufficient" />Insufficient Data</span>
+  }
+  return <span className="rec-badge rec-badge-borderline" role="status" aria-label="Borderline"><RecommendationIcon kind="borderline" />Borderline</span>
 }
 
 function dimScoreClass(score: string): string {
@@ -324,12 +328,46 @@ function dimScoreClass(score: string): string {
 }
 
 function InfoTip({ text }: { text: string }) {
+  const tooltipId = useId()
+  const triggerRef = useRef<HTMLSpanElement>(null)
+  const [tooltipAlign, setTooltipAlign] = useState<'left' | 'center' | 'right'>('right')
+
+  const updateTooltipPlacement = () => {
+    const trigger = triggerRef.current
+    if (!trigger) return
+    const rect = trigger.getBoundingClientRect()
+    const margin = 12
+    const bubbleWidth = Math.min(window.innerWidth <= 560 ? 260 : 300, window.innerWidth - margin * 2)
+    const leftFits = rect.left - 7 + bubbleWidth <= window.innerWidth - margin
+    const rightFits = rect.right + 7 - bubbleWidth >= margin
+    const prefersLeft = rect.left + rect.width / 2 < window.innerWidth / 2
+
+    if (prefersLeft && leftFits) setTooltipAlign('left')
+    else if (!prefersLeft && rightFits) setTooltipAlign('right')
+    else if (leftFits) setTooltipAlign('left')
+    else if (rightFits) setTooltipAlign('right')
+    else setTooltipAlign('center')
+  }
+
   return (
-    <span className="info-tip" aria-label={`Info: ${text}`} role="note" tabIndex={0}>
+    <span
+      ref={triggerRef}
+      className="info-tip"
+      data-tooltip-align={tooltipAlign}
+      aria-label={`Info: ${text}`}
+      aria-describedby={tooltipId}
+      role="button"
+      tabIndex={0}
+      onMouseEnter={updateTooltipPlacement}
+      onFocus={updateTooltipPlacement}
+    >
       <span className="info-tip-icon" aria-hidden="true">
         i
       </span>
-      <span className="tip-bubble">{text}</span>
+      <span className="tip-bubble" id={tooltipId} role="tooltip">
+        <span className="tip-bubble-label">Metric guidance</span>
+        <span className="tip-bubble-content">{text}</span>
+      </span>
     </span>
   )
 }
@@ -420,46 +458,28 @@ function FormStateMessage({ title, detail }: { title: string; detail: string }) 
   )
 }
 
-function FeatureCard({
-  title,
-  description,
-  icon,
-  onClick,
-  isActive,
-  variant,
-}: {
-  title: string
-  description: string
-  icon: ReactNode
-  onClick: () => void
-  isActive: boolean
-  variant?: 'default' | 'calculator'
-}) {
+function DeferredResult({ children, label = 'Loading visualization…', inline = false }: { children: ReactNode; label?: string; inline?: boolean }) {
   return (
-    <button
-      type="button"
-      className={`feature-card${variant === 'calculator' ? ' feature-card-calc' : ''}${isActive ? ' is-active' : ''}`}
-      onClick={onClick}
-      aria-pressed={isActive}
-      aria-label={`${title}. ${description}`}
-    >
-      {icon}
-      <h3>{title}</h3>
-      <p>{description}</p>
-    </button>
+    <Suspense fallback={<div className={`deferred-result${inline ? ' deferred-result-inline' : ''}`} role="status">{label}</div>}>
+      {children}
+    </Suspense>
   )
 }
 
 function App() {
+  const reservationDescriptionId = useId()
   const [mode, setMode] = useState<Mode>('live')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string>('')
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null)
+  const resultsRef = useRef<HTMLElement>(null)
+  const hadAnalysisRef = useRef(false)
   const [expandedChart, setExpandedChart] = useState<string | null>(null)
+  const [calculationDetailsOpen, setCalculationDetailsOpen] = useState(false)
 
   // Chart zoom state — ECharts dataZoom
   const [selectedTimestamp, setSelectedTimestamp] = useState<string | null>(null)
-  const [granularityMinutes, setGranularityMinutes] = useState<1 | 5 | 15 | 30>(1)
+  const [granularityMinutes, setGranularityMinutes] = useState<1 | 5 | 15 | 30>(5)
   const [baseAnalysis, setBaseAnalysis] = useState<AnalysisResponse | null>(null)
 
   const [lookbackDays, setLookbackDays] = useState(14)
@@ -477,11 +497,16 @@ function App() {
   const [paygInputOverride, setPaygInputOverride] = useState<number | null>(null)
   const [paygOutputOverride, setPaygOutputOverride] = useState<number | null>(null)
   const [ptuHourlyOverride, setPtuHourlyOverride] = useState<number | null>(null)
+  const [cacheMode, setCacheMode] = useState<'auto' | 'disabled' | 'override'>('auto')
+  const [cacheMatchRateOverride, setCacheMatchRateOverride] = useState<number | null>(null)
+  const [cachedInputRateOverride, setCachedInputRateOverride] = useState<number | null>(null)
 
   const [subscriptions, setSubscriptions] = useState<SubscriptionInfo[]>([])
   const [subscriptionsLoading, setSubscriptionsLoading] = useState(false)
   const [subscriptionId, setSubscriptionId] = useState(() => localStorage.getItem('ptu_last_subscription') || '')
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
+  const tenantIdHashRef = useRef('')
+  const authAttemptKeyRef = useRef('')
 
   const [accounts, setAccounts] = useState<AccountInfo[]>([])
   const [accountKey, setAccountKey] = useState(() => localStorage.getItem('ptu_last_account') || '')
@@ -526,6 +551,7 @@ function App() {
   const [calcAvgTpm, setCalcAvgTpm] = useState(50000)
   const [calcPeakTpm, setCalcPeakTpm] = useState(120000)
   const [calcOutputPct, setCalcOutputPct] = useState(40)
+  const [calcCachePct, setCalcCachePct] = useState(0)
   const [calcPeakHours, setCalcPeakHours] = useState(4)
   const [calcRegion, setCalcRegion] = useState('eastus')
   const [calcDeployType, setCalcDeployType] = useState<'global' | 'data_zone' | 'regional'>('global')
@@ -621,14 +647,23 @@ function App() {
 
   useEffect(() => {
     if (mode !== 'live') {
+      tenantIdHashRef.current = ''
+      authAttemptKeyRef.current = ''
       setAuthStatus(null)
       return
     }
-    emitAzureConnectStarted({ policy_version: POLICY_VERSION, tenant_id_hash: '' })
+    let cancelled = false
+    const attemptKey = `${mode}|${discoveryKey}`
+    if (authAttemptKeyRef.current !== attemptKey) {
+      authAttemptKeyRef.current = attemptKey
+      emitAzureConnectStarted({ policy_version: POLICY_VERSION, tenant_id_hash: '' })
+    }
     api.authStatus()
       .then((status) => {
+        if (cancelled) return
         setAuthStatus(status)
         const tidHash = hashTenantId(status.tenant_id || '')
+        tenantIdHashRef.current = tidHash
         if (status.authenticated) {
           emitAzureConnectSucceeded({ policy_version: POLICY_VERSION, tenant_id_hash: tidHash, display_name: status.display_name })
         } else {
@@ -636,31 +671,37 @@ function App() {
         }
       })
       .catch((e) => {
+        if (cancelled) return
+        tenantIdHashRef.current = ''
         setAuthStatus({ authenticated: false, display_name: '', email: '', tenant_id: '', error: 'Failed to check authentication status.' })
         emitAzureConnectFailed({ policy_version: POLICY_VERSION, tenant_id_hash: '', error_type: e instanceof Error ? e.message : 'network_error' })
       })
+      return () => { cancelled = true }
   }, [mode, discoveryKey])
 
   useEffect(() => {
     if (mode !== 'live') {
       return
     }
+    let cancelled = false
     setSubscriptionsLoading(true)
     const t0 = performance.now()
     api.subscriptions()
       .then((items) => {
+        if (cancelled) return
         const elapsed = performance.now() - t0
         setSubscriptions(items)
-        emitDiscoverySubscriptionsLoaded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), subscription_count: items.length })
+        emitDiscoverySubscriptionsLoaded({ policy_version: POLICY_VERSION, tenant_id_hash: tenantIdHashRef.current, subscription_count: items.length })
         if (elapsed > PERF_BUDGET.FULL_DISCOVERY_MS) {
-          emitPerformanceBudgetExceeded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), operation: 'subscriptions_load', budget_ms: PERF_BUDGET.FULL_DISCOVERY_MS, actual_ms: elapsed })
+          emitPerformanceBudgetExceeded({ policy_version: POLICY_VERSION, tenant_id_hash: tenantIdHashRef.current, operation: 'subscriptions_load', budget_ms: PERF_BUDGET.FULL_DISCOVERY_MS, actual_ms: elapsed })
         }
         if (items.length > 0) {
           setSubscriptionId((current) => current || items[0].subscription_id)
         }
       })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setSubscriptionsLoading(false))
+      .catch((e: Error) => { if (!cancelled) setError(e.message) })
+      .finally(() => { if (!cancelled) setSubscriptionsLoading(false) })
+    return () => { cancelled = true }
   }, [mode, discoveryKey])
 
   useEffect(() => {
@@ -672,26 +713,37 @@ function App() {
     setDeployments([])
     setDeploymentName('')
 
+    let cancelled = false
     const t0 = performance.now()
     api.accounts(subscriptionId)
       .then((items) => {
+        if (cancelled) return
         const elapsed = performance.now() - t0
         setAccounts(items)
-        emitDiscoveryAccountsLoaded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), account_count: items.length })
+        emitDiscoveryAccountsLoaded({ policy_version: POLICY_VERSION, tenant_id_hash: tenantIdHashRef.current, account_count: items.length })
         if (elapsed > PERF_BUDGET.CACHED_CHANGE_MS) {
-          emitPerformanceBudgetExceeded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), operation: 'accounts_load', budget_ms: PERF_BUDGET.CACHED_CHANGE_MS, actual_ms: elapsed })
+          emitPerformanceBudgetExceeded({ policy_version: POLICY_VERSION, tenant_id_hash: tenantIdHashRef.current, operation: 'accounts_load', budget_ms: PERF_BUDGET.CACHED_CHANGE_MS, actual_ms: elapsed })
         }
         if (items.length > 0) {
           const first = `${items[0].resource_group}|${items[0].name}`
           setAccountKey(first)
         }
       })
-      .catch((e: Error) => setError(e.message))
+      .catch((e: Error) => { if (!cancelled) setError(e.message) })
+    return () => { cancelled = true }
   }, [mode, subscriptionId])
 
   const selectedAccount = useMemo(() => {
     return accounts.find((a) => `${a.resource_group}|${a.name}` === accountKey) ?? null
   }, [accounts, accountKey])
+
+  useEffect(() => {
+    if (!selectedAccount) return
+    const location = selectedAccount.location.toLowerCase().replace(/\s+/g, '')
+    if (pricingRegions.some((region) => region.name === location)) {
+      setSelectedRegion(location)
+    }
+  }, [selectedAccount, pricingRegions])
 
   useEffect(() => {
     if (mode !== 'live' || !subscriptionId || !selectedAccount) {
@@ -700,15 +752,11 @@ function App() {
     setDeployments([])
     setDeploymentName('')
 
-    // Sync the assumptions region to the account's actual Azure region
-    const loc = selectedAccount.location.toLowerCase().replace(/\s+/g, '')
-    if (pricingRegions.some((r) => r.name === loc)) {
-      setSelectedRegion(loc)
-    }
-
+    let cancelled = false
     const t0 = performance.now()
     api.deployments(subscriptionId, selectedAccount.resource_group, selectedAccount.name)
       .then((items) => {
+        if (cancelled) return
         const elapsed = performance.now() - t0
         // Sort: PTU-eligible first, then alphabetical within each group
         const sorted = [...items].sort((a, b) => {
@@ -716,9 +764,9 @@ function App() {
           return a.name.localeCompare(b.name)
         })
         setDeployments(sorted)
-        emitDiscoveryDeploymentsLoaded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), deployment_count: sorted.length })
+        emitDiscoveryDeploymentsLoaded({ policy_version: POLICY_VERSION, tenant_id_hash: tenantIdHashRef.current, deployment_count: sorted.length })
         if (elapsed > PERF_BUDGET.CACHED_CHANGE_MS) {
-          emitPerformanceBudgetExceeded({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), operation: 'deployments_load', budget_ms: PERF_BUDGET.CACHED_CHANGE_MS, actual_ms: elapsed })
+          emitPerformanceBudgetExceeded({ policy_version: POLICY_VERSION, tenant_id_hash: tenantIdHashRef.current, operation: 'deployments_load', budget_ms: PERF_BUDGET.CACHED_CHANGE_MS, actual_ms: elapsed })
         }
         // Auto-select the first eligible deployment
         const firstEligible = sorted.find((d) => d.ptu_eligible)
@@ -728,13 +776,14 @@ function App() {
           setDeploymentName('')  // No eligible deployments — don't select any
         }
       })
-      .catch((e: Error) => setError(e.message))
+      .catch((e: Error) => { if (!cancelled) setError(e.message) })
+    return () => { cancelled = true }
   }, [mode, subscriptionId, selectedAccount])
 
   const runAnalysis = useCallback(async ({ preserveCurrent = false, timeWindow = null, updateCharts = true }: RunAnalysisOptions = {}) => {
     setLoading(true)
     setError('')
-    emitAnalysisRunStarted({ policy_version: POLICY_VERSION, tenant_id_hash: hashTenantId(authStatus?.tenant_id || ''), mode })
+    emitAnalysisRunStarted({ policy_version: POLICY_VERSION, tenant_id_hash: tenantIdHashRef.current, mode })
     if (!preserveCurrent) {
       setAnalysis(null)
       setBaseAnalysis(null)
@@ -747,10 +796,12 @@ function App() {
       // Only send baseline_ptu when known (after first analysis sets the default)
       const ptuParam = baselinePtu != null ? { baseline_ptu: baselinePtu } : {}
       const windowParams = timeWindow ? { window_start: timeWindow.start, window_end: timeWindow.end } : {}
-      const overrideParams: Record<string, number> = {}
+      const overrideParams: Record<string, number | string> = { cache_mode: cacheMode }
       if (paygInputOverride != null) overrideParams.payg_input_rate_override = paygInputOverride
       if (paygOutputOverride != null) overrideParams.payg_output_rate_override = paygOutputOverride
       if (ptuHourlyOverride != null) overrideParams.ptu_hourly_rate_override = ptuHourlyOverride
+      if (cacheMode === 'override' && cacheMatchRateOverride != null) overrideParams.cache_match_rate_override_pct = cacheMatchRateOverride
+      if (cachedInputRateOverride != null) overrideParams.cached_input_rate_override = cachedInputRateOverride
 
       // ── Consolidation mode ──
       if (analysisMode === 'consolidation') {
@@ -778,7 +829,7 @@ function App() {
           } else {
             setAnalysis((current) => {
               if (!current) return result
-              return { ...current, recommendation: result.recommendation, confidence: result.confidence, summary: result.summary, explanation: result.explanation, what_would_change: result.what_would_change, data_quality: result.data_quality, analysis_period: result.analysis_period, dimensions: result.dimensions, metrics: result.metrics, cost_analysis: result.cost_analysis, insights: result.insights, charts: { ...current.charts, daily_cost: result.charts.daily_cost } }
+              return { ...current, recommendation: result.recommendation, confidence: result.confidence, summary: result.summary, explanation: result.explanation, what_would_change: result.what_would_change, data_quality: result.data_quality, analysis_period: result.analysis_period, dimensions: result.dimensions, metrics: result.metrics, cost_analysis: result.cost_analysis, insights: result.insights, charts: { ...current.charts, daily_cost: result.charts.daily_cost, cost_curves: result.charts.cost_curves, prompt_cache: result.charts.prompt_cache } }
             })
           }
           return
@@ -815,7 +866,7 @@ function App() {
         } else {
           setAnalysis((current) => {
             if (!current) return result
-            return { ...current, recommendation: result.recommendation, confidence: result.confidence, summary: result.summary, explanation: result.explanation, what_would_change: result.what_would_change, data_quality: result.data_quality, analysis_period: result.analysis_period, dimensions: result.dimensions, metrics: result.metrics, cost_analysis: result.cost_analysis, insights: result.insights, charts: { ...current.charts, cost_curves: result.charts.cost_curves } }
+            return { ...current, recommendation: result.recommendation, confidence: result.confidence, summary: result.summary, explanation: result.explanation, what_would_change: result.what_would_change, data_quality: result.data_quality, analysis_period: result.analysis_period, dimensions: result.dimensions, metrics: result.metrics, cost_analysis: result.cost_analysis, insights: result.insights, charts: { ...current.charts, cost_curves: result.charts.cost_curves, prompt_cache: result.charts.prompt_cache } }
           })
         }
         return
@@ -862,6 +913,8 @@ function App() {
               charts: {
                 ...current.charts,
                 daily_cost: result.charts.daily_cost,
+                cost_curves: result.charts.cost_curves,
+                prompt_cache: result.charts.prompt_cache,
               },
             }
           })
@@ -916,6 +969,7 @@ function App() {
             charts: {
               ...current.charts,
               cost_curves: result.charts.cost_curves,
+              prompt_cache: result.charts.prompt_cache,
             },
           }
         })
@@ -935,6 +989,7 @@ function App() {
     baselinePtu,
     selectedRegion,
     selectedDeploymentType,
+    includeThrottle,
     subscriptionId,
     selectedAccount,
     deploymentName,
@@ -943,6 +998,10 @@ function App() {
     paygInputOverride,
     paygOutputOverride,
     ptuHourlyOverride,
+    cacheMode,
+    cacheMatchRateOverride,
+    cachedInputRateOverride,
+    resetZoom,
   ])
 
   const previousAssumptionKey = useRef('')
@@ -967,8 +1026,11 @@ function App() {
       paygInputOverride: paygInputOverride ?? -1,
       paygOutputOverride: paygOutputOverride ?? -1,
       ptuHourlyOverride: ptuHourlyOverride ?? -1,
+      cacheMode,
+      cacheMatchRateOverride: cacheMatchRateOverride ?? -1,
+      cachedInputRateOverride: cachedInputRateOverride ?? -1,
     }
-    const currentKey = `${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}|${granularityMinutes}|${includeThrottle}|${paygInputOverride}|${paygOutputOverride}|${ptuHourlyOverride}`
+    const currentKey = `${reservationType}|${baselinePtu}|${selectedRegion}|${selectedDeploymentType}|${granularityMinutes}|${includeThrottle}|${paygInputOverride}|${paygOutputOverride}|${ptuHourlyOverride}|${cacheMode}|${cacheMatchRateOverride}|${cachedInputRateOverride}`
     if (!previousAssumptionKey.current) {
       previousAssumptionKey.current = currentKey
       previousAssumptionParts.current = parts
@@ -976,6 +1038,16 @@ function App() {
     }
 
     if (previousAssumptionKey.current === currentKey || loading) {
+      return
+    }
+    if (
+      cacheMode === 'override'
+      && (
+        cacheMatchRateOverride == null
+        || cacheMatchRateOverride < 0
+        || cacheMatchRateOverride > 100
+      )
+    ) {
       return
     }
 
@@ -1004,12 +1076,36 @@ function App() {
     }, 250)
 
     return () => clearTimeout(timer)
-  }, [analysis, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, includeThrottle, paygInputOverride, paygOutputOverride, ptuHourlyOverride, loading, runAnalysis, getReAnalyzeWindow])
+  }, [analysis, reservationType, baselinePtu, selectedRegion, selectedDeploymentType, granularityMinutes, includeThrottle, paygInputOverride, paygOutputOverride, ptuHourlyOverride, cacheMode, cacheMatchRateOverride, cachedInputRateOverride, loading, runAnalysis, getReAnalyzeWindow])
+
+  const previousCacheTelemetryKey = useRef('')
+  useEffect(() => {
+    const cache = analysis?.cost_analysis.cache_impact
+    if (!analysis || !cache) return
+    const key = `${cache.source}|${cache.quality}|${cache.coverage_pct}|${cache.ptu_avoided}`
+    if (previousCacheTelemetryKey.current === key) return
+    previousCacheTelemetryKey.current = key
+    const coverage_bucket = cache.coverage_pct <= 0 ? '0' : cache.coverage_pct < 50 ? '1-49' : cache.coverage_pct < 80 ? '50-79' : '80-100'
+    const ptu_avoided_bucket = cache.ptu_avoided <= 0 ? '0' : cache.ptu_avoided <= 5 ? '1-5' : cache.ptu_avoided <= 15 ? '6-15' : '16+'
+    emitCacheTelemetry(cache.quality === 'limited' || cache.quality === 'unavailable' ? 'cache_data_limited' : 'cache_adjustment_applied', {
+      policy_version: POLICY_VERSION,
+      recommendation: analysis.recommendation,
+      model_name: analysis.metrics.model_name,
+      deployment_type: analysis.cost_analysis.pricing.deployment_type,
+      cache_source: cache.source,
+      cache_quality: cache.quality,
+      coverage_bucket,
+      ptu_avoided_bucket,
+    })
+  }, [analysis])
 
   // ── Telemetry: cost_recalculated ──
+  const hasInsufficientCostData = analysis?.cost_analysis.status === 'insufficient_data'
+    || analysis?.recommendation === 'insufficient_data'
+
   const previousCostKey = useRef('')
   useEffect(() => {
-    if (!analysis || loading) return
+    if (!analysis || loading || hasInsufficientCostData) return
     const ca = analysis.cost_analysis
     const costKey = `${ca.payg.payg_total}|${ca.hybrid.hybrid_total}|${ca.comparison.savings}|${ca.hybrid.baseline_ptu}`
     if (previousCostKey.current === costKey) return
@@ -1027,7 +1123,7 @@ function App() {
       baseline_ptu: ca.hybrid.baseline_ptu,
       reservation_term: ca.pricing.reservation_type,
     })
-  }, [analysis, loading])
+  }, [analysis, loading, hasInsufficientCostData])
 
   useEffect(() => {
     if (!expandedChart) return
@@ -1036,10 +1132,20 @@ function App() {
     return () => document.removeEventListener('keydown', onEsc)
   }, [expandedChart])
 
+  useEffect(() => {
+    const enteringResults = analysis !== null && !hadAnalysisRef.current
+    hadAnalysisRef.current = analysis !== null
+    if (!enteringResults) return
+
+    window.scrollTo({ top: 0, left: 0, behavior: 'auto' })
+    resultsRef.current?.focus({ preventScroll: true })
+  }, [analysis])
+
   const recommendationClass = useMemo(() => {
     if (!analysis) return ''
     if (analysis.recommendation === 'ptu_recommended') return 'rec-positive'
     if (analysis.recommendation === 'ptu_not_recommended') return 'rec-negative'
+    if (analysis.recommendation === 'insufficient_data') return 'rec-insufficient'
     return 'rec-borderline'
   }, [analysis])
 
@@ -1092,6 +1198,34 @@ function App() {
       time: ts,
       throttled: series.values[idx] ?? 0,
     }))
+  }, [analysis])
+
+  const promptCacheTotals = useMemo(() => {
+    const promptCache = analysis?.charts.prompt_cache
+    if (!promptCache) return { active: 0, cached: 0, total: 0, cachedSharePct: 0 }
+    const active = promptCache.active_prompt_tokens.reduce((total, value) => total + value, 0)
+    const cached = promptCache.cached_prompt_tokens.reduce((total, value) => total + value, 0)
+    const total = active + cached
+    return {
+      active,
+      cached,
+      total,
+      cachedSharePct: total > 0 ? (cached / total) * 100 : 0,
+    }
+  }, [analysis])
+
+  const cacheImpactView = useMemo(() => {
+    const impact = analysis?.cost_analysis.cache_impact
+    const telemetry = analysis?.metrics.cache_match_rate
+    return {
+      available: impact != null,
+      applied: impact?.applied ?? false,
+      source: impact?.source ?? telemetry?.source ?? analysis?.charts.prompt_cache?.source ?? 'unavailable',
+      quality: impact?.quality ?? telemetry?.quality ?? 'unavailable',
+      coveragePct: impact?.coverage_pct ?? telemetry?.coverage_pct ?? 0,
+      ptuAvoided: impact?.ptu_avoided ?? 0,
+      normalizedTpmReductionPct: impact?.normalized_tpm_reduction_pct ?? 0,
+    }
   }, [analysis])
 
   const tpmChartData = useMemo(() => {
@@ -1158,6 +1292,7 @@ function App() {
     if (!analysis) return ''
     if (analysis.recommendation === 'ptu_recommended') return 'Recommendation: Use PTU baseline with spillover'
     if (analysis.recommendation === 'ptu_not_recommended') return 'Recommendation: Stay on PAYG for now'
+    if (analysis.recommendation === 'insufficient_data') return 'Recommendation unavailable: More traffic data required'
     return 'Recommendation: Borderline — validate before committing'
   }, [analysis])
 
@@ -1168,6 +1303,9 @@ function App() {
     }
     if (analysis.recommendation === 'ptu_not_recommended') {
       return 'PTU is not recommended. Your current workload characteristics are better suited for PAYG.'
+    }
+    if (analysis.recommendation === 'insufficient_data') {
+      return 'No token usage was observed in this window. Collect representative traffic before comparing PTU and PAYG.'
     }
     return 'PTU and PAYG are currently close. Validate with additional data before committing.'
   }, [analysis])
@@ -1181,7 +1319,7 @@ function App() {
   }, [deploymentTypeOptions, selectedDeploymentType])
 
   const breakEvenStatus = useMemo(() => {
-    if (!analysis) return null
+    if (!analysis || hasInsufficientCostData) return null
     const cc = analysis.charts.cost_curves
     const selectedPtu = cc.selected_ptu
     const avgTpm = analysis.metrics.avg_tpm
@@ -1197,6 +1335,26 @@ function App() {
     }
 
     const breakEven = cc.break_even_tpm
+    const upperBreakEven = cc.upper_break_even_tpm
+    if (upperBreakEven) {
+      const insideRange = avgTpm >= breakEven && avgTpm <= upperBreakEven
+      const range = `${breakEven.toLocaleString(undefined, { maximumFractionDigits: 0 })}-${upperBreakEven.toLocaleString(undefined, { maximumFractionDigits: 0 })} TPM`
+      const distancePct = avgTpm < breakEven
+        ? ((avgTpm - breakEven) / breakEven) * 100
+        : avgTpm > upperBreakEven
+          ? ((avgTpm - upperBreakEven) / upperBreakEven) * 100
+          : Math.abs(avgTpm - breakEven) <= Math.abs(upperBreakEven - avgTpm)
+            ? ((avgTpm - breakEven) / breakEven) * 100
+            : ((avgTpm - upperBreakEven) / upperBreakEven) * 100
+      return {
+        tone: insideRange ? 'positive' as const : 'negative' as const,
+        breakEvenTpm: breakEven,
+        avgTpm,
+        distancePct,
+        selectedPtu,
+        text: `Economic break-even range for ${selectedPtu} PTU is ${range}. Your avg TPM is ${insideRange ? 'inside' : 'outside'} that range, so the economic signal favors ${insideRange ? 'PTU' : 'PAYG'}. Safety verdict: ${safetyLabel}.`,
+      }
+    }
     const distancePct = ((avgTpm - breakEven) / breakEven) * 100
     if (distancePct > 10) {
       return { tone: 'positive' as const, breakEvenTpm: breakEven, avgTpm, distancePct, selectedPtu, text: `Economic break-even for ${selectedPtu} PTU: ${breakEven.toLocaleString(undefined, { maximumFractionDigits: 0 })} TPM. Your avg TPM is ${distancePct.toFixed(0)}% above that threshold, so the economic signal favors PTU. Safety verdict: ${safetyLabel}.` }
@@ -1205,7 +1363,7 @@ function App() {
       return { tone: 'neutral' as const, breakEvenTpm: breakEven, avgTpm, distancePct, selectedPtu, text: `Economic break-even for ${selectedPtu} PTU: ${breakEven.toLocaleString(undefined, { maximumFractionDigits: 0 })} TPM. Your avg TPM is near that threshold, so the economic signal is marginal. Safety verdict: ${safetyLabel}.` }
     }
     return { tone: 'negative' as const, breakEvenTpm: breakEven, avgTpm, distancePct, selectedPtu, text: `Economic break-even for ${selectedPtu} PTU: ${breakEven.toLocaleString(undefined, { maximumFractionDigits: 0 })} TPM. Your avg TPM is ${Math.abs(distancePct).toFixed(0)}% below that threshold, so the economic signal favors PAYG. Safety verdict: ${safetyLabel}.` }
-  }, [analysis])
+  }, [analysis, hasInsufficientCostData])
 
   // ── Telemetry: break_even_marker_rendered / break_even_unavailable ──
   useEffect(() => {
@@ -1220,6 +1378,7 @@ function App() {
       emitBreakEvenMarkerRendered({
         ...dims,
         break_even_tpm: breakEvenStatus.breakEvenTpm,
+        upper_break_even_tpm: analysis.charts.cost_curves.upper_break_even_tpm ?? null,
         avg_tpm: breakEvenStatus.avgTpm,
         distance_pct: breakEvenStatus.distancePct,
         tone: breakEvenStatus.tone as 'positive' | 'neutral' | 'negative',
@@ -1261,20 +1420,27 @@ function App() {
     const deployCfg = deploymentTypeOptions.find((d) => d.name === calcDeployType) ?? FALLBACK_DEPLOYMENT_TYPES[0]
 
     const MINUTES_PER_MONTH = 43200
-    const HOURS_PER_MONTH = 730
+    const HOURS_PER_MONTH = 720
 
     const inputFrac = (100 - calcOutputPct) / 100
     const outputFrac = calcOutputPct / 100
 
-    // Blended PAYG rate per 1M tokens
-    const blendedRate = inputFrac * model.inputPer1M + outputFrac * model.outputPer1M
+    const scopedTokenRates = model.tokenRates[calcDeployType]
+    const [inputRate, configuredCachedInputRate, outputRate] = scopedTokenRates
+    const cachedInputRate = calcDeployType === 'regional' && calcRegion !== 'eastus'
+      ? inputRate
+      : configuredCachedInputRate
+    const activeInputFrac = inputFrac * (1 - calcCachePct / 100)
+    const cachedInputFrac = inputFrac * (calcCachePct / 100)
+    // Blended PAYG rate per 1M tokens including cached-input discount.
+    const blendedRate = activeInputFrac * inputRate + cachedInputFrac * cachedInputRate + outputFrac * outputRate
 
     // PAYG monthly cost (avg TPM sustained 24/7)
     const monthlyTokens = calcAvgTpm * MINUTES_PER_MONTH
     const paygMonthly = (monthlyTokens / 1_000_000) * blendedRate
 
     // Effective multiplier: input tokens are 1:1, output tokens cost more PTU capacity
-    const effectiveMult = inputFrac + outputFrac * model.outputRatio
+    const effectiveMult = activeInputFrac + outputFrac * model.outputRatio
 
     // PTU sizing parameters
     const increment = calcDeployType === 'regional' ? model.regionalInc : model.globalInc
@@ -1299,7 +1465,10 @@ function App() {
     const ptuCapacityRaw = (ptuBase * model.tpmPerPtu) / effectiveMult
     const overflowTpm = Math.max(0, calcPeakTpm - ptuCapacityRaw)
     const overflowTokensMonthly = overflowTpm * 60 * calcPeakHours * 30
-    const overflowCost = (overflowTokensMonthly / 1_000_000) * blendedRate
+    // Spillover is conservatively priced as uncached because a separate
+    // Standard target deployment can have different cache locality.
+    const uncachedBlendedRate = inputFrac * inputRate + outputFrac * outputRate
+    const overflowCost = (overflowTokensMonthly / 1_000_000) * uncachedBlendedRate
 
     const hybridBase = ptuBase * baseRate * regionMult * HOURS_PER_MONTH
     const hybridOnDemand = hybridBase + overflowCost
@@ -1309,15 +1478,21 @@ function App() {
     // Break-even: analytical fixed-PTU formula (v3 model)
     // In the flat phase: PAYG = tpm × 43200 / 1M × rate, PTU = ptu_fixed
     // Cross: tpm = ptu_fixed × 1M / (43200 × rate)
-    let breakEvenTpm: number | null = null
     const ptuFixed = ptuBase * baseRate * regionMult * HOURS_PER_MONTH
-    if (blendedRate > 0) {
-      const flatBreakEven = (ptuFixed * 1_000_000) / (MINUTES_PER_MONTH * blendedRate)
-      if (flatBreakEven <= ptuCapacityRaw) {
-        breakEvenTpm = flatBreakEven
-      }
-      // Rising phase has the same per-TPM slope → lines are parallel → no cross.
-    }
+    const breakEvenByTerm = [
+      { term: 'On-Demand', discount: 1 },
+      { term: '1-Year', discount: 0.75 },
+      { term: '3-Year', discount: 0.55 },
+    ].map(({ term, discount }) => ({
+      term,
+      ...calculateBreakEvenRange({
+        ptuFixed: ptuFixed * discount,
+        ptuCapacityRaw,
+        paygRatePerMillion: blendedRate,
+        spilloverRatePerMillion: uncachedBlendedRate,
+      }),
+    }))
+    const { lower: breakEvenTpm, upper: upperBreakEvenTpm } = breakEvenByTerm[0]
 
     const scenarios: CalcScenario[] = [
       { name: 'PAYG', term: '\u2014', cost: paygMonthly, ptuUnits: 0 },
@@ -1340,6 +1515,8 @@ function App() {
       savingsPct,
       paygMonthly,
       breakEvenTpm,
+      upperBreakEvenTpm,
+      breakEvenByTerm,
       ptuFull,
       ptuBase,
       ptuCapacityRaw,
@@ -1347,7 +1524,7 @@ function App() {
       blendedRate,
       monthlyTokens,
     }
-  }, [calcModel, calcAvgTpm, calcPeakTpm, calcOutputPct, calcPeakHours, calcRegion, calcDeployType, pricingRegions, deploymentTypeOptions])
+  }, [calcModel, calcAvgTpm, calcPeakTpm, calcOutputPct, calcCachePct, calcPeakHours, calcRegion, calcDeployType, pricingRegions, deploymentTypeOptions])
 
   return (
     <div className="app-shell">
@@ -1357,75 +1534,15 @@ function App() {
           <button type="button" className="toast-dismiss" onClick={() => setToastMessage(null)} aria-label="Dismiss">&times;</button>
         </div>
       )}
-      <div className="container">
+      <main className={`container ${analysis ? 'results-container' : 'workspace-container'}`} aria-label="PTU Advisor workspace">
         {!analysis && (
-          <>
-            <header className="hero">
-              <div className="hero-orb hero-orb-1" />
-              <div className="hero-orb hero-orb-2" />
-              <div className="hero-badge">Azure OpenAI</div>
-              <div className="hero-title-row" aria-label="PTU Advisor logo and title">
-                <img src={APP_ICON_URL} alt="PTU Advisor logo" className="top-left-brand-icon" />
-                <h1>PTU Advisor</h1>
-              </div>
-              <p className="hero-subtitle">Assess PTU and PAYG economics for Azure OpenAI deployments using observed traffic and cost signals.</p>
-              <div className="hero-trust">
-                <span className="trust-item trust-item-insight"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 0l1.76 4.58L14 5.24l-3.82 3.18L11.36 14 7 11.09 2.64 14l1.18-5.58L0 5.24l5.24-.66L7 0z" fill="currentColor"/></svg> Metrics-backed guidance</span>
-                <span className="trust-divider" />
-                <span className="trust-item trust-item-assurance"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><circle cx="7" cy="7" r="6" stroke="currentColor" strokeWidth="1.5" fill="none"/><path d="M4 7l2 2 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" fill="none"/></svg> Production-ready controls</span>
-                <span className="trust-divider" />
-                <span className="trust-item trust-item-clarity"><svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="1" y="3" width="12" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.3" fill="none"/><path d="M1 6h12" stroke="currentColor" strokeWidth="1.3"/><circle cx="4" cy="8.5" r="1" fill="currentColor"/></svg> Cost and capacity visibility</span>
-              </div>
-            </header>
-
-            <div className="features-showcase">
-              <FeatureCard
-                title="Usage Assessment"
-                description="Connect your Azure account and analyze real deployment metrics over your chosen lookback window."
-                onClick={() => setActiveView('advisor')}
-                isActive={activeView === 'advisor'}
-                icon={(
-                  <div className="feature-icon feature-icon-analyze" aria-hidden="true">
-                    <img src={LANDING_ICON_URLS.usageAssessment} alt="" className="feature-icon-image" loading="lazy" decoding="async" />
-                  </div>
-                )}
-              />
-              <FeatureCard
-                title="Cost Scenario Comparison"
-                description="Side-by-side PAYG vs PTU + spillover cost models with break-even analysis and savings projection."
-                onClick={() => setActiveView('advisor')}
-                isActive={activeView === 'advisor'}
-                icon={(
-                  <div className="feature-icon feature-icon-compare" aria-hidden="true">
-                    <img src={LANDING_ICON_URLS.costComparison} alt="" className="feature-icon-image" loading="lazy" decoding="async" />
-                  </div>
-                )}
-              />
-              <FeatureCard
-                title="Recommendation Rationale"
-                description="Get a confidence-scored recommendation backed by 4-dimension scoring and financial modeling."
-                onClick={() => setActiveView('advisor')}
-                isActive={activeView === 'advisor'}
-                icon={(
-                  <div className="feature-icon feature-icon-recommend" aria-hidden="true">
-                    <img src={LANDING_ICON_URLS.recommendation} alt="" className="feature-icon-image" loading="lazy" decoding="async" />
-                  </div>
-                )}
-              />
-              <FeatureCard
-                title="PTU Calculator"
-                description="Estimate PTU vs PAYG costs from usage estimates — no Azure connection required."
-                onClick={() => setActiveView('calculator')}
-                isActive={activeView === 'calculator'}
-                variant="calculator"
-                icon={(
-                  <div className="feature-icon feature-icon-calc" aria-hidden="true">
-                    <img src={LANDING_ICON_URLS.calculator} alt="" className="feature-icon-image" loading="lazy" decoding="async" />
-                  </div>
-                )}
-              />
+          <header className="workspace-header" aria-label="PTU Advisor analysis workspace">
+            <div className="workspace-brand">
+              <span className="workspace-mark" aria-hidden="true">PTU</span>
+              <h1>PTU Advisor</h1>
             </div>
-          </>
+            <p>Model observed traffic, compare commitment options, and make a defensible capacity decision.</p>
+          </header>
         )}
 
         {!analysis && (
@@ -1896,6 +2013,12 @@ function App() {
               </label>
 
               <label className="slider-label">
+                Prompt Cache Match: <strong>{calcCachePct}%</strong>
+                <input type="range" min={0} max={100} value={calcCachePct} onChange={e => setCalcCachePct(Number(e.target.value))} />
+                <span className="field-hint">Cached prompt tokens reduce modeled utilization; fixed PTU cost changes only when fewer units are selected.</span>
+              </label>
+
+              <label className="slider-label">
                 Peak Hours per Day: <strong>{calcPeakHours}h</strong>
                 <input type="range" min={1} max={24} value={calcPeakHours} onChange={e => setCalcPeakHours(Number(e.target.value))} />
                 <span className="field-hint">How many hours per day traffic exceeds average</span>
@@ -1938,40 +2061,49 @@ function App() {
                   </div>
                 </div>
 
-                <table className="calc-scenario-table">
-                  <thead>
-                    <tr>
-                      <th>Strategy</th>
-                      <th>Commitment</th>
-                      <th>PTU Units</th>
-                      <th>Monthly Cost</th>
-                      <th>vs PAYG</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {calcResult.scenarios.map((s, i) => {
-                      const diff = calcResult.paygMonthly - s.cost
-                      const isCheapest = s === calcResult.cheapest
-                      return (
-                        <tr key={i} className={isCheapest ? 'calc-row-best' : ''}>
-                          <td>{s.name}</td>
-                          <td>{s.term}</td>
-                          <td>{s.ptuUnits || '\u2014'}</td>
-                          <td>${s.cost.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
-                          <td className={diff > 0 ? 'calc-savings' : diff < 0 ? 'calc-more' : ''}>
-                            {i === 0 ? '\u2014' : diff > 0 ? `-$${diff.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : `+$${Math.abs(diff).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
+                <div className="table-scroll-region" role="region" aria-label="PTU strategy comparison table" tabIndex={0}>
+                  <table className="calc-scenario-table" aria-label="PTU strategy comparison">
+                    <thead>
+                      <tr>
+                        <th>Strategy</th>
+                        <th>Commitment</th>
+                        <th>PTU Units</th>
+                        <th>Monthly Cost</th>
+                        <th>vs PAYG</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {calcResult.scenarios.map((s, i) => {
+                        const diff = calcResult.paygMonthly - s.cost
+                        const isCheapest = s === calcResult.cheapest
+                        return (
+                          <tr key={i} className={isCheapest ? 'calc-row-best' : ''}>
+                            <td>{s.name}</td>
+                            <td>{s.term}</td>
+                            <td>{s.ptuUnits || '\u2014'}</td>
+                            <td>${s.cost.toLocaleString(undefined, { maximumFractionDigits: 0 })}</td>
+                            <td className={diff > 0 ? 'calc-savings' : diff < 0 ? 'calc-more' : ''}>
+                              {i === 0 ? '\u2014' : diff > 0 ? `-$${diff.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : `+$${Math.abs(diff).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
 
                 <div className="calc-details-row">
                   <div className="calc-detail-card">
-                    <span className="calc-detail-label">Break-Even TPM</span>
-                    <span className="calc-detail-value">{calcResult.breakEvenTpm ? calcResult.breakEvenTpm.toLocaleString(undefined, { maximumFractionDigits: 0 }) : 'N/A'}</span>
-                    <span className="calc-detail-sub">Sustained TPM where PTU = PAYG cost</span>
+                    <span className="calc-detail-label">Break-Even TPM by Commitment</span>
+                    <dl className="calc-break-even-list">
+                      {calcResult.breakEvenByTerm.map(({ term, lower, upper }) => (
+                        <div className="calc-break-even-row" key={term}>
+                          <dt>{term}</dt>
+                          <dd>{lower ? `${lower.toLocaleString(undefined, { maximumFractionDigits: 0 })}${upper ? ` - ${upper.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : ''}` : 'N/A'}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                    <span className="calc-detail-sub">Sustained TPM where Hybrid PTU equals PAYG cost</span>
                   </div>
                   <div className="calc-detail-card">
                     <span className="calc-detail-label">Full PTU Sizing</span>
@@ -2003,20 +2135,25 @@ function App() {
         </footer>
 
         {analysis && (
-          <section className="results results-v2" style={{ position: 'relative' }}>
+          <section ref={resultsRef} className="results results-v2" style={{ position: 'relative' }} aria-label="Analysis results" tabIndex={-1}>
             {loading && <ThinkingOverlay />}
             <div className={`result-banner ${recommendationClass}`}>
               <div className="result-banner-top">
                 <RecBadge recommendation={analysis.recommendation} />
+                {mode === 'demo' && (
+                  <span className="demo-provenance" title="Results use generated sample telemetry, not production Azure data.">
+                    Synthetic demo data
+                  </span>
+                )}
                 <p className="confidence">Confidence score: {(analysis.confidence * 100).toFixed(1)}%</p>
-                <ExportReport
+                {!hasInsufficientCostData && <DeferredResult label="Preparing export…" inline><ExportReport
                   analysis={analysis}
                   baseAnalysis={baseAnalysis}
                   isZoomed={zoomState.isDirty}
                   consolidationSummary={consolidationSummary}
                   tokenSnapshotContext={
                     mode === 'demo'
-                      ? { mode: 'demo', focusTopic, days: lookbackDays, interval: 'PT1M' }
+                      ? { mode: 'demo', focusTopic, days: lookbackDays, interval: 'PT1M', cache_mode: cacheMode, cache_match_rate_override_pct: cacheMatchRateOverride }
                       : (subscriptionId && selectedAccount && analysis.metrics.deployment_name)
                         ? {
                             mode: 'live',
@@ -2026,14 +2163,46 @@ function App() {
                             resource_group: selectedAccount.resource_group,
                             workspace: selectedAccount.name,
                             deployment: analysis.metrics.deployment_name,
+                            cache_mode: cacheMode,
+                            cache_match_rate_override_pct: cacheMatchRateOverride,
                           }
                         : undefined
                   }
-                />
+                /></DeferredResult>}
               </div>
               <h2 className="result-banner-title">{recommendationTitle}</h2>
               <p className="result-banner-summary">{recommendationSummary}</p>
             </div>
+
+            <nav className="analysis-section-nav" aria-label="Analysis sections">
+              <a href="#overview">Overview</a>
+              <a href="#evidence">Evidence</a>
+              <a href="#economics">Economics</a>
+              <a href="#rationale">Rationale</a>
+            </nav>
+
+            <section className="decision-snapshot" aria-label="Decision snapshot">
+              <div className="decision-snapshot-item">
+                <span>PAYG monthly</span>
+                <strong>{hasInsufficientCostData ? 'Not available' : formatCurrency(analysis.cost_analysis.payg.payg_total)}</strong>
+              </div>
+              <div className="decision-snapshot-item">
+                <span>PTU + spillover</span>
+                <strong>{hasInsufficientCostData ? 'Not available' : formatCurrency(analysis.cost_analysis.hybrid.hybrid_total)}</strong>
+              </div>
+              <div className="decision-snapshot-item">
+                <span>Monthly difference</span>
+                <strong>{hasInsufficientCostData ? 'Not available' : differenceSummary}</strong>
+              </div>
+              <div className="decision-snapshot-item">
+                <span>Commitment safety</span>
+                <strong>
+                  {analysis.cost_analysis.commitment_safety
+                    ? VERDICT_LABELS[analysis.cost_analysis.commitment_safety.safety_verdict] ?? toTitleCaseLabel(analysis.cost_analysis.commitment_safety.safety_verdict)
+                    : 'Not available'}
+                </strong>
+              </div>
+            </section>
 
             {/* ── Consolidation Summary Card ── */}
             {consolidationSummary && (
@@ -2137,7 +2306,7 @@ function App() {
                       {analysis.cost_analysis.comparison.break_even_tpm && (
                         <tr>
                           <td>Break-Even TPM</td>
-                          <td colSpan={3}>{formatNumber(analysis.cost_analysis.comparison.break_even_tpm)} TPM</td>
+                          <td colSpan={3}>{formatNumber(analysis.cost_analysis.comparison.break_even_tpm)}{analysis.cost_analysis.comparison.upper_break_even_tpm ? ` - ${formatNumber(analysis.cost_analysis.comparison.upper_break_even_tpm)}` : ''} TPM</td>
                         </tr>
                       )}
                     </tbody>
@@ -2146,9 +2315,9 @@ function App() {
               </article>
             )}
 
-            <h3 className="section-title section-title-with-icon stagger-1"><img src={RESULTS_ICON_URLS.glance} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-1">At a Glance</span></h3>
+            <h3 className="section-title section-title-with-icon stagger-1" id="overview"><span className="stagger-1">At a Glance</span></h3>
             <div className="glance-grid stagger-2">
-              <article className="glance-card">
+              <article className="glance-card glance-card-scope" aria-label="Deployment scope">
                 <span className="glance-label">Scope <InfoTip text="Deployment analyzed in this run." /></span>
                 <span className="glance-value glance-value-text">{analysis.metrics.deployment_name}</span>
                 <span className="glance-sub">{analysis.metrics.model_name}</span>
@@ -2180,14 +2349,14 @@ function App() {
               </article>
               {analysis.metrics.cache_match_rate?.available && (
                 <article className="glance-card">
-                  <span className="glance-label">Prompt Cache Hit Rate <InfoTip text="Average percentage of input tokens served from the prompt-context cache. Higher rates lower PAYG token cost (cached input ~50% off) and reduce PTU token-throughput consumption." /></span>
+                  <span className="glance-label">Prompt Cache Hit Rate <InfoTip text="Average percentage of input tokens served from the prompt cache. Provisioned deployments deduct cached prompt tokens from utilization; Standard deployments use the resolved cached-input rate. Fixed PTU cost changes only when fewer PTUs are selected." /></span>
                   <span className="glance-value">{analysis.metrics.cache_match_rate.avg_pct.toFixed(1)}%</span>
                   <span className="glance-sub">avg context-token cache match</span>
                 </article>
               )}
             </div>
 
-            <h3 className="section-title section-title-with-icon stagger-3"><img src={RESULTS_ICON_URLS.evidence} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-3">Evidence</span></h3>
+            <h3 className="section-title section-title-with-icon stagger-3" id="evidence"><span className="stagger-3">Evidence</span></h3>
             {zoomState.isDirty && (
               <div className="zoom-indicator stagger-3">
                 <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"><circle cx="6" cy="6" r="4.5"/><path d="M13 13l-3.5-3.5"/><path d="M6 4v4M4 6h4"/></svg>
@@ -2200,10 +2369,19 @@ function App() {
               <p className="zoom-hint stagger-3">Use the slider below each chart or scroll-wheel to zoom in</p>
             )}
             <div className="chart-grid chart-grid-v2 stagger-4">
-              <article className={`chart-card${expandedChart === 'tokens' ? ' is-chart-expanded' : ''}`}>
-                <WidgetHeader title="Token Volume Over Time" tip="Shows prompt tokens (input) and completion tokens (output) consumed per interval. Spikes indicate bursts of usage. A flat, high line suggests steady workload — a good PTU candidate." onExpand={() => setExpandedChart(expandedChart === 'tokens' ? null : 'tokens')} />
+              <AnalyticalWidget
+                title="Token Volume Over Time"
+                headline={formatNumber(analysis.metrics.total_tokens)}
+                metricLabel="total tokens"
+                context={`${formatNumber(analysis.metrics.total_tokens / Math.max(analysis.metrics.lookback_days, 1))} avg / day`}
+                summary={`${analysis.metrics.total_tokens.toLocaleString()} total tokens across ${analysis.metrics.lookback_days} days; ${Math.round(analysis.metrics.total_tokens / Math.max(analysis.metrics.lookback_days, 1)).toLocaleString()} average tokens per day.`}
+                tooltip={<InfoTip text="Shows prompt tokens (input) and completion tokens (output) consumed per interval. Spikes indicate bursts of usage. A flat, high line suggests steady workload — a good PTU candidate." />}
+                onExpand={() => setExpandedChart(expandedChart === 'tokens' ? null : 'tokens')}
+                expanded={expandedChart === 'tokens'}
+                className={expandedChart === 'tokens' ? 'is-chart-expanded' : ''}
+              >
                 {tokenChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <TokenVolumeChart
+                <DeferredResult><TokenVolumeChart
                   timestamps={analysis!.charts.tokens.timestamps}
                   prompt={analysis!.charts.tokens.prompt}
                   completion={analysis!.charts.tokens.completion}
@@ -2214,14 +2392,24 @@ function App() {
                   selectedTimestamp={selectedTimestamp}
                   groupId="time-sync"
                   perDeployment={perDepCharts?.tokens.per_deployment}
-                />
+                /></DeferredResult>
                 )}
-              </article>
+              </AnalyticalWidget>
 
-              <article className={`chart-card${expandedChart === 'requests' ? ' is-chart-expanded' : ''}`}>
-                <WidgetHeader title="Request Outcomes" tip="Displays successful API calls vs HTTP 429 (rate-limited) responses per interval. High 429 counts signal capacity pressure — PTU eliminates these by reserving dedicated throughput." onExpand={() => setExpandedChart(expandedChart === 'requests' ? null : 'requests')} />
+              <AnalyticalWidget
+                title="Request Outcomes"
+                headline={formatNumber(analysis.metrics.total_requests)}
+                metricLabel="total requests"
+                context={`${analysis.metrics.throttling_rate_pct.toFixed(2)}% HTTP 429`}
+                status={analysis.metrics.throttled_requests > 0 ? { label: 'Rate limits observed', tone: 'warning' } : { label: 'No rate limits', tone: 'positive' }}
+                summary={`${analysis.metrics.total_requests.toLocaleString()} total requests; ${analysis.metrics.throttled_requests.toLocaleString()} rate-limited responses; ${analysis.metrics.throttling_rate_pct.toFixed(2)}% HTTP 429 rate.`}
+                tooltip={<InfoTip text="Displays successful API calls vs HTTP 429 (rate-limited) responses per interval. High 429 counts signal capacity pressure — PTU eliminates these by reserving dedicated throughput." />}
+                onExpand={() => setExpandedChart(expandedChart === 'requests' ? null : 'requests')}
+                expanded={expandedChart === 'requests'}
+                className={expandedChart === 'requests' ? 'is-chart-expanded' : ''}
+              >
                 {requestsChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <RequestOutcomesChart
+                <DeferredResult><RequestOutcomesChart
                   timestamps={analysis!.charts.requests.timestamps}
                   successful={analysis!.charts.requests.successful}
                   throttled={analysis!.charts.requests.throttled}
@@ -2230,22 +2418,23 @@ function App() {
                   onDataZoom={onDataZoom}
                   selectedTimestamp={selectedTimestamp}
                   perDeployment={perDepCharts?.requests.per_deployment}
-                />
+                /></DeferredResult>
                 )}
-              </article>
+              </AnalyticalWidget>
 
-              <article className={`chart-card${expandedChart === 'dailyCost' ? ' is-chart-expanded' : ''}`}>
-                <h4 className="widget-header">
-                  <span>Daily Deployment Cost{dailyCostChartData.length > 0 && <span className="cost-total-tag">Total: ${analysis!.charts.daily_cost.total_cost.reduce((a, b) => a + b, 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}</span>}</span>
-                  <span className="widget-header-actions">
-                    <button className="chart-expand-btn" onClick={() => setExpandedChart(expandedChart === 'dailyCost' ? null : 'dailyCost')} aria-label="Expand Daily Deployment Cost" title="Expand chart">
-                      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9" /></svg>
-                    </button>
-                    <InfoTip text="Stacked bars show daily input and output token costs at PAYG rates. The dashed lines mark average daily spend and what a PTU baseline would cost per day — compare bars to lines to see if PTU saves money." />
-                  </span>
-                </h4>
+              <AnalyticalWidget
+                title="Daily Deployment Cost"
+                headline={formatCurrency(analysis.charts.daily_cost.total_cost.reduce((total, value) => total + value, 0))}
+                metricLabel="period cost"
+                context={`${formatCurrency(analysis.charts.daily_cost.avg_daily_cost)} avg / day`}
+                summary={`${formatCurrencyPrecise(analysis.charts.daily_cost.total_cost.reduce((total, value) => total + value, 0))} period cost; ${formatCurrencyPrecise(analysis.charts.daily_cost.avg_daily_cost)} average cost per day.`}
+                tooltip={<InfoTip text="Stacked bars show daily input and output token costs at PAYG rates. The dashed lines mark average daily spend and what a PTU baseline would cost per day — compare bars to lines to see if PTU saves money." />}
+                onExpand={() => setExpandedChart(expandedChart === 'dailyCost' ? null : 'dailyCost')}
+                expanded={expandedChart === 'dailyCost'}
+                className={expandedChart === 'dailyCost' ? 'is-chart-expanded' : ''}
+              >
                 {dailyCostChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <DailyCostChart
+                <DeferredResult><DailyCostChart
                   timestamps={analysis!.charts.daily_cost.dates}
                   inputCost={analysis!.charts.daily_cost.input_cost}
                   outputCost={analysis!.charts.daily_cost.output_cost}
@@ -2255,14 +2444,24 @@ function App() {
                   zoomState={zoomState}
                   onDataZoom={onDataZoom}
                   selectedTimestamp={selectedTimestamp}
-                />
+                /></DeferredResult>
                 )}
-              </article>
+              </AnalyticalWidget>
 
-              <article className={`chart-card${expandedChart === 'throttle' ? ' is-chart-expanded' : ''}`}>
-                <WidgetHeader title="Rate-Limit Events (429)" tip="Shows the count of HTTP 429 rate-limit responses per interval. Frequent spikes mean your traffic regularly exceeds PAYG quota, causing retries and latency. PTU provisioning removes this bottleneck." onExpand={() => setExpandedChart(expandedChart === 'throttle' ? null : 'throttle')} />
+              <AnalyticalWidget
+                title="Rate-Limit Events (429)"
+                headline={formatNumber(analysis.metrics.throttled_requests)}
+                metricLabel="throttled requests"
+                context={`${analysis.metrics.throttling_rate_pct.toFixed(2)}% of requests`}
+                status={analysis.metrics.throttled_requests > 0 ? { label: 'Capacity pressure', tone: 'warning' } : { label: 'No events', tone: 'positive' }}
+                summary={`${analysis.metrics.throttled_requests.toLocaleString()} throttled requests; ${analysis.metrics.throttling_rate_pct.toFixed(2)}% of all requests received HTTP 429 responses.`}
+                tooltip={<InfoTip text="Shows the count of HTTP 429 rate-limit responses per interval. Frequent spikes mean your traffic regularly exceeds PAYG quota, causing retries and latency. PTU provisioning removes this bottleneck." />}
+                onExpand={() => setExpandedChart(expandedChart === 'throttle' ? null : 'throttle')}
+                expanded={expandedChart === 'throttle'}
+                className={expandedChart === 'throttle' ? 'is-chart-expanded' : ''}
+              >
                 {throttleChartData.length === 0 ? <ChartEmpty height={240} /> : (
-                <ThrottleChart
+                <DeferredResult><ThrottleChart
                   timestamps={analysis!.charts.throttling.timestamps}
                   throttled={analysis!.charts.throttling.values}
                   height={getChartHeight('throttle', 240)}
@@ -2270,33 +2469,120 @@ function App() {
                   onDataZoom={onDataZoom}
                   selectedTimestamp={selectedTimestamp}
                   perDeployment={perDepCharts?.throttling.per_deployment}
-                />
+                /></DeferredResult>
                 )}
-              </article>
+              </AnalyticalWidget>
+
+              <div className="prompt-cache-composition" role="group" aria-label="Prompt cache evidence">
+                <AnalyticalWidget
+                  title="Prompt Cache Volume"
+                  headline={formatNumber(promptCacheTotals.cached)}
+                  metricLabel="cached prompt tokens"
+                  context={`${promptCacheTotals.cachedSharePct.toFixed(1)}% of ${formatNumber(promptCacheTotals.total)} total`}
+                  summary={`${Math.round(promptCacheTotals.cached).toLocaleString()} cached prompt tokens and ${Math.round(promptCacheTotals.active).toLocaleString()} active prompt tokens across the selected period; cached tokens are ${promptCacheTotals.cachedSharePct.toFixed(1)}% of ${Math.round(promptCacheTotals.total).toLocaleString()} total prompt tokens.`}
+                  tooltip={<InfoTip text="Shows active and cached prompt tokens on one shared token scale. Stacked volume preserves the total prompt workload while separating tokens served from cache." />}
+                  onExpand={() => setExpandedChart(expandedChart === 'promptCacheVolume' ? null : 'promptCacheVolume')}
+                  expanded={expandedChart === 'promptCacheVolume'}
+                  className={expandedChart === 'promptCacheVolume' ? 'is-chart-expanded' : ''}
+                >
+                  {!analysis.charts.prompt_cache?.timestamps.length || (analysis.charts.prompt_cache.cached_prompt_tokens.length === 0 && analysis.charts.prompt_cache.active_prompt_tokens.length === 0) ? <ChartEmpty height={260} /> : (
+                    <DeferredResult><PromptCacheVolumeChart
+                      timestamps={analysis.charts.prompt_cache.timestamps}
+                      cachedPromptTokens={analysis.charts.prompt_cache.cached_prompt_tokens}
+                      activePromptTokens={analysis.charts.prompt_cache.active_prompt_tokens}
+                      height={getChartHeight('promptCacheVolume', 260)}
+                      zoomState={zoomState}
+                      onDataZoom={onDataZoom}
+                      selectedTimestamp={selectedTimestamp}
+                    /></DeferredResult>
+                  )}
+                </AnalyticalWidget>
+
+                <AnalyticalWidget
+                  title="Cache Efficiency"
+                  headline={analysis.metrics.cache_match_rate?.available ? `${analysis.metrics.cache_match_rate.avg_pct.toFixed(1)}%` : 'N/A'}
+                  metricLabel="average cache match"
+                  context={`${cacheImpactView.coveragePct.toFixed(1)}% telemetry coverage`}
+                  status={cacheImpactView.applied ? { label: 'Applied to model', tone: 'positive' } : { label: 'Context only', tone: 'neutral' }}
+                  summary={`${analysis.metrics.cache_match_rate?.available ? `${analysis.metrics.cache_match_rate.avg_pct.toFixed(1)}%` : 'Unavailable'} average prompt cache match with ${cacheImpactView.coveragePct.toFixed(1)}% telemetry coverage; ${cacheImpactView.ptuAvoided} PTU avoided after capacity rounding and ${cacheImpactView.normalizedTpmReductionPct.toFixed(1)}% normalized load reduction. Source ${cacheImpactView.source}; quality ${cacheImpactView.quality}; ${cacheImpactView.applied ? 'applied to the model' : 'not applied to the model'}.`}
+                  tooltip={<InfoTip text="Shows aggregate and per-deployment cache-match percentages on a fixed 0–100% scale. Coverage and evidence quality determine whether the cache benefit is applied to sizing." />}
+                  onExpand={() => setExpandedChart(expandedChart === 'cacheEfficiency' ? null : 'cacheEfficiency')}
+                  expanded={expandedChart === 'cacheEfficiency'}
+                  className={expandedChart === 'cacheEfficiency' ? 'is-chart-expanded' : ''}
+                >
+                  <dl className="cache-efficiency-facts" role="list" aria-label="Cache efficiency facts">
+                    <div role="listitem"><dt>Coverage</dt><dd>{cacheImpactView.coveragePct.toFixed(1)}%</dd></div>
+                    <div role="listitem"><dt>PTU avoided</dt><dd>{cacheImpactView.ptuAvoided} PTU</dd></div>
+                    <div role="listitem"><dt>Load reduction</dt><dd>{cacheImpactView.normalizedTpmReductionPct.toFixed(1)}%</dd></div>
+                    <div role="listitem"><dt>Source</dt><dd>{toTitleCaseLabel(cacheImpactView.source)}</dd></div>
+                    <div role="listitem"><dt>Quality</dt><dd>{toTitleCaseLabel(cacheImpactView.quality)}</dd></div>
+                    <div role="listitem"><dt>Model impact</dt><dd>{cacheImpactView.applied ? 'Applied' : 'Context only'}</dd></div>
+                  </dl>
+                  {!cacheImpactView.available ? (
+                    <div className="cache-telemetry-warning" role="alert" aria-label="Cache telemetry warning">
+                      <strong>Cache sizing impact unavailable; telemetry is shown as context only and no cache benefit is included in sizing.</strong>
+                    </div>
+                  ) : (cacheImpactView.source === 'unavailable' || cacheImpactView.source === 'disabled') ? (
+                    <div className="cache-telemetry-warning" role="alert" aria-label="Cache telemetry warning">
+                      <strong>{cacheImpactView.source === 'disabled' ? 'Cache modeling is disabled; primary estimate assumes no cache benefit.' : 'Cache telemetry unavailable; primary estimate assumes no cache benefit.'}</strong>
+                    </div>
+                  ) : cacheImpactView.quality === 'limited' && !cacheImpactView.applied ? (
+                    <div className="cache-telemetry-warning" role="alert" aria-label="Cache telemetry warning">
+                      <strong>Limited cache evidence is contextual only; primary sizing and recommendation assume no cache benefit.</strong>
+                    </div>
+                  ) : cacheImpactView.quality === 'limited' ? (
+                    <div className="cache-telemetry-warning" role="alert" aria-label="Cache telemetry warning">
+                      <strong>Limited consolidation evidence is applied conservatively; missing deployment traffic receives zero cache benefit.</strong>
+                    </div>
+                  ) : null}
+                  {!analysis.charts.prompt_cache?.timestamps.length || analysis.charts.prompt_cache.match_rate_pct.every(value => value == null) ? <ChartEmpty height={260} /> : (
+                    <DeferredResult><CacheEfficiencyChart
+                      timestamps={analysis.charts.prompt_cache.timestamps}
+                      matchRatePct={analysis.charts.prompt_cache.match_rate_pct}
+                      source={analysis.charts.prompt_cache.source}
+                      height={getChartHeight('cacheEfficiency', 260)}
+                      zoomState={zoomState}
+                      onDataZoom={onDataZoom}
+                      selectedTimestamp={selectedTimestamp}
+                      perDeployment={perDepCharts?.prompt_cache.per_deployment}
+                    /></DeferredResult>
+                  )}
+                </AnalyticalWidget>
+              </div>
             </div>
 
-            <article className={`chart-card wide-card${expandedChart === 'tpm' ? ' is-chart-expanded' : ''}`}>
-              <WidgetHeader title={`Throughput Band (TPM vs Avg/${tpmRefLabel})`} tip={`Shows actual tokens-per-minute over time against the average (dashed green) and ${tpmRefLabel} reference (dashed orange). When the blue area stays consistently above the ${tpmRefLabel} line, your workload is large enough to benefit from PTU.`} onExpand={() => setExpandedChart(expandedChart === 'tpm' ? null : 'tpm')} />
+            <AnalyticalWidget
+              title={`Throughput Band (TPM vs Avg/${tpmRefLabel})`}
+              headline={formatNumber(analysis.metrics.avg_tpm)}
+              metricLabel="average TPM"
+              context={`P95 ${formatNumber(analysis.metrics.peak_tpm)} TPM`}
+              summary={`${Math.round(analysis.metrics.avg_tpm).toLocaleString()} average tokens per minute; ${Math.round(analysis.metrics.peak_tpm).toLocaleString()} P95 tokens per minute.`}
+              tooltip={<InfoTip text={analysis.charts.cost_curves.upper_break_even_tpm ? 'Shows actual TPM against the average and the lower/upper economic break-even range. Traffic inside that range favors PTU; traffic outside favors PAYG.' : `Shows actual tokens-per-minute over time against the average and ${tpmRefLabel} reference.`} />}
+              onExpand={() => setExpandedChart(expandedChart === 'tpm' ? null : 'tpm')}
+              expanded={expandedChart === 'tpm'}
+              className={`wide-card${expandedChart === 'tpm' ? ' is-chart-expanded' : ''}`}
+            >
               {tpmChartData.length === 0 ? <ChartEmpty height={280} /> : (
-              <TpmBandChart
+              <DeferredResult><TpmBandChart
                 timestamps={analysis!.charts.tpm.timestamps}
                 tpm={analysis!.charts.tpm.values}
                 avg={analysis!.charts.tpm.avg}
                 refLine={analysis!.charts.cost_curves.break_even_tpm ?? analysis!.charts.tpm.p25}
                 refLabel={tpmRefLabel}
+                upperRefLine={analysis!.charts.cost_curves.upper_break_even_tpm ?? null}
                 height={getChartHeight('tpm', 280)}
                 zoomState={zoomState}
                 onDataZoom={onDataZoom}
                 selectedTimestamp={selectedTimestamp}
                 perDeployment={perDepCharts?.tpm.per_deployment}
-              />
+              /></DeferredResult>
               )}
-            </article>
+            </AnalyticalWidget>
 
             {perDepCharts?.latency && (
             <article className="chart-card wide-card">
               <WidgetHeader title="Latency Overlay (P50 / P95)" tip="Shows per-deployment P95 latency as solid lines and combined P50/P95 as dashed white lines. Use this to identify which deployments contribute most to overall latency." />
-              <LatencyOverlayChart
+              <DeferredResult><LatencyOverlayChart
                 timestamps={perDepCharts.latency.timestamps}
                 combined={perDepCharts.latency.combined}
                 perDeployment={perDepCharts.latency.per_deployment}
@@ -2304,11 +2590,11 @@ function App() {
                 zoomState={zoomState}
                 onDataZoom={onDataZoom}
                 selectedTimestamp={selectedTimestamp}
-              />
+              /></DeferredResult>
             </article>
             )}
 
-            <h3 className="section-title section-title-with-icon stagger-5"><img src={RESULTS_ICON_URLS.traffic} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-5">Traffic Shape Signals</span></h3>
+            <h3 className="section-title section-title-with-icon stagger-5"><span className="stagger-5">Traffic Shape Signals</span></h3>
             <div className="metrics-grid">
               <article className="metric-card">
                 <h3>Burstiness (P95 / Avg) <InfoTip text="Lower values indicate a steadier workload that is easier to size." /></h3>
@@ -2328,11 +2614,33 @@ function App() {
               </article>
             </div>
 
-            <h3 className="section-title section-title-with-icon stagger-6"><img src={RESULTS_ICON_URLS.financial} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-6">Financial Decision</span> <PricingSourceBadge source={analysis.cost_analysis.pricing.pricing_source} asOf={analysis.cost_analysis.pricing.pricing_as_of} /></h3>
+            <h3 className="section-title section-title-with-icon stagger-6" id="economics"><span className="stagger-6">Financial Decision</span> <PricingSourceBadge source={analysis.cost_analysis.pricing.pricing_source} asOf={analysis.cost_analysis.pricing.pricing_as_of} /></h3>
+
+            {hasInsufficientCostData ? (
+              <article className="insufficient-cost-data" role="status">
+                <h4>More traffic data required</h4>
+                <p>No token usage was observed in the selected window. Cost, savings, commitment safety, and break-even results are withheld until representative traffic is available.</p>
+              </article>
+            ) : (<>
 
             {analysis.cost_analysis.pricing.pricing_source === 'fallback' && (
               <div className="pricing-fallback-banner" role="alert">
                 <strong>Using default pricing</strong> — live pricing unavailable. Cost figures are based on static fallback rates and may not reflect current Azure pricing.
+              </div>
+            )}
+            {analysis.cost_analysis.pricing.cached_input_pricing_source === 'conservative' && (
+              <div className="pricing-fallback-banner" role="alert">
+                <strong>Cached-input discount unavailable</strong> — cached prompt tokens are priced at the standard input rate for a conservative estimate.
+              </div>
+            )}
+            {analysis.cost_analysis.pricing.cached_input_pricing_source === 'fallback' && analysis.cost_analysis.pricing.pricing_source !== 'fallback' && (
+              <div className="pricing-fallback-banner" role="status">
+                <strong>Cached-input rate from verified fallback</strong> — standard and PTU rates are live, while cached-input cost uses the model- and scope-specific fallback meter.
+              </div>
+            )}
+            {analysis.cost_analysis.pricing.ptu_pricing_source === 'fallback' && analysis.cost_analysis.pricing.pricing_source === 'live' && (
+              <div className="pricing-fallback-banner" role="status">
+                <strong>PTU rate from verified fallback</strong> — token rates, including cached input, are live; the PTU hourly meter was unavailable.
               </div>
             )}
             <article className="chart-card cost-controls-card cost-controls-card-v2">
@@ -2365,13 +2673,21 @@ function App() {
 
                 <label>
                   PTU Pricing Term
-                  <select value={reservationType} onChange={(e) => setReservationType(e.target.value)}>
+                  <select
+                    value={reservationType}
+                    onChange={(e) => setReservationType(e.target.value)}
+                    aria-describedby={reservationDescriptionId}
+                    title={reservationType}
+                  >
                     {RESERVATION_OPTIONS.map((term) => (
                       <option key={term} value={term}>
-                        {term}
+                        {RESERVATION_OPTION_LABELS[term]}
                       </option>
                     ))}
                   </select>
+                  <span id={reservationDescriptionId} className="visually-hidden">
+                    Selected term: {reservationType}
+                  </span>
                 </label>
 
                 <label className="slider-label">
@@ -2473,11 +2789,52 @@ function App() {
                         onChange={(e) => setPtuHourlyOverride(e.target.value === '' ? null : Number(e.target.value))}
                       />
                     </label>
-                    {(paygInputOverride != null || paygOutputOverride != null || ptuHourlyOverride != null) && (
+                    <label>
+                      Cache calculation mode
+                      <select
+                        aria-label="Cache calculation mode"
+                        value={cacheMode}
+                        onChange={(e) => {
+                          const value = e.target.value as 'auto' | 'disabled' | 'override'
+                          setCacheMode(value)
+                          if (value !== 'override') setCacheMatchRateOverride(null)
+                        }}
+                      >
+                        <option value="auto">Auto - use observed telemetry</option>
+                        <option value="disabled">No cache benefit</option>
+                        <option value="override">Manual override</option>
+                      </select>
+                    </label>
+                    {cacheMode === 'override' && (
+                      <label>
+                        Assumed cache match rate (%)
+                        <input
+                          aria-label="Assumed cache match rate"
+                          type="number"
+                          min={0}
+                          max={100}
+                          step={0.1}
+                          value={cacheMatchRateOverride ?? ''}
+                          onChange={(e) => setCacheMatchRateOverride(e.target.value === '' ? null : Number(e.target.value))}
+                        />
+                      </label>
+                    )}
+                    <label>
+                      Cached Input Rate ($/1M tokens)
+                      <input
+                        type="number"
+                        min={0}
+                        step={0.01}
+                        placeholder={analysis.cost_analysis.pricing.payg_cached_input_rate_per_million?.toFixed(2) ?? '0.00'}
+                        value={cachedInputRateOverride ?? ''}
+                        onChange={(e) => setCachedInputRateOverride(e.target.value === '' ? null : Number(e.target.value))}
+                      />
+                    </label>
+                    {(paygInputOverride != null || paygOutputOverride != null || ptuHourlyOverride != null || cachedInputRateOverride != null || cacheMode !== 'auto') && (
                       <button
                         type="button"
                         className="secondary"
-                        onClick={() => { setPaygInputOverride(null); setPaygOutputOverride(null); setPtuHourlyOverride(null) }}
+                        onClick={() => { setPaygInputOverride(null); setPaygOutputOverride(null); setPtuHourlyOverride(null); setCachedInputRateOverride(null); setCacheMode('auto'); setCacheMatchRateOverride(null) }}
                       >
                         Reset to auto-resolved rates
                       </button>
@@ -2487,9 +2844,19 @@ function App() {
               </div>
             </article>
 
-            <details className="calculation-details" open>
-              <summary>
-                <h3 className="section-title calc-section-title">Calculation Details</h3>
+            <details
+              className="calculation-details"
+              onToggle={(event) => setCalculationDetailsOpen(event.currentTarget.open)}
+            >
+              <summary className="calculation-details-summary">
+                <span className="calculation-details-summary-icon">
+                  <RecommendationIcon kind="info" className="calculation-details-icon" />
+                </span>
+                <span className="calculation-details-summary-copy">
+                  <strong className="section-title calc-section-title" role="heading" aria-level={3}>Calculation Details</strong>
+                  <span className="calculation-details-summary-description">Actual rates, token volumes, and step-by-step cost math</span>
+                </span>
+                <span className="calculation-details-affordance">{calculationDetailsOpen ? 'Collapse' : 'Expand'}</span>
               </summary>
               <label className="throttle-toggle">
                 <input type="checkbox" checked={includeThrottle} onChange={(e) => setIncludeThrottle(e.target.checked)} />
@@ -2508,29 +2875,88 @@ function App() {
               </div>
             </details>
 
-            <article className={`chart-card wide-card${expandedChart === 'cost' ? ' is-chart-expanded' : ''}`}>
-              <WidgetHeader title={`Cost Explorer — Does my traffic justify ${analysis!.charts.cost_curves.selected_ptu} PTU?`} tip="X-axis shows sustained traffic (TPM). The PTU+Spillover line is flat while traffic fits within PTU, then rises as overflow spills to PAYG." onExpand={() => setExpandedChart(expandedChart === 'cost' ? null : 'cost')} helpContent="The hybrid PTU + Spillover model commits a fixed number of Provisioned Throughput Units (PTU) to cover your baseline traffic at a predictable monthly cost. When traffic stays within PTU capacity, the cost is flat regardless of how much of that capacity you use. When traffic spikes above PTU capacity, the excess tokens automatically spill over to standard pay-as-you-go (PAYG) pricing. This means you get cost predictability for steady-state traffic while still handling bursts without throttling. The break-even point is where the fixed PTU commitment starts saving money compared to running everything on PAYG. Note: the 'Your avg TPM' marker is a visual reference for orientation on the chart. The final recommendation is based on the full monthly workload shape, realized hybrid cost, and commitment-safety metrics — not solely on the average." />
+            <AnalyticalWidget
+              title={`Cost Explorer — Does my traffic justify ${analysis.charts.cost_curves.selected_ptu} PTU?`}
+              ariaLabel="Cost Explorer analytical widget"
+              headline={`${analysis.charts.cost_curves.selected_ptu} PTU`}
+              metricLabel="selected baseline"
+              context={RESERVATION_OPTION_LABELS[reservationType as keyof typeof RESERVATION_OPTION_LABELS] ?? reservationType}
+              status={analysis.cost_analysis.commitment_safety
+                ? {
+                    label: VERDICT_LABELS[analysis.cost_analysis.commitment_safety.safety_verdict] ?? analysis.cost_analysis.commitment_safety.safety_verdict,
+                    tone: analysis.cost_analysis.commitment_safety.safety_verdict === 'safe' ? 'positive' : analysis.cost_analysis.commitment_safety.safety_verdict === 'not_justified' ? 'negative' : 'warning',
+                  }
+                : undefined}
+              summary={`${analysis.charts.cost_curves.selected_ptu} PTU baseline under ${reservationType}. PAYG is ${formatCurrency(analysis.cost_analysis.payg.payg_total)} monthly and PTU plus spillover is ${formatCurrency(analysis.cost_analysis.hybrid.hybrid_total)} monthly.`}
+              tooltip={<InfoTip text="X-axis shows sustained traffic (TPM). PAYG includes observed cached-input pricing. PTU + Spillover stays flat within PTU capacity, then conservatively prices spillover as uncached because a separate target may have different cache locality. The green line can therefore rise slightly faster and create an upper break-even." />}
+              onExpand={() => setExpandedChart(expandedChart === 'cost' ? null : 'cost')}
+              expanded={expandedChart === 'cost'}
+              className={`wide-card cost-explorer-widget${expandedChart === 'cost' ? ' is-chart-expanded' : ''}`}
+              helpContent={`The hybrid PTU + Spillover model commits a fixed number of Provisioned Throughput Units (PTU) to cover your baseline traffic at a predictable monthly cost. When traffic stays within PTU capacity, the cost is flat regardless of how much of that capacity you use. When traffic spikes above PTU capacity, the excess tokens automatically spill over to standard pay-as-you-go (PAYG) pricing. ${analysis.charts.cost_curves.upper_break_even_tpm ? 'PTU is cheaper only between the lower and upper break-even boundaries; above the upper boundary, uncached spillover makes PAYG cheaper again.' : 'The break-even point is where the fixed PTU commitment starts saving money compared to running everything on PAYG.'} The final recommendation is based on the full monthly workload shape, realized hybrid cost, and commitment-safety metrics, not solely on the average.`}
+            >
+              <div className="cost-comparison-strip" role="list" aria-label="Cost Explorer economics summary">
+                <div className={`cost-comparison-fact${analysis.cost_analysis.payg.payg_total <= analysis.cost_analysis.hybrid.hybrid_total ? ' is-winner' : ''}`} role="listitem">
+                  <span>PAYG monthly</span>
+                  <strong>{formatCurrency(analysis.cost_analysis.payg.payg_total)}</strong>
+                </div>
+                <div className={`cost-comparison-fact${analysis.cost_analysis.hybrid.hybrid_total <= analysis.cost_analysis.payg.payg_total ? ' is-winner' : ''}`} role="listitem">
+                  <span>PTU + spillover monthly</span>
+                  <strong>{formatCurrency(analysis.cost_analysis.hybrid.hybrid_total)}</strong>
+                </div>
+                <div className="cost-comparison-fact" role="listitem">
+                  <span>Monthly difference</span>
+                  <strong>
+                    {analysis.cost_analysis.comparison.savings > 0
+                      ? `${formatCurrency(analysis.cost_analysis.comparison.savings)} saved`
+                      : analysis.cost_analysis.comparison.savings < 0
+                        ? `${formatCurrency(Math.abs(analysis.cost_analysis.comparison.savings))} more`
+                        : 'Cost neutral'}
+                  </strong>
+                </div>
+                <div className="cost-comparison-fact" role="listitem">
+                  <span>Break-even range</span>
+                  <strong>
+                    {analysis.cost_analysis.comparison.break_even_tpm
+                      ? `${Math.round(analysis.cost_analysis.comparison.break_even_tpm).toLocaleString()} TPM / ${analysis.cost_analysis.comparison.upper_break_even_tpm ? `${Math.round(analysis.cost_analysis.comparison.upper_break_even_tpm).toLocaleString()} TPM` : 'No upper bound'}`
+                      : 'No break-even'}
+                  </strong>
+                </div>
+              </div>
               {costCurveData.length === 0 ? <ChartEmpty height={300} /> : (<>
-              <CostCurveChart
-                sustainedTpm={analysis!.charts.cost_curves.sustained_tpm}
-                payg={analysis!.charts.cost_curves.payg_monthly}
-                hybrid={analysis!.charts.cost_curves.ptu_spill_monthly}
-                breakEvenTpm={analysis!.charts.cost_curves.break_even_tpm ?? null}
-                breakEvenCost={analysis!.charts.cost_curves.break_even_tpm != null ? analysis!.cost_analysis.hybrid.ptu_baseline_cost : null}
-                ptuCapacityTpm={analysis!.charts.cost_curves.ptu_capacity_tpm}
-                avgTpm={analysis!.charts.cost_curves.avg_tpm}
-                selectedPtu={analysis!.charts.cost_curves.selected_ptu}
-                paygAtAvg={analysis!.charts.cost_curves.payg_at_avg}
-                hybridAtAvg={analysis!.charts.cost_curves.hybrid_at_avg}
-                height={getChartHeight('cost', 300)}
-              />
+              <div
+                className="cost-explorer-chart-frame"
+                role="img"
+                aria-label="PAYG and PTU plus spillover monthly cost by sustained throughput"
+                aria-describedby="cost-explorer-chart-description"
+              >
+                <p className="visually-hidden" id="cost-explorer-chart-description">
+                  PAYG costs {formatCurrency(analysis.cost_analysis.payg.payg_total)} per month. PTU plus spillover costs {formatCurrency(analysis.cost_analysis.hybrid.hybrid_total)} per month. {analysis.cost_analysis.comparison.break_even_tpm
+                    ? `The lower break-even is ${Math.round(analysis.cost_analysis.comparison.break_even_tpm).toLocaleString()} TPM and ${analysis.cost_analysis.comparison.upper_break_even_tpm ? `the upper break-even is ${Math.round(analysis.cost_analysis.comparison.upper_break_even_tpm).toLocaleString()} TPM` : 'there is no upper break-even'}.`
+                    : 'There is no economic break-even in the modeled range.'}
+                </p>
+                <DeferredResult><CostCurveChart
+                  sustainedTpm={analysis.charts.cost_curves.sustained_tpm}
+                  payg={analysis.charts.cost_curves.payg_monthly}
+                  hybrid={analysis.charts.cost_curves.ptu_spill_monthly}
+                  breakEvenTpm={analysis.charts.cost_curves.break_even_tpm ?? null}
+                  upperBreakEvenTpm={analysis.charts.cost_curves.upper_break_even_tpm ?? null}
+                  breakEvenCost={analysis.charts.cost_curves.break_even_tpm != null ? analysis.cost_analysis.hybrid.ptu_baseline_cost : null}
+                  ptuFixedMonthly={analysis.cost_analysis.hybrid.ptu_baseline_cost}
+                  ptuCapacityTpm={analysis.charts.cost_curves.ptu_capacity_tpm}
+                  avgTpm={analysis.charts.cost_curves.avg_tpm}
+                  selectedPtu={analysis.charts.cost_curves.selected_ptu}
+                  paygAtAvg={analysis.charts.cost_curves.payg_at_avg}
+                  hybridAtAvg={analysis.charts.cost_curves.hybrid_at_avg}
+                  height={getChartHeight('cost', 300)}
+                /></DeferredResult>
+              </div>
               {breakEvenStatus && (
                 <div className={`break-even-callout tone-${breakEvenStatus.tone}`}>
                   {breakEvenStatus.text}
                 </div>
               )}
               </>)}
-            </article>
+            </AnalyticalWidget>
 
             {/* Layer E: Commitment Safety Strip */}
             {analysis.cost_analysis.commitment_safety && (
@@ -2556,25 +2982,6 @@ function App() {
             </div>
             )}
 
-            <div className="metrics-grid">
-              <article className={`metric-card${analysis.cost_analysis.payg.payg_total <= analysis.cost_analysis.hybrid.hybrid_total ? ' is-winner' : ''}`}>
-                <h3>PAYG Monthly <InfoTip text="Estimated monthly spend when all traffic remains on PAYG." /></h3>
-                <p>{formatCurrency(analysis.cost_analysis.payg.payg_total)}</p>
-              </article>
-              <article className={`metric-card${analysis.cost_analysis.hybrid.hybrid_total <= analysis.cost_analysis.payg.payg_total ? ' is-winner' : ''}`}>
-                <h3>PTU + Spillover <InfoTip text="PTU baseline commitment plus PAYG overflow above baseline capacity." /></h3>
-                <p>{formatCurrency(analysis.cost_analysis.hybrid.hybrid_total)}</p>
-              </article>
-              <article className="metric-card">
-                <h3>Difference <InfoTip text="Absolute monthly delta between PAYG and PTU+spillover strategies." /></h3>
-                <p>{differenceSummary}</p>
-              </article>
-              <article className="metric-card">
-                <h3>Break-even TPM <InfoTip text="Sustained TPM level where PTU+spillover and PAYG costs are equal." /></h3>
-                <p>{analysis.cost_analysis.comparison.break_even_tpm ? formatNumber(analysis.cost_analysis.comparison.break_even_tpm) : 'N/A'}</p>
-              </article>
-            </div>
-
             <article className="chart-card interpretation-card">
               <WidgetHeader title="Interpretation" tip="What this break-even point means for your current workload." />
               <p>{analysis.insights.break_even_message}</p>
@@ -2584,8 +2991,9 @@ function App() {
                 ))}
               </ul>
             </article>
+            </>)}
 
-            <h3 className="section-title section-title-with-icon stagger-7"><img src={RESULTS_ICON_URLS.scoring} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span className="stagger-7">Scoring Breakdown</span></h3>
+            <h3 className="section-title section-title-with-icon stagger-7"><span className="stagger-7">Scoring Breakdown</span></h3>
             <p className="section-note">Each dimension includes a confidence score and key metrics with context tooltips.</p>
             <div className="dimension-grid">
               {analysis.dimensions.map((dim) => (
@@ -2612,8 +3020,8 @@ function App() {
               ))}
             </div>
 
-            <article className="chart-card recommendation-context" data-testid="recommendation-context">
-              <h3 className="section-title-with-icon"><img src={RESULTS_ICON_URLS.rationale} alt="" className="section-title-icon" loading="lazy" decoding="async" /><span>Recommendation Rationale</span></h3>
+            <article className="chart-card recommendation-context" data-testid="recommendation-context" id="rationale">
+              <h3 className="section-title-with-icon"><span>Recommendation Rationale</span></h3>
               <div className="rationale-summary-grid">
                 <div className="rationale-summary-item">
                   <span>Recommendation <InfoTip text="Current decision based on workload and cost signals." /></span>
@@ -2629,7 +3037,7 @@ function App() {
                 </div>
                 <div className="rationale-summary-item">
                   <span>Break-even TPM <InfoTip text="Estimated TPM where PAYG and PTU + spillover costs become equal." /></span>
-                  <strong>{analysis.cost_analysis.comparison.break_even_tpm ? new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(analysis.cost_analysis.comparison.break_even_tpm) : 'N/A'}</strong>
+                  <strong>{analysis.cost_analysis.comparison.break_even_tpm ? `${formatNumber(analysis.cost_analysis.comparison.break_even_tpm)}${analysis.cost_analysis.comparison.upper_break_even_tpm ? ` - ${formatNumber(analysis.cost_analysis.comparison.upper_break_even_tpm)}` : ''}` : 'N/A'}</strong>
                 </div>
               </div>
               <div className="context-grid">
@@ -2670,7 +3078,7 @@ function App() {
             </button>
           </section>
         )}
-      </div>
+      </main>
     </div>
   )
 }

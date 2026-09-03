@@ -7,10 +7,10 @@ import pytest
 from ptu_advisor.cost.calculator import (
     calculate_break_even,
     calculate_break_even_for_fixed_ptu,
+    calculate_ptu_costs,
     calculate_spillover_cost,
     generate_cost_curves,
     generate_cost_curves_fixed_ptu,
-    calculate_ptu_costs,
 )
 
 
@@ -140,6 +140,13 @@ class TestCalculatePtuCosts:
     def test_unknown_model_falls_back_to_gpt4o(self):
         result = calculate_ptu_costs(peak_tpm=50_000, model="unknown-model")
         assert result["tpm_per_ptu"] == 2500
+
+    def test_uses_canonical_capacity_rates_and_month_length(self):
+        result = calculate_ptu_costs(peak_tpm=50_000, model="gpt-4.1")
+
+        assert result["tpm_per_ptu"] == 3000
+        assert result["global_monthly"] == result["global_ptu"] * 1.0 * 720
+        assert result["regional_monthly"] == result["regional_ptu"] * 2.0 * 720
 
 
 # ============================================================================

@@ -104,6 +104,9 @@ class ChartGenerator:
         # Throttling events
         if metrics.throttled_requests:
             charts.append(self._create_throttling_chart(metrics))
+
+        if (metrics.cache_match_rate or metrics.active_tokens) and metrics.prompt_tokens:
+            charts.append(self._create_prompt_cache_chart(metrics))
         
         # Dimension radar chart
         charts.append(self._create_dimension_radar(result))
@@ -273,6 +276,63 @@ class ChartGenerator:
             image_base64=self._fig_to_base64(fig),
             description="Shows HTTP 429 (throttled) responses over time. "
                         "High throttling indicates capacity pressure.",
+        )
+
+    def _create_prompt_cache_chart(self, metrics: DeploymentMetrics) -> Chart:
+        """Create prompt cache rate and active/cached token chart."""
+        cache = metrics.cache_match_rate
+        prompt = metrics.prompt_tokens
+        fig, left = plt.subplots(figsize=(12, 5))
+        dates = prompt.timestamps
+        if cache:
+            cache_lookup = dict(zip(cache.timestamps, cache.values))
+            rates = [min(1.0, max(0.0, float(cache_lookup.get(ts, 0.0)))) for ts in dates]
+        elif metrics.active_tokens and metrics.completion_tokens:
+            active_lookup = dict(zip(metrics.active_tokens.timestamps, metrics.active_tokens.values))
+            completion_lookup = dict(zip(metrics.completion_tokens.timestamps, metrics.completion_tokens.values))
+            rates = []
+            for ts, prompt_value in zip(dates, prompt.values):
+                rate = infer_cache_match_rate(
+                    prompt_value,
+                    completion_lookup.get(ts, 0.0),
+                    active_lookup.get(ts, prompt_value),
+                )
+                rates.append(rate if rate is not None else 0.0)
+        else:
+            rates = [0.0] * len(dates)
+        cached = [value * rate for value, rate in zip(prompt.values, rates)]
+        active = [value - cached_value for value, cached_value in zip(prompt.values, cached)]
+
+        left.stackplot(
+            dates,
+            active,
+            cached,
+            labels=["Active Prompt Tokens", "Cached Prompt Tokens"],
+            colors=[COLORS["primary"], COLORS["success"]],
+            alpha=0.65,
+        )
+        left.set_ylabel("Prompt Tokens")
+        left.set_xlabel("Date")
+        left.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+
+        right = left.twinx()
+        right.plot(dates, [rate * 100 for rate in rates], color=COLORS["warning"], linewidth=2)
+        right.set_ylim(0, 100)
+        right.set_ylabel("Cache Match Rate (%)")
+        left.set_title("Prompt Cache Benefit", fontsize=14, fontweight="bold")
+        left.legend(loc="upper left")
+        left.grid(True, alpha=0.3)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+
+        return Chart(
+            name="prompt_cache",
+            title="Prompt Cache Benefit",
+            image_base64=self._fig_to_base64(fig),
+            description=(
+                "Shows prompt tokens served from cache versus active prompt tokens. "
+                "Cached prompt tokens reduce modeled PTU utilization."
+            ),
         )
     
     def _create_dimension_radar(self, result: AnalysisResult) -> Chart:

@@ -113,7 +113,7 @@ class TestAnalysisConfig:
         assert c90.lookback_days == 90
 
     def test_invalid_aggregation_interval(self):
-        with pytest.raises(ValueError, match="must be 1, 5, 15, or 30"):
+        with pytest.raises(ValueError, match="must be 1, 5, 15, 30, or 60"):
             AnalysisConfig(
                 resource_group="rg",
                 workspace="ws",

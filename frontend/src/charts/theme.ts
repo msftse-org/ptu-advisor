@@ -1,4 +1,6 @@
-/** Dark theme configuration for PTU Advisor ECharts. */
+/** Dark operational theme configuration for PTU Advisor ECharts. */
+
+const CHART_DATA_FONT = 'SFMono-Regular, Cascadia Code, Roboto Mono, Consolas, monospace'
 
 /** Format a timestamp for tooltip headers: M/D HH:mm */
 export function fmtTooltipDate(iso: string): string {
@@ -79,7 +81,66 @@ export const DEPLOYMENT_COLORS = [
 ] as const
 
 /** Combined trace color (used for "Combined" series in consolidation charts). */
-export const COMBINED_TRACE_COLOR = '#e8ecf2'
+export const COMBINED_TRACE_COLOR = '#e5ebf5'
+
+export const COMPACT_CHART_MAX_WIDTH = 560
+
+export const COMPACT_CHART_OPTION = {
+  grid: {
+    left: 8,
+    right: 8,
+    top: 42,
+    bottom: 64,
+    containLabel: true,
+  },
+  legend: {
+    type: 'scroll' as const,
+    top: 0,
+    right: 8,
+    bottom: null,
+    left: 8,
+    itemGap: 12,
+    pageButtonItemGap: 4,
+    pageIconSize: 10,
+    pageTextStyle: { color: '#8592a6', fontSize: 10 },
+  },
+  xAxis: {
+    axisLabel: {
+      fontSize: 10,
+      hideOverlap: true,
+      showMinLabel: true,
+      showMaxLabel: true,
+    },
+  },
+} as const
+
+type CompactChartOverrides = {
+  grid?: Record<string, unknown>
+  legend?: Record<string, unknown>
+  xAxis?: Record<string, unknown> & { axisLabel?: Record<string, unknown> }
+  [key: string]: unknown
+}
+
+export function makeCompactChartMedia(overrides: CompactChartOverrides = {}) {
+  const { grid, legend, xAxis, ...rest } = overrides
+  return [{
+    query: { maxWidth: COMPACT_CHART_MAX_WIDTH },
+    option: {
+      ...COMPACT_CHART_OPTION,
+      ...rest,
+      grid: { ...COMPACT_CHART_OPTION.grid, ...grid },
+      legend: { ...COMPACT_CHART_OPTION.legend, ...legend },
+      xAxis: {
+        ...COMPACT_CHART_OPTION.xAxis,
+        ...xAxis,
+        axisLabel: {
+          ...COMPACT_CHART_OPTION.xAxis.axisLabel,
+          ...xAxis?.axisLabel,
+        },
+      },
+    },
+  }]
+}
 
 /**
  * Get the deployment color for a given index (wraps around palette).
@@ -100,10 +161,10 @@ export function hexToRgba(hex: string, alpha: number): string {
 export const PTU_CHART_THEME = {
   color: [CHART_COLORS.primary, CHART_COLORS.success, CHART_COLORS.warning, CHART_COLORS.danger, CHART_COLORS.accent, CHART_COLORS.secondary],
   backgroundColor: 'transparent',
-  textStyle: { color: '#a0aec0', fontFamily: 'Inter, system-ui, sans-serif', fontSize: 11 },
-  title: { textStyle: { color: '#e8ecf2' } },
+  textStyle: { color: '#9aa8bc', fontFamily: 'Avenir Next, Segoe UI, sans-serif', fontSize: 11 },
+  title: { textStyle: { color: '#edf2f7' } },
   legend: {
-    textStyle: { color: '#b5becc', fontSize: 11 },
+    textStyle: { color: '#b4bfd0', fontSize: 11 },
     icon: 'roundRect',
     itemWidth: 12,
     itemHeight: 3,
@@ -113,44 +174,52 @@ export const PTU_CHART_THEME = {
     right: 16,
     top: 12,
     bottom: 60,
-    containLabel: false,
+    containLabel: true,
   },
   categoryAxis: {
     axisLine: { show: false },
     axisTick: { show: false },
-    splitLine: { lineStyle: { color: 'rgba(120,140,170,0.12)', type: 'dashed' as const } },
-    axisLabel: { color: '#8f9ec4', fontSize: 11 },
+    splitLine: { lineStyle: { color: 'rgba(151,168,194,0.10)', type: 'dashed' as const } },
+    axisLabel: { color: '#8592a6', fontFamily: CHART_DATA_FONT, fontSize: 11 },
   },
   valueAxis: {
     axisLine: { show: false },
     axisTick: { show: false },
-    splitLine: { lineStyle: { color: 'rgba(120,140,170,0.12)', type: 'dashed' as const } },
-    axisLabel: { color: '#8f9ec4', fontSize: 10 },
+    splitLine: { lineStyle: { color: 'rgba(151,168,194,0.10)', type: 'dashed' as const } },
+    axisLabel: { color: '#8592a6', fontFamily: CHART_DATA_FONT, fontSize: 10 },
   },
   dataZoom: [{
     type: 'slider' as const,
-    backgroundColor: 'rgba(26, 32, 44, 0.8)',
+    backgroundColor: '#171e2b',
     fillerColor: 'rgba(91, 127, 255, 0.15)',
-    borderColor: '#2d3748',
+    borderColor: '#344158',
     handleStyle: { color: '#5b7fff', borderColor: '#5b7fff' },
     dataBackground: {
-      lineStyle: { color: '#4a5568', width: 1 },
-      areaStyle: { color: 'rgba(74, 85, 104, 0.3)' },
+      lineStyle: { color: '#69778c', width: 1 },
+      areaStyle: { color: 'rgba(105, 119, 140, 0.22)' },
     },
     selectedDataBackground: {
       lineStyle: { color: '#5b7fff' },
       areaStyle: { color: 'rgba(91, 127, 255, 0.15)' },
     },
-    textStyle: { color: '#a0aec0', fontSize: 10 },
+    textStyle: { color: '#9aa8bc', fontSize: 10 },
     moveHandleSize: 5,
     height: 28,
     bottom: 8,
   }],
   tooltip: {
-    backgroundColor: 'rgba(8, 14, 26, 0.96)',
-    borderColor: 'rgba(91, 127, 255, 0.32)',
+    confine: true,
+    backgroundColor: 'rgba(8, 12, 18, 0.98)',
+    borderColor: '#3b4a63',
     borderWidth: 1,
-    textStyle: { color: '#e8ecf2', fontSize: 12 },
-    extraCssText: 'border-radius: 10px; box-shadow: 0 4px 20px rgba(0,0,0,0.3); z-index: 9999; pointer-events: none;',
+    padding: [10, 12] as [number, number],
+    textStyle: {
+      color: '#e8ecf2',
+      fontFamily: 'Segoe UI Variable Text, Avenir Next, sans-serif',
+      fontSize: 12,
+      lineHeight: 19,
+    },
+    extraCssText: 'padding: 10px 12px; border-radius: 8px; box-shadow: 0 18px 48px rgba(0,0,0,0.42), 0 4px 12px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.055); backdrop-filter: blur(18px); z-index: 9999; pointer-events: none; font-variant-numeric: tabular-nums;',
   },
+  media: makeCompactChartMedia(),
 } as const

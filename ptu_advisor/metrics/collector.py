@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
+import logging
+from math import isfinite
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,7 @@ from ptu_advisor.metrics.models import (
     DeploymentMetrics,
     MetricName,
     TimeSeries,
+    infer_cache_match_rate,
 )
 
 
@@ -170,6 +172,7 @@ class MetricsCollector:
                 (MetricName.TIME_TO_FIRST_BYTE, AggregationType.AVERAGE, "time_to_first_byte_p50"),
                 (MetricName.PTU_UTILIZATION, AggregationType.AVERAGE, "ptu_utilization"),
                 (MetricName.CACHE_MATCH_RATE, AggregationType.AVERAGE, "cache_match_rate"),
+                (MetricName.ACTIVE_TOKENS, AggregationType.TOTAL, "active_tokens"),
             ]
             
             # Collect each metric
@@ -296,6 +299,7 @@ class MetricsCollector:
                     "completion_tokens",
                     "tokens_per_minute",
                     "throttled_requests",
+                    "active_tokens",
                 ):
                     ts: Optional[TimeSeries] = getattr(metrics, attr, None)
                     if ts is not None:
@@ -309,6 +313,12 @@ class MetricsCollector:
                                 unit=ts.unit,
                             ),
                         )
+
+            metrics.active_tokens = self._validate_active_tokens(
+                metrics.active_tokens,
+                metrics.prompt_tokens,
+                metrics.completion_tokens,
+            )
 
             # ── Successful requests (derived) ──
             # SuccessfulCalls is account-level only (no ModelDeploymentName
@@ -381,6 +391,7 @@ class MetricsCollector:
                 name=deployment.name,
                 model=props.model.name if props and props.model else "unknown",
                 sku_type=deployment.sku.name if deployment.sku else "unknown",
+                model_version=props.model.version if props and props.model else None,
                 sku_capacity=deployment.sku.capacity if deployment.sku else None,
             )
             
@@ -449,6 +460,7 @@ class MetricsCollector:
             # (e.g. account-wide queries across deployments/dimensions).
             values_by_timestamp: Dict[datetime, List[float]] = defaultdict(list)
             series_count = 0
+            invalid_count = 0
             
             for metric in response.value:
                 for ts in metric.timeseries:
@@ -456,6 +468,18 @@ class MetricsCollector:
                     for data_point in ts.data:
                         if data_point.time_stamp:
                             value = self._get_aggregated_value(data_point, aggregation)
+                            if metric_name == MetricName.CACHE_MATCH_RATE and (
+                                value is None or not 0.0 <= float(value) <= 100.0
+                            ):
+                                invalid_count += 1
+                                continue
+                            if metric_name == MetricName.ACTIVE_TOKENS and (
+                                value is None
+                                or not isfinite(float(value))
+                                or float(value) < 0.0
+                            ):
+                                invalid_count += 1
+                                continue
                             values_by_timestamp[data_point.time_stamp].append(
                                 value if value is not None else 0.0
                             )
@@ -465,8 +489,12 @@ class MetricsCollector:
                     metric_name=metric_name.value,
                     aggregation=aggregation,
                     filter_str=filter_str,
-                    status="missing",
-                    message="No data points returned by Azure Monitor",
+                    status="invalid" if invalid_count else "missing",
+                    message=(
+                        f"Rejected {invalid_count} invalid data point(s)"
+                        if invalid_count
+                        else "No data points returned by Azure Monitor"
+                    ),
                 )
                 return None
 
@@ -495,12 +523,28 @@ class MetricsCollector:
                 series_count=series_count,
                 point_count=len(ordered_timestamps),
             )
+            if invalid_count:
+                self._record_diagnostic(
+                    metric_name=metric_name.value,
+                    aggregation=aggregation,
+                    filter_str=filter_str,
+                    status="invalid",
+                    message=f"Rejected {invalid_count} invalid data point(s)",
+                    series_count=series_count,
+                    point_count=len(ordered_timestamps),
+                )
             
+            if metric_name == MetricName.CACHE_MATCH_RATE:
+                ordered_values = [value / 100.0 for value in ordered_values]
+                unit = "Ratio"
+            else:
+                unit = response.value[0].unit if response.value else ""
+
             return TimeSeries(
                 timestamps=ordered_timestamps,
                 values=ordered_values,
                 metric_name=metric_name.value,
-                unit=response.value[0].unit if response.value else "",
+                unit=unit,
             )
             
         except Exception as e:
@@ -514,6 +558,61 @@ class MetricsCollector:
             if self.config.verbose:
                 print(f"Failed to collect metric {metric_name.value}: {e}")
             return None
+
+    def _validate_active_tokens(
+        self,
+        active_tokens: Optional[TimeSeries],
+        prompt_tokens: Optional[TimeSeries],
+        completion_tokens: Optional[TimeSeries],
+    ) -> Optional[TimeSeries]:
+        """Keep only aligned ActiveTokens points within documented bounds."""
+        if active_tokens is None:
+            return None
+        if prompt_tokens is None or completion_tokens is None:
+            self._record_diagnostic(
+                metric_name=MetricName.ACTIVE_TOKENS.value,
+                aggregation=AggregationType.TOTAL,
+                filter_str=None,
+                status="invalid",
+                message="ActiveTokens requires aligned prompt and completion token metrics",
+            )
+            return None
+
+        prompt_lookup = dict(zip(prompt_tokens.timestamps, prompt_tokens.values))
+        completion_lookup = dict(zip(completion_tokens.timestamps, completion_tokens.values))
+        timestamps: List[datetime] = []
+        values: List[float] = []
+        invalid_count = 0
+        for timestamp, active in zip(active_tokens.timestamps, active_tokens.values):
+            prompt = prompt_lookup.get(timestamp)
+            completion = completion_lookup.get(timestamp)
+            if (
+                prompt is None
+                or completion is None
+                or infer_cache_match_rate(prompt, completion, active) is None
+            ):
+                invalid_count += 1
+                continue
+            timestamps.append(timestamp)
+            values.append(float(active))
+
+        if invalid_count:
+            self._record_diagnostic(
+                metric_name=MetricName.ACTIVE_TOKENS.value,
+                aggregation=AggregationType.TOTAL,
+                filter_str=None,
+                status="invalid",
+                message=f"Rejected {invalid_count} unaligned or out-of-bounds data point(s)",
+                point_count=len(timestamps),
+            )
+        if not timestamps:
+            return None
+        return TimeSeries(
+            timestamps=timestamps,
+            values=values,
+            metric_name=active_tokens.metric_name,
+            unit=active_tokens.unit,
+        )
 
     def _list_available_metrics(self, resource_id: str) -> List[str]:
         """Query Azure Monitor for the metric definitions available on *resource_id*.
@@ -639,6 +738,7 @@ def list_workspace_deployments(
                     name=deployment.name,
                     model=props.model.name if props and props.model else "unknown",
                     sku_type=deployment.sku.name if deployment.sku else "unknown",
+                    model_version=props.model.version if props and props.model else None,
                     sku_capacity=deployment.sku.capacity if deployment.sku else None,
                 )
             )

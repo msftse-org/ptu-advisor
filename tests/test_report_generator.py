@@ -1,12 +1,12 @@
 """Tests for report generator: formatting, metrics summary, PTU estimates."""
 
+import re
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+
 import pytest
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from unittest.mock import patch
 
 from ptu_advisor.config import AnalysisConfig
-from ptu_advisor.report.generator import ReportGenerator
 from ptu_advisor.metrics.models import (
     AnalysisResult,
     DeploymentInfo,
@@ -17,7 +17,7 @@ from ptu_advisor.metrics.models import (
     Recommendation,
     TimeSeries,
 )
-
+from ptu_advisor.report.generator import ReportGenerator
 
 # ============================================================================
 # Fixtures
@@ -61,6 +61,7 @@ def sample_metrics(sample_timestamps):
         time_to_first_byte_p50=TimeSeries(sample_timestamps, [500.0] * 200, "p50"),
         time_to_first_byte_p95=TimeSeries(sample_timestamps, [2000.0] * 200, "p95"),
         time_to_first_byte_p99=TimeSeries(sample_timestamps, [4000.0] * 200, "p99"),
+        cache_match_rate=TimeSeries(sample_timestamps, [0.6] * 200, "cache", unit="Ratio"),
     )
 
 
@@ -166,6 +167,15 @@ class TestMarkdownToHtml:
         assert result.startswith("<p>")
         assert result.endswith("</p>")
 
+    def test_escapes_raw_html_before_markdown_conversion(self):
+        result = ReportGenerator._markdown_to_html(
+            '<script>alert("xss")</script> **safe emphasis**'
+        )
+
+        assert "<script>" not in result
+        assert "&lt;script&gt;" in result
+        assert "<strong>safe emphasis</strong>" in result
+
 
 # ============================================================================
 # Metrics Summary
@@ -186,6 +196,7 @@ class TestGetMetricsSummary:
             "p50_min", "p50_max", "p95_min", "p95_max",
             "p99_latency", "p99_min", "p99_max", "latency_variance",
             "active_percentage", "non_zero_hours", "utilization",
+            "cache_match_rate", "cached_prompt_tokens", "active_prompt_tokens",
         ]
         for key in expected_keys:
             assert key in summary, f"Missing key: {key}"
@@ -240,6 +251,12 @@ class TestGetMetricsSummary:
         )
         summary = generator._get_metrics_summary(metrics)
         assert summary["sku_type"] == "ProvisionedManaged"
+
+    def test_cache_summary_uses_prompt_weighted_values(self, generator, sample_metrics):
+        summary = generator._get_metrics_summary(sample_metrics)
+        assert summary["cache_match_rate"] == pytest.approx(0.6)
+        assert summary["cached_prompt_tokens"] == pytest.approx(216_000_000.0)
+        assert summary["active_prompt_tokens"] == pytest.approx(144_000_000.0)
 
 
 # ============================================================================
@@ -311,6 +328,23 @@ class TestCalculatePtuEstimates:
         assert est["global_monthly_cost"] > 0
         assert est["payg_monthly_estimate"] > 0
 
+    def test_cache_reduces_cli_report_sizing_and_payg_cost(self, generator, sample_metrics):
+        cached = generator._calculate_ptu_estimates(sample_metrics)
+        sample_metrics.cache_match_rate = None
+        uncached = generator._calculate_ptu_estimates(sample_metrics)
+
+        assert cached["cache_match_rate"] == pytest.approx(0.6)
+        assert cached["global_ptu_recommended"] < uncached["global_ptu_recommended"]
+        assert cached["payg_monthly_estimate"] < uncached["payg_monthly_estimate"]
+
+    def test_report_ptu_sizing_matches_cache_impact(self, generator, sample_metrics):
+        est = generator._calculate_ptu_estimates(sample_metrics)
+
+        assert est["global_ptu_recommended"] == est["cache_aware_recommended_ptu"]
+        assert est["no_cache_recommended_ptu"] - est["global_ptu_recommended"] == est[
+            "ptu_avoided"
+        ]
+
 
 # ============================================================================
 # Recommendation CSS Classes
@@ -353,6 +387,26 @@ class TestFullReportGeneration:
         assert "test-deploy" in content
         assert "gpt-4o" in content
 
+    def test_borderline_recommendation_uses_warning_guidance_card(
+        self, generator, sample_metrics, sample_result, tmp_path
+    ):
+        output_path = tmp_path / "borderline_report.html"
+        generator.generate(
+            metrics=sample_metrics,
+            result=replace(sample_result, recommendation=Recommendation.BORDERLINE),
+            charts=[],
+            output_path=output_path,
+        )
+
+        content = output_path.read_text()
+        match = re.search(
+            r'<div class="dimension-card ([^"]+)">\s*<h4>Which PTU Type',
+            content,
+        )
+
+        assert match is not None
+        assert match.group(1) == "warning"
+
     def test_generates_default_output_path(self, generator, sample_metrics, sample_result):
         result_path = generator.generate(
             metrics=sample_metrics,
@@ -373,6 +427,37 @@ class TestFullReportGeneration:
             output_path=output_path,
             llm_analysis="## LLM Analysis\nThis is an AI-generated insight.",
         )
-        content = result_path.read_text()
         # The template should include it if it handles llm_analysis
         assert result_path.exists()
+
+    def test_report_includes_prompt_cache_benefit(self, generator, sample_metrics, sample_result, tmp_path):
+        output_path = tmp_path / "cache_report.html"
+        result_path = generator.generate(
+            metrics=sample_metrics,
+            result=sample_result,
+            charts=[],
+            output_path=output_path,
+        )
+
+        content = result_path.read_text()
+        assert "Prompt Cache Benefit" in content
+        assert "60.0%" in content
+        assert "fixed PTU" in content
+        assert "No-cache sizing" in content
+        assert "cache-aware sizing" in content
+
+    def test_report_discloses_unavailable_cache(self, generator, sample_metrics, sample_result, tmp_path):
+        sample_metrics.cache_match_rate = None
+        sample_metrics.active_tokens = None
+        output_path = tmp_path / "cache_unavailable_report.html"
+
+        result_path = generator.generate(
+            metrics=sample_metrics,
+            result=sample_result,
+            charts=[],
+            output_path=output_path,
+        )
+
+        content = result_path.read_text()
+        assert "Prompt Cache Benefit" in content
+        assert "Cache telemetry was unavailable" in content

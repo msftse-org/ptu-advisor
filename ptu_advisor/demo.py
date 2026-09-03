@@ -570,7 +570,7 @@ def generate_demo_metrics(
     end_time = datetime.now(timezone.utc)
     start_time = end_time - timedelta(days=lookback_days)
 
-    granularity = granularity_minutes if granularity_minutes in (1, 5, 15, 30) else 5
+    granularity = granularity_minutes if granularity_minutes in (1, 5, 15, 30, 60) else 5
     point_count = max(2, int((lookback_days * 24 * 60) / granularity))
     timestamps = [start_time + timedelta(minutes=i * granularity) for i in range(point_count)]
 
@@ -729,11 +729,11 @@ def generate_consolidation_demo_metrics(
         # generate_demo_metrics can look it up. We reuse the base scenario
         # key but swap the config, then restore afterward.
         # Instead, we just call the internal generators directly:
-        end_time = datetime.now(timezone.utc)
-        start_time = end_time - timedelta(days=lookback_days)
-        granularity = granularity_minutes if granularity_minutes in (1, 5, 15, 30) else 5
-        point_count = max(2, int((lookback_days * 24 * 60) / granularity))
-        timestamps = [start_time + timedelta(minutes=i * granularity) for i in range(point_count)]
+        # All siblings share the exact same buckets so consolidation can use
+        # zero-fill semantics for genuinely missing intervals.
+        start_time = dep_a.start_time
+        end_time = dep_a.end_time
+        timestamps = list(dep_a.timestamps)
 
         tpm_values = _generate_tpm_series(sibling_config, timestamps)
         rpm_values = _generate_rpm_series(sibling_config, timestamps)

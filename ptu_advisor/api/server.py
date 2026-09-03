@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional
+import logging
+import os
+from contextlib import asynccontextmanager
+from datetime import datetime
+from typing import Any, AsyncIterator, Dict, List, Literal, Optional
 
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+from starlette.responses import JSONResponse
 
 from ptu_advisor.analysis.engine import DecisionEngine
 from ptu_advisor.auth import get_azure_credential
@@ -16,13 +20,16 @@ from ptu_advisor.config import (
     get_model_config,
     get_model_family,
 )
+from ptu_advisor.cost.cache import (
+    build_cache_impact,
+    calculate_cache_aware_spillover,
+    generate_cache_aware_cost_curves,
+)
 from ptu_advisor.cost.calculator import (
-    calculate_break_even,
     calculate_break_even_for_fixed_ptu,
     calculate_spillover_cost,
-    generate_cost_curves,
-    generate_cost_curves_fixed_ptu,
 )
+from ptu_advisor.cost.price_resolver import get_pricing_resolver
 from ptu_advisor.cost.pricing import (
     DEPLOYMENT_TYPE_CONFIGS,
     REGION_CONFIGS,
@@ -31,17 +38,11 @@ from ptu_advisor.cost.pricing import (
     get_region_config,
     normalize_region,
 )
-from ptu_advisor.cost.price_resolver import PricingResolver, get_pricing_resolver
 from ptu_advisor.demo import (
-    DemoScenario,
     FOCUS_TOPICS,
-    generate_demo_metrics,
+    DemoScenario,
     generate_consolidation_demo_metrics,
-)
-from ptu_advisor.metrics.merge import (
-    compute_individual_payg_cost,
-    merge_deployment_metrics,
-    serialize_per_deployment_charts,
+    generate_demo_metrics,
 )
 from ptu_advisor.discovery import (
     authenticate,
@@ -51,7 +52,15 @@ from ptu_advisor.discovery import (
     list_subscriptions,
 )
 from ptu_advisor.metrics.collector import MetricsCollector
+from ptu_advisor.metrics.merge import (
+    compute_individual_payg_cost,
+    merge_deployment_metrics,
+    serialize_per_deployment_charts,
+)
 from ptu_advisor.metrics.models import DeploymentMetrics, TimeSeries
+
+
+logger = logging.getLogger(__name__)
 
 
 class AnalyzeRequest(BaseModel):
@@ -69,9 +78,10 @@ class AnalyzeRequest(BaseModel):
     reservation_type: Literal[
         "Hourly — No Commitment",
         "Monthly Commitment (Estimated 64% off)",
+        "1-Year Commitment (Estimated 69% off)",
     ] = "Monthly Commitment (Estimated 64% off)"
-    baseline_percentile: Optional[float] = None
-    baseline_ptu: Optional[int] = None
+    baseline_percentile: Optional[float] = Field(default=None, ge=0, le=95)
+    baseline_ptu: Optional[int] = Field(default=None, ge=0)
     region: str = "eastus"
     deployment_type: Literal["global", "data_zone", "regional"] = "global"
     include_throttle: bool = False
@@ -79,6 +89,17 @@ class AnalyzeRequest(BaseModel):
     payg_input_rate_override: Optional[float] = Field(default=None, ge=0)
     payg_output_rate_override: Optional[float] = Field(default=None, ge=0)
     ptu_hourly_rate_override: Optional[float] = Field(default=None, ge=0)
+    cache_mode: Literal["auto", "disabled", "override"] = "auto"
+    cache_match_rate_override_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    cached_input_rate_override: Optional[float] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_cache_override(self) -> "AnalyzeRequest":
+        if self.cache_mode == "override" and self.cache_match_rate_override_pct is None:
+            raise ValueError(
+                "cache_match_rate_override_pct is required when cache_mode is override"
+            )
+        return self
 
 
 class TokenSnapshotRequest(BaseModel):
@@ -99,6 +120,16 @@ class TokenSnapshotRequest(BaseModel):
     resource_group: Optional[str] = None
     workspace: Optional[str] = None
     deployment: Optional[str] = None
+    cache_mode: Literal["auto", "disabled", "override"] = "auto"
+    cache_match_rate_override_pct: Optional[float] = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def validate_cache_override(self) -> "TokenSnapshotRequest":
+        if self.cache_mode == "override" and self.cache_match_rate_override_pct is None:
+            raise ValueError(
+                "cache_match_rate_override_pct is required when cache_mode is override"
+            )
+        return self
 
 
 class AnalyzeResponse(BaseModel):
@@ -151,6 +182,17 @@ class ConsolidationRequest(BaseModel):
     payg_input_rate_override: Optional[float] = Field(default=None, ge=0)
     payg_output_rate_override: Optional[float] = Field(default=None, ge=0)
     ptu_hourly_rate_override: Optional[float] = Field(default=None, ge=0)
+    cache_mode: Literal["auto", "disabled", "override"] = "auto"
+    cache_match_rate_override_pct: Optional[float] = Field(default=None, ge=0, le=100)
+    cached_input_rate_override: Optional[float] = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_cache_override(self) -> "ConsolidationRequest":
+        if self.cache_mode == "override" and self.cache_match_rate_override_pct is None:
+            raise ValueError(
+                "cache_match_rate_override_pct is required when cache_mode is override"
+            )
+        return self
 
 
 class IndividualDeploymentSummary(BaseModel):
@@ -220,23 +262,57 @@ def _pricing_terms(reservation_type: str) -> Dict[str, Any]:
     return {"discount_factor": 1.0, "discount_pct": 0}
 
 
-app = FastAPI(title="PTU Advisor API", version="0.1.0")
+@asynccontextmanager
+async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    _startup_warm_pricing_cache()
+    try:
+        yield
+    finally:
+        _shutdown_pricing_cache()
+
+
+app = FastAPI(title="PTU Advisor API", version="0.1.0", lifespan=_app_lifespan)
+
+
+@app.middleware("http")
+async def require_api_authentication(request: Request, call_next):
+    auth_mode = os.getenv("PTU_ADVISOR_AUTH_MODE", "local").strip().lower()
+    is_protected_api = request.url.path.startswith("/api/") and request.url.path != "/api/health"
+
+    if auth_mode not in {"local", "easy_auth"}:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Server authentication mode is invalid."},
+        )
+    if auth_mode == "easy_auth" and is_protected_api:
+        if not os.getenv("WEBSITE_INSTANCE_ID"):
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Easy Auth mode requires Azure App Service hosting."},
+            )
+        if not request.headers.get("X-MS-CLIENT-PRINCIPAL-ID"):
+            return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+
+    return await call_next(request)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 
-@app.on_event("startup")
 def _startup_warm_pricing_cache() -> None:
-    """Pre-warm popular model/region pricing combos and start the periodic refresh."""
+    """Start pricing refresh off the application readiness path."""
     resolver = get_pricing_resolver()
-    resolver.warm_cache()
     resolver.start_background_warmup()
+
+
+def _shutdown_pricing_cache() -> None:
+    """Stop pricing refresh during application shutdown."""
+    get_pricing_resolver().stop_background_warmup()
 
 
 def _pick_demo_scenario(focus_topic: str) -> DemoScenario:
@@ -296,6 +372,7 @@ def _filter_metrics_by_window(
         start_time=normalized_start or metrics.start_time,
         end_time=normalized_end or metrics.end_time,
         deployment_info=metrics.deployment_info,
+        cache_coverage_pct=metrics.cache_coverage_pct,
     )
 
     for attr_name in [
@@ -309,6 +386,8 @@ def _filter_metrics_by_window(
         "time_to_first_byte_p95",
         "time_to_first_byte_p99",
         "ptu_utilization",
+        "cache_match_rate",
+        "active_tokens",
     ]:
         series = getattr(metrics, attr_name)
         setattr(
@@ -332,20 +411,40 @@ def _aggregate_daily_costs(
     completion_values: List[float],
     payg_input_rate: float,
     payg_output_rate: float,
+    cached_prompt_values: Optional[List[float]] = None,
+    payg_cached_input_rate: Optional[float] = None,
+    interval_minutes: int = 1,
 ) -> Dict[str, Any]:
     """Aggregate interval-level token data into daily cost bars."""
     from collections import defaultdict
 
     daily_input: Dict[str, float] = defaultdict(float)
+    daily_cached_input: Dict[str, float] = defaultdict(float)
     daily_output: Dict[str, float] = defaultdict(float)
 
-    for ts, p_tok, c_tok in zip(timestamps, prompt_values, completion_values):
+    interval_minutes = max(1, interval_minutes)
+    cached_values = cached_prompt_values or [0.0] * len(timestamps)
+    cached_rate = (
+        payg_cached_input_rate if payg_cached_input_rate is not None else payg_input_rate
+    )
+    for ts, p_tok, c_tok, cached_tok in zip(
+        timestamps, prompt_values, completion_values, cached_values
+    ):
         day = ts[:10]  # "2026-03-01T14:00:00Z" -> "2026-03-01"
-        daily_input[day] += p_tok
-        daily_output[day] += c_tok
+        bounded_cached = min(float(p_tok), max(0.0, float(cached_tok)))
+        daily_input[day] += (float(p_tok) - bounded_cached) * interval_minutes
+        daily_cached_input[day] += bounded_cached * interval_minutes
+        daily_output[day] += c_tok * interval_minutes
 
     dates = sorted(daily_input.keys())
-    input_costs = [(daily_input[d] / 1_000_000) * payg_input_rate for d in dates]
+    input_costs = [
+        (daily_input[d] / 1_000_000) * payg_input_rate
+        + (daily_cached_input[d] / 1_000_000) * cached_rate
+        for d in dates
+    ]
+    cached_input_costs = [
+        (daily_cached_input[d] / 1_000_000) * cached_rate for d in dates
+    ]
     output_costs = [(daily_output[d] / 1_000_000) * payg_output_rate for d in dates]
     total_costs = [ic + oc for ic, oc in zip(input_costs, output_costs)]
     avg_daily = sum(total_costs) / len(total_costs) if total_costs else 0.0
@@ -353,10 +452,22 @@ def _aggregate_daily_costs(
     return {
         "dates": dates,
         "input_cost": [round(v, 2) for v in input_costs],
+        "cached_input_cost": [round(v, 2) for v in cached_input_costs],
         "output_cost": [round(v, 2) for v in output_costs],
         "total_cost": [round(v, 2) for v in total_costs],
         "avg_daily_cost": round(avg_daily, 2),
     }
+
+
+def _infer_interval_minutes(series: Optional[TimeSeries]) -> int:
+    if series is None or len(series.timestamps) < 2:
+        return 1
+    deltas = [
+        (current - previous).total_seconds() / 60.0
+        for previous, current in zip(series.timestamps, series.timestamps[1:])
+        if current > previous
+    ]
+    return max(1, int(round(float(np.median(deltas))))) if deltas else 1
 
 
 def _build_formula_blocks(
@@ -385,6 +496,11 @@ def _build_formula_blocks(
     input_tpm_per_ptu: int = 2500,
     model_output_multiplier: int = 3,
     pricing_source: str = "",
+    avg_active_prompt_tpm: float = 0.0,
+    avg_cached_prompt_tpm: float = 0.0,
+    avg_completion_tpm: float = 0.0,
+    payg_cached_input_rate: float = 0.0,
+    cache_source: str = "unavailable",
 ) -> Dict[str, str]:
     """Build human-readable formula strings for PAYG and hybrid cost breakdowns."""
     avg_daily_overflow = avg_spillover_tpm * 1440  # tokens/day
@@ -402,6 +518,12 @@ def _build_formula_blocks(
         f"blended_rate = ${payg_input_rate:.2f} × {(1 - output_ratio) * 100:.0f}% input + ${payg_output_rate:.2f} × {output_ratio * 100:.0f}% output = ${payg_blended_rate:.2f}/1M tokens{rate_tag}",
         f"payg_cost = {monthly_tokens:,.0f} ÷ 1M × ${payg_blended_rate:.2f} = ${payg_base:,.0f}/month",
     ]
+    if cache_source not in ("unavailable", "disabled"):
+        payg_lines[2:2] = [
+            f"active_input_cost = {avg_active_prompt_tpm:,.0f} TPM × 43,200 min ÷ 1M × ${payg_input_rate:.2f}",
+            f"cached_input_cost = {avg_cached_prompt_tpm:,.0f} TPM × 43,200 min ÷ 1M × ${payg_cached_input_rate:.2f}",
+            f"output_cost = {avg_completion_tpm:,.0f} TPM × 43,200 min ÷ 1M × ${payg_output_rate:.2f}",
+        ]
     if include_throttle:
         payg_lines.append(f"throttle_rate = {throttle_rate_pct:.1f}%")
         payg_lines.append(f"throttle_impact = ${throttle_impact:,.0f}/month")
@@ -417,6 +539,7 @@ def _build_formula_blocks(
         f"effective_mult = {(1 - output_ratio) * 100:.0f}% input + {output_ratio * 100:.0f}% output × {model_output_multiplier} = {effective_mult:.2f}×",
         f"capacity_per_ptu = {input_tpm_per_ptu:,} ÷ {effective_mult:.2f} = {effective_capacity:,.0f} raw TPM/PTU",
         f"ptu_cost = {baseline_ptu} PTU × ${ptu_monthly_rate:,.2f}/PTU/month = ${ptu_baseline_cost:,.0f}/month{rate_tag}",
+        "cache_note = cached prompt tokens reduce utilization; fixed PTU cost changes only when selected PTU count changes",
     ]
     if avg_spillover_tpm > 0:
         hybrid_lines += [
@@ -448,7 +571,11 @@ def _serialize_analysis(
     payg_input_rate_override: Optional[float] = None,
     payg_output_rate_override: Optional[float] = None,
     ptu_hourly_rate_override: Optional[float] = None,
+    cache_mode: Literal["auto", "disabled", "override"] = "auto",
+    cache_match_rate_override_pct: Optional[float] = None,
+    cached_input_rate_override: Optional[float] = None,
 ) -> AnalyzeResponse:
+    requested_baseline_ptu = baseline_ptu
     tpm = metrics.tokens_per_minute
     throttled = metrics.throttled_requests
     prompt = metrics.prompt_tokens
@@ -459,6 +586,8 @@ def _serialize_analysis(
     p95 = metrics.time_to_first_byte_p95
     p99 = metrics.time_to_first_byte_p99
     cache_match = metrics.cache_match_rate
+    active_tokens = metrics.active_tokens
+    metrics_interval_minutes = _infer_interval_minutes(prompt or tpm)
 
     lookback_days = max(1, lookback_days)
     avg_tpm = float(tpm.mean) if tpm else 0.0
@@ -469,28 +598,122 @@ def _serialize_analysis(
     avg_daily_tokens = avg_tpm * 1440  # tokens per minute × minutes per day
     total_tokens = avg_daily_tokens * max(1, lookback_days)
     monthly_tokens = avg_daily_tokens * 30
+    has_cost_data = monthly_tokens > 0
 
     # ── Resolve pricing via layered strategy ─────────────────────────────
     resolver = get_pricing_resolver()
+    pricing_model_name = metrics.model_name
+    if metrics.deployment_info and metrics.deployment_info.model_version:
+        pricing_model_name = f"{metrics.model_name}-{metrics.deployment_info.model_version}"
     pricing = resolver.resolve(
-        model_name=metrics.model_name,
+        model_name=pricing_model_name,
         region=region,
         deployment_type=deployment_type,
         payg_input_override=payg_input_rate_override,
         payg_output_override=payg_output_rate_override,
+        payg_cached_input_override=cached_input_rate_override,
         ptu_hourly_override=ptu_hourly_rate_override,
     )
     payg_input_rate = pricing.payg_input_rate
+    payg_cached_input_rate = pricing.payg_cached_input_rate
     payg_output_rate = pricing.payg_output_rate
     # Derive output ratio from actual prompt vs completion data
     prompt_total = float(prompt.total) if prompt else 0.0
     completion_total = float(completion.total) if completion else 0.0
     token_sum = prompt_total + completion_total
-    output_ratio = (completion_total / token_sum) if token_sum > 0 else 0.30
-    payg_blended_rate = (payg_input_rate * (1 - output_ratio)) + (payg_output_rate * output_ratio)
-    payg_rate_per_1k = payg_blended_rate / 1000
+    complete_token_shape = bool(
+        prompt
+        and completion
+        and prompt.timestamps == completion.timestamps
+        and len(prompt.values) == len(completion.values)
+    )
+    output_ratio = (
+        completion_total / token_sum if complete_token_shape and token_sum > 0 else 0.30
+    )
+    payg_blended_rate = (payg_input_rate * (1 - output_ratio)) + (
+        payg_output_rate * output_ratio
+    )
 
-    payg_base = (monthly_tokens / 1_000_000) * payg_blended_rate
+    # Look up model-specific PTU capacity and output multiplier
+    model_cfg = get_model_config(metrics.model_name)
+    input_tpm_per_ptu = model_cfg.input_tpm_per_ptu if model_cfg else 2500
+    model_output_multiplier = model_cfg.output_ratio if model_cfg else 3
+    region_cfg = get_region_config(region)
+    deployment_cfg = get_deployment_config(deployment_type)
+    deployment_kind = get_deployment_type(deployment_type)
+    # Use the resolved PTU hourly rate (live/cached/fallback/manual)
+    # instead of the old base_hourly_rate * multiplier formula
+    ptu_hourly = pricing.ptu_hourly_rate
+    ptu_increment = deployment_cfg.increment
+    min_ptu = deployment_cfg.default_min_ptu
+    if model_cfg:
+        if deployment_kind.value == "regional":
+            min_ptu = model_cfg.regional_min_ptu
+            ptu_increment = model_cfg.regional_increment
+        else:
+            min_ptu = model_cfg.global_min_ptu
+            ptu_increment = model_cfg.global_increment
+    cache_impact = build_cache_impact(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        cache_match_rate=cache_match,
+        active_tokens=active_tokens,
+        output_multiplier=model_output_multiplier,
+        input_tpm_per_ptu=input_tpm_per_ptu,
+        min_ptu=min_ptu,
+        ptu_increment=ptu_increment,
+        cache_mode=cache_mode,
+        override_pct=cache_match_rate_override_pct,
+        interval_minutes=metrics_interval_minutes,
+        coverage_pct_override=metrics.cache_coverage_pct,
+        source_override=metrics.cache_source,  # type: ignore[arg-type]
+        missing_evidence_as_zero=metrics.cache_missing_as_zero,
+    )
+    # CacheImpact values are input-token-equivalent TPM. Convert capacity back
+    # to raw TPM for chart labels while using normalized capacity for sizing.
+    effective_mult = (1 - output_ratio) + output_ratio * model_output_multiplier
+    adjusted_effective_mult = (
+        cache_impact.cache_adjusted_normalized_avg_tpm / avg_tpm
+        if avg_tpm > 0
+        else effective_mult
+    )
+    ptu_capacity = input_tpm_per_ptu / max(adjusted_effective_mult, 0.0001)
+    term = _pricing_terms(reservation_type)
+    reservation_discount = float(term["discount_factor"])
+    reservation_discount_pct = int(term["discount_pct"])
+
+    ptu_monthly_rate = ptu_hourly * 720 * reservation_discount
+
+    minutes_per_month = 43_200
+    avg_prompt_tpm = float(np.mean(cache_impact.prompt_tokens)) if cache_impact.prompt_tokens else 0.0
+    avg_completion_tpm = (
+        float(np.mean(cache_impact.completion_tokens)) if cache_impact.completion_tokens else 0.0
+    )
+    observed_avg_cached_prompt_tpm = (
+        float(np.mean(cache_impact.cached_prompt_tokens))
+        if cache_impact.cached_prompt_tokens
+        else 0.0
+    )
+    avg_cached_prompt_tpm = observed_avg_cached_prompt_tpm if cache_impact.applied else 0.0
+    avg_active_prompt_tpm = max(0.0, avg_prompt_tpm - avg_cached_prompt_tpm)
+    no_cache_payg = (
+        avg_prompt_tpm * minutes_per_month / 1_000_000 * payg_input_rate
+        + avg_completion_tpm * minutes_per_month / 1_000_000 * payg_output_rate
+    )
+    payg_base = (
+        avg_active_prompt_tpm * minutes_per_month / 1_000_000 * payg_input_rate
+        + avg_cached_prompt_tpm
+        * minutes_per_month
+        / 1_000_000
+        * payg_cached_input_rate
+        + avg_completion_tpm * minutes_per_month / 1_000_000 * payg_output_rate
+    )
+    if not complete_token_shape:
+        no_cache_payg = (monthly_tokens / 1_000_000) * payg_blended_rate
+        payg_base = no_cache_payg
+    # Effective blended rate keeps the existing raw-TPM cost-curve contract.
+    payg_blended_rate = payg_base * 1_000_000 / monthly_tokens if monthly_tokens > 0 else 0.0
+    payg_rate_per_1k = payg_blended_rate / 1000
     throttle_rate = float(metrics.throttling_rate)
     if throttle_rate > 0.01:
         retry_overhead = payg_base * (throttle_rate / max(0.0001, (1 - throttle_rate)))
@@ -500,108 +723,88 @@ def _serialize_analysis(
         throttle_impact = 0.0
     payg_total = (payg_base + throttle_impact) if include_throttle else payg_base
 
-    # Look up model-specific PTU capacity and output multiplier
-    model_cfg = get_model_config(metrics.model_name)
-    input_tpm_per_ptu = model_cfg.input_tpm_per_ptu if model_cfg else 2500
-    model_output_multiplier = model_cfg.output_ratio if model_cfg else 3
-    # Effective multiplier: output tokens consume more PTU capacity
-    effective_mult = (1 - output_ratio) + output_ratio * model_output_multiplier
-    # Effective raw-TPM capacity per PTU (accounts for output ratio)
-    ptu_capacity = input_tpm_per_ptu / effective_mult
-    region_cfg = get_region_config(region)
-    deployment_cfg = get_deployment_config(deployment_type)
-    deployment_kind = get_deployment_type(deployment_type)
-    # Use the resolved PTU hourly rate (live/cached/fallback/manual)
-    # instead of the old base_hourly_rate * multiplier formula
-    ptu_hourly = pricing.ptu_hourly_rate
-    ptu_increment = deployment_cfg.increment
-    min_ptu = deployment_cfg.default_min_ptu
-    term = _pricing_terms(reservation_type)
-    reservation_discount = float(term["discount_factor"])
-    reservation_discount_pct = int(term["discount_pct"])
-
-    ptu_monthly_rate = ptu_hourly * 730 * reservation_discount
-
-    tpm_values = list(tpm.values) if tpm else []
-    spillover = calculate_spillover_cost(
-        tpm_values=tpm_values,
-        baseline_percentile=baseline_percentile,
-        ptu_capacity_per_unit=ptu_capacity,
-        ptu_hourly_rate=ptu_hourly,
-        payg_rate_per_1k=payg_rate_per_1k,
-        reservation_discount=reservation_discount,
-        baseline_ptu_override=baseline_ptu,
-        min_ptu=min_ptu,
-        ptu_increment=ptu_increment,
+    has_token_shape = bool(cache_impact.adjusted_normalized_tpm)
+    tpm_values = (
+        list(cache_impact.adjusted_normalized_tpm)
+        if has_token_shape
+        else (list(tpm.values) if tpm else [])
     )
+    normalized_requested_ptu = (
+        max(
+            min_ptu,
+            int(np.ceil(baseline_ptu / ptu_increment) * ptu_increment),
+        )
+        if baseline_ptu is not None
+        else None
+    )
+    selected_ptu = normalized_requested_ptu or (
+        cache_impact.cache_aware_recommended_ptu if has_token_shape else min_ptu
+    )
+    if has_token_shape:
+        spillover = calculate_cache_aware_spillover(
+            impact=cache_impact,
+            selected_ptu=selected_ptu,
+            ptu_capacity_per_unit=input_tpm_per_ptu,
+            ptu_hourly_rate=ptu_hourly,
+            reservation_discount=reservation_discount,
+            payg_input_rate_per_million=payg_input_rate,
+            payg_output_rate_per_million=payg_output_rate,
+        )
+    else:
+        spillover = calculate_spillover_cost(
+            tpm_values=tpm_values,
+            baseline_percentile=baseline_percentile,
+            ptu_capacity_per_unit=ptu_capacity,
+            ptu_hourly_rate=ptu_hourly,
+            payg_rate_per_1k=payg_rate_per_1k,
+            reservation_discount=reservation_discount,
+            baseline_ptu_override=selected_ptu,
+            min_ptu=min_ptu,
+            ptu_increment=ptu_increment,
+        )
+        spillover["avg_spillover_normalized_tpm"] = spillover["avg_spillover_tpm"]
 
-    baseline_tpm = float(spillover["baseline_tpm"])
+    baseline_tpm = float(selected_ptu * ptu_capacity)
     baseline_ptu = int(spillover["baseline_ptu"])
-    ptu_capacity_tpm = float(spillover["ptu_capacity_tpm"])
+    ptu_capacity_tpm = float(baseline_tpm)
     spillover_tokens_monthly = float(spillover["spillover_tokens_monthly"])
     spillover_cost = float(spillover["spillover_cost"])
     ptu_baseline_cost = float(spillover["ptu_monthly_cost"])
     hybrid_total = float(spillover["total_hybrid_cost"])
     spillover_pct = float(spillover["spillover_pct"])
-    avg_spillover_tpm = float(spillover["avg_spillover_tpm"])
+    avg_spillover_tpm = float(spillover["avg_spillover_normalized_tpm"])
 
-    ptu_needed_full = (
-        max(min_ptu, int((peak_tpm * 1.2 / ptu_capacity) + 0.5)) if peak_tpm > 0 else min_ptu
-    )
-    ptu_needed_full = ((ptu_needed_full + (ptu_increment - 1)) // ptu_increment) * ptu_increment
+    if has_token_shape:
+        ptu_needed_full = cache_impact.cache_aware_recommended_ptu
+    else:
+        ptu_needed_full = (
+            max(min_ptu, int((peak_tpm * 1.2 / ptu_capacity) + 0.5))
+            if peak_tpm > 0
+            else min_ptu
+        )
+        ptu_needed_full = (
+            (ptu_needed_full + (ptu_increment - 1)) // ptu_increment
+        ) * ptu_increment
     ptu_monthly_full = ptu_needed_full * ptu_hourly * 24 * 30
     ptu_committed_cost = ptu_monthly_full * reservation_discount
 
     savings = payg_total - hybrid_total
     savings_pct = (savings / payg_total * 100) if payg_total > 0 else 0.0
 
-    # v2: Fixed-PTU break-even — analytical solution
-    break_even_tpm = calculate_break_even_for_fixed_ptu(
-        selected_ptu=baseline_ptu,
-        ptu_capacity_per_unit=ptu_capacity,
-        ptu_hourly_rate=ptu_hourly,
-        payg_blended_rate=payg_blended_rate,
-        reservation_discount=reservation_discount,
-    )
-
-    # Determine break-even reason for distinct messaging (PRD §5):
-    # - "exists": break-even TPM is within PTU capacity (normal case)
-    # - "ptu_always_more_expensive": flat_break_even > ptu_capacity (PTU never pays off)
-    # - "ptu_always_cheaper": degenerate case (ptu_fixed ≈ 0 or rate ≈ 0)
-    if break_even_tpm is not None:
-        break_even_reason = "exists"
-    elif payg_blended_rate > 0 and ptu_hourly > 0:
-        break_even_reason = "ptu_always_more_expensive"
-    else:
-        break_even_reason = "ptu_always_cheaper"
-
-    # v2: Cost curves with fixed PTU, varying traffic on X-axis
-    curve_max_tpm = (
-        max(peak_tpm * 2, avg_tpm * 3, ptu_capacity_tpm * 2, 100_000) if peak_tpm > 0 else 200_000
-    )
-    cost_curves_df = generate_cost_curves_fixed_ptu(
-        selected_ptu=baseline_ptu,
-        ptu_capacity_per_unit=ptu_capacity,
-        ptu_hourly_rate=ptu_hourly,
-        payg_blended_rate=payg_blended_rate,
-        reservation_discount=reservation_discount,
-        max_tpm=curve_max_tpm,
+    spillover_blended_rate = (
+        payg_input_rate * (1 - output_ratio) + payg_output_rate * output_ratio
     )
 
     payg_at_avg = avg_tpm * 43_200 / 1_000_000 * payg_blended_rate
 
     token_timestamps = (
         [ts.isoformat() for ts in prompt.timestamps]
-        if prompt and prompt.timestamps
-        else (
-            [ts.isoformat() for ts in completion.timestamps]
-            if completion and completion.timestamps
-            else []
-        )
+        if complete_token_shape and prompt
+        else []
     )
 
     token_total_values: List[float] = []
-    if prompt and completion and len(prompt.values) == len(completion.values):
+    if complete_token_shape and prompt and completion:
         token_total_values = [float(p + c) for p, c in zip(prompt.values, completion.values)]
     elif tpm:
         token_total_values = [float(v) for v in tpm.values]
@@ -652,11 +855,12 @@ def _serialize_analysis(
     #   PTU NOT recommended          → min PTU (so break-even chart
     #                                   shows what traffic level is needed)
     default_baseline_ptu = min_ptu  # fallback
+    max_positive_ptu: Optional[int] = None
 
     if payg_total > 0 and tpm_values:
         # Upper bound for the sweep: enough PTU to cover P99 × 1.3
         p99_tpm_sweep = float(np.percentile(tpm_values, 99))
-        sweep_ceiling_raw = p99_tpm_sweep * 1.3 / ptu_capacity
+        sweep_ceiling_raw = p99_tpm_sweep * 1.3 / input_tpm_per_ptu
         sweep_ceiling = max(
             min_ptu, int(np.ceil(sweep_ceiling_raw / ptu_increment) * ptu_increment)
         )
@@ -665,20 +869,30 @@ def _serialize_analysis(
         # PTU value that still delivers > 5% savings.
         best_positive_ptu: Optional[int] = None
         best_positive_hybrid: Optional[float] = None
-        max_positive_ptu: Optional[int] = None
 
         for candidate_ptu in range(min_ptu, sweep_ceiling + ptu_increment, ptu_increment):
-            candidate = calculate_spillover_cost(
-                tpm_values=tpm_values,
-                baseline_percentile=baseline_percentile,
-                ptu_capacity_per_unit=ptu_capacity,
-                ptu_hourly_rate=ptu_hourly,
-                payg_rate_per_1k=payg_rate_per_1k,
-                reservation_discount=reservation_discount,
-                baseline_ptu_override=candidate_ptu,
-                min_ptu=min_ptu,
-                ptu_increment=ptu_increment,
-            )
+            if has_token_shape:
+                candidate = calculate_cache_aware_spillover(
+                    impact=cache_impact,
+                    selected_ptu=candidate_ptu,
+                    ptu_capacity_per_unit=input_tpm_per_ptu,
+                    ptu_hourly_rate=ptu_hourly,
+                    reservation_discount=reservation_discount,
+                    payg_input_rate_per_million=payg_input_rate,
+                    payg_output_rate_per_million=payg_output_rate,
+                )
+            else:
+                candidate = calculate_spillover_cost(
+                    tpm_values=tpm_values,
+                    baseline_percentile=baseline_percentile,
+                    ptu_capacity_per_unit=ptu_capacity,
+                    ptu_hourly_rate=ptu_hourly,
+                    payg_rate_per_1k=payg_rate_per_1k,
+                    reservation_discount=reservation_discount,
+                    baseline_ptu_override=candidate_ptu,
+                    min_ptu=min_ptu,
+                    ptu_increment=ptu_increment,
+                )
             candidate_hybrid = float(candidate["total_hybrid_cost"])
             candidate_savings_pct = ((payg_total - candidate_hybrid) / payg_total) * 100
 
@@ -700,7 +914,7 @@ def _serialize_analysis(
     # Max PTU for slider range (P99 × 1.3 worth of PTU, minimum 2× default)
     if tpm_values:
         p99_tpm = float(np.percentile(tpm_values, 99))
-        max_ptu_raw = p99_tpm * 1.3 / ptu_capacity
+        max_ptu_raw = p99_tpm * 1.3 / input_tpm_per_ptu
         max_baseline_ptu = max(
             default_baseline_ptu * 2,
             int(np.ceil(max_ptu_raw / ptu_increment) * ptu_increment),
@@ -712,33 +926,74 @@ def _serialize_analysis(
 
     # If caller didn't specify baseline PTU, evaluate Financial Decision using
     # the computed default baseline so first render is recommendation-focused.
-    if baseline_ptu is None and default_baseline_ptu != baseline_ptu:
-        spillover = calculate_spillover_cost(
-            tpm_values=tpm_values,
-            baseline_percentile=baseline_percentile,
-            ptu_capacity_per_unit=ptu_capacity,
-            ptu_hourly_rate=ptu_hourly,
-            payg_rate_per_1k=payg_rate_per_1k,
-            reservation_discount=reservation_discount,
-            baseline_ptu_override=default_baseline_ptu,
-            min_ptu=min_ptu,
-            ptu_increment=ptu_increment,
-        )
+    if requested_baseline_ptu is None and default_baseline_ptu != baseline_ptu:
+        if has_token_shape:
+            spillover = calculate_cache_aware_spillover(
+                impact=cache_impact,
+                selected_ptu=default_baseline_ptu,
+                ptu_capacity_per_unit=input_tpm_per_ptu,
+                ptu_hourly_rate=ptu_hourly,
+                reservation_discount=reservation_discount,
+                payg_input_rate_per_million=payg_input_rate,
+                payg_output_rate_per_million=payg_output_rate,
+            )
+        else:
+            spillover = calculate_spillover_cost(
+                tpm_values=tpm_values,
+                baseline_percentile=baseline_percentile,
+                ptu_capacity_per_unit=ptu_capacity,
+                ptu_hourly_rate=ptu_hourly,
+                payg_rate_per_1k=payg_rate_per_1k,
+                reservation_discount=reservation_discount,
+                baseline_ptu_override=default_baseline_ptu,
+                min_ptu=min_ptu,
+                ptu_increment=ptu_increment,
+            )
+            spillover["avg_spillover_normalized_tpm"] = spillover["avg_spillover_tpm"]
 
-        baseline_tpm = float(spillover["baseline_tpm"])
+        baseline_tpm = float(default_baseline_ptu * ptu_capacity)
         baseline_ptu = int(spillover["baseline_ptu"])
-        ptu_capacity_tpm = float(spillover["ptu_capacity_tpm"])
+        ptu_capacity_tpm = float(baseline_tpm)
         spillover_tokens_monthly = float(spillover["spillover_tokens_monthly"])
         spillover_cost = float(spillover["spillover_cost"])
         ptu_baseline_cost = float(spillover["ptu_monthly_cost"])
         hybrid_total = float(spillover["total_hybrid_cost"])
         spillover_pct = float(spillover["spillover_pct"])
-        avg_spillover_tpm = float(spillover["avg_spillover_tpm"])
+        avg_spillover_tpm = float(spillover["avg_spillover_normalized_tpm"])
 
         savings = payg_total - hybrid_total
         savings_pct = (savings / payg_total * 100) if payg_total > 0 else 0.0
+
+    # Curves must use the final commitment, which can change during the
+    # recommendation-aware default PTU sweep above.
+    curve_max_tpm = (
+        max(peak_tpm * 2, avg_tpm * 3, ptu_capacity_tpm * 2, 100_000) if peak_tpm > 0 else 200_000
+    )
+    cost_curves_df, break_even_tpm, upper_break_even_tpm = generate_cache_aware_cost_curves(
+        selected_ptu=baseline_ptu,
+        ptu_capacity_raw_tpm=ptu_capacity_tpm,
+        ptu_monthly_cost=ptu_baseline_cost,
+        payg_rate_per_raw_million=payg_blended_rate,
+        spillover_rate_per_raw_million=spillover_blended_rate,
+        max_tpm=curve_max_tpm,
+    )
+    if break_even_tpm is not None:
+        break_even_reason = "exists"
+    else:
+        final_diff = (
+            float(cost_curves_df.iloc[-1]["payg_monthly"])
+            - float(cost_curves_df.iloc[-1]["ptu_spill_monthly"])
+            if not cost_curves_df.empty
+            else 0.0
+        )
+        break_even_reason = (
+            "ptu_always_cheaper" if final_diff > 0 else "ptu_always_more_expensive"
+        )
+
     # ── Cost-driven recommendation (reacts to slider PTU value) ──────────
-    if payg_total > 0 and hybrid_total > 0:
+    if not has_cost_data:
+        cost_recommendation = "insufficient_data"
+    elif payg_total > 0 and hybrid_total > 0:
         cost_savings_pct = savings_pct  # already (payg - hybrid) / payg * 100
         if cost_savings_pct > 5:
             cost_recommendation = "ptu_recommended"
@@ -754,14 +1009,109 @@ def _serialize_analysis(
     savings_margin_pct = float(savings_pct)  # already (payg - hybrid) / payg * 100
     capacity_coverage_pct = 100.0 - spillover_pct  # % of intervals fitting in PTU
     # Determine safety verdict (thresholds per PRD §3.1.1)
-    if savings_margin_pct <= 0:
+    if not has_cost_data:
+        safety_verdict = "insufficient_data"
+    elif savings_margin_pct <= 0:
         safety_verdict = "not_justified"
     elif savings_margin_pct < 5 or spillover_pct > 25 or capacity_coverage_pct < 75:
         safety_verdict = "efficient_but_risky"
     else:
         safety_verdict = "safe"
 
-    if break_even_tpm and break_even_tpm > 0 and avg_tpm > 0:
+    no_cache_impact = build_cache_impact(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        cache_match_rate=cache_match,
+        active_tokens=active_tokens,
+        output_multiplier=model_output_multiplier,
+        input_tpm_per_ptu=input_tpm_per_ptu,
+        min_ptu=min_ptu,
+        ptu_increment=ptu_increment,
+        cache_mode="disabled",
+        interval_minutes=metrics_interval_minutes,
+    )
+    if no_cache_impact.adjusted_normalized_tpm:
+        no_cache_spillover = calculate_cache_aware_spillover(
+            impact=no_cache_impact,
+            selected_ptu=baseline_ptu,
+            ptu_capacity_per_unit=input_tpm_per_ptu,
+            ptu_hourly_rate=ptu_hourly,
+            reservation_discount=reservation_discount,
+            payg_input_rate_per_million=payg_input_rate,
+            payg_output_rate_per_million=payg_output_rate,
+        )
+        no_cache_capacity_tpm = baseline_ptu * input_tpm_per_ptu / max(effective_mult, 0.0001)
+    else:
+        no_cache_spillover = dict(spillover)
+        no_cache_capacity_tpm = ptu_capacity_tpm
+    no_cache_throttle = (
+        throttle_impact * no_cache_payg / payg_base
+        if include_throttle and payg_base > 0
+        else 0.0
+    )
+    no_cache_payg_total = no_cache_payg + no_cache_throttle
+    no_cache_hybrid_total = float(no_cache_spillover["total_hybrid_cost"])
+    no_cache_savings = no_cache_payg_total - no_cache_hybrid_total
+    no_cache_savings_pct = (
+        no_cache_savings / no_cache_payg_total * 100 if no_cache_payg_total > 0 else 0.0
+    )
+    no_cache_recommendation = (
+        "insufficient_data"
+        if not has_cost_data
+        else "ptu_recommended"
+        if no_cache_savings_pct > 5
+        else "ptu_not_recommended"
+        if no_cache_savings_pct < -5
+        else "borderline"
+    )
+    no_cache_spillover_pct = float(no_cache_spillover["spillover_pct"])
+    no_cache_coverage_pct = 100.0 - no_cache_spillover_pct
+    no_cache_safety_verdict = (
+        "insufficient_data"
+        if not has_cost_data
+        else "not_justified"
+        if no_cache_savings_pct <= 0
+        else "efficient_but_risky"
+        if no_cache_savings_pct < 5
+        or no_cache_spillover_pct > 25
+        or no_cache_coverage_pct < 75
+        else "safe"
+    )
+    no_cache_break_even_tpm = calculate_break_even_for_fixed_ptu(
+        selected_ptu=baseline_ptu,
+        ptu_capacity_per_unit=no_cache_capacity_tpm / baseline_ptu,
+        ptu_hourly_rate=ptu_hourly,
+        payg_blended_rate=spillover_blended_rate,
+        reservation_discount=reservation_discount,
+    )
+    no_cache_upper_break_even_tpm = None
+
+    if not has_cost_data:
+        break_even_tpm = None
+        upper_break_even_tpm = None
+        no_cache_break_even_tpm = None
+        no_cache_upper_break_even_tpm = None
+        break_even_reason = "insufficient_data"
+        break_even_message = (
+            "Insufficient traffic data to calculate an economic break-even. "
+            "Collect token usage before comparing PAYG and PTU commitments."
+        )
+    elif break_even_tpm and upper_break_even_tpm and avg_tpm > 0:
+        if break_even_tpm <= avg_tpm <= upper_break_even_tpm:
+            range_position = "inside"
+            range_signal = "favors PTU"
+        else:
+            range_position = "outside"
+            range_signal = "favors PAYG"
+        break_even_message = (
+            f"Economic break-even range for {baseline_ptu} PTU is "
+            f"{break_even_tpm:,.0f}-{upper_break_even_tpm:,.0f} TPM. "
+            f"Your average TPM ({avg_tpm:,.0f}) is {range_position} that range, "
+            f"so the economic signal {range_signal}. Final recommendation: "
+            f"{cost_recommendation.replace('_', ' ')} with safety verdict "
+            f"'{safety_verdict}'."
+        )
+    elif break_even_tpm and break_even_tpm > 0 and avg_tpm > 0:
         distance_pct = ((avg_tpm - break_even_tpm) / break_even_tpm) * 100
         if distance_pct > 10:
             break_even_message = (
@@ -806,7 +1156,16 @@ def _serialize_analysis(
         f"hybrid cost ${hybrid_total:,.0f}/month vs PAYG ${payg_total:,.0f}/month."
     )
 
-    if cost_recommendation == "ptu_recommended":
+    if not has_cost_data:
+        dynamic_summary = "Insufficient traffic data for a PTU or PAYG recommendation."
+        dynamic_explanation = (
+            "No token usage was observed in the selected analysis window, so monthly cost, "
+            "savings, and break-even comparisons are not decision-ready."
+        )
+        dynamic_what_would_change = (
+            "Collect representative token traffic, then rerun the analysis."
+        )
+    elif cost_recommendation == "ptu_recommended":
         dynamic_summary = (
             f"PTU is recommended at {baseline_ptu} PTU; estimated savings are "
             f"{savings_pct:.1f}% (${savings:,.0f}/month)."
@@ -846,13 +1205,29 @@ def _serialize_analysis(
             "a decrease in demand can favor PAYG."
         )
 
-    dynamic_confidence = float(min(0.98, max(0.55, 0.55 + (abs(savings_pct) / 100))))
+    dynamic_confidence = (
+        0.0
+        if not has_cost_data
+        else float(min(0.98, max(0.55, 0.55 + (abs(savings_pct) / 100))))
+    )
 
     financial_score = (
-        "positive" if savings_pct > 5 else ("negative" if savings_pct < -5 else "neutral")
+        "insufficient"
+        if not has_cost_data
+        else "positive"
+        if savings_pct > 5
+        else "negative"
+        if savings_pct < -5
+        else "neutral"
     )
     spillover_score = (
-        "positive" if spillover_pct <= 20 else ("negative" if spillover_pct >= 40 else "neutral")
+        "insufficient"
+        if not has_cost_data
+        else "positive"
+        if spillover_pct <= 20
+        else "negative"
+        if spillover_pct >= 40
+        else "neutral"
     )
 
     enriched_dimensions: List[Dict[str, Any]] = []
@@ -870,7 +1245,15 @@ def _serialize_analysis(
         )
 
         lowered = dim_name.lower()
-        if "capacity" in lowered:
+        if not has_cost_data and ("capacity" in lowered or "predict" in lowered):
+            dim["score"] = "insufficient"
+            dim["summary"] = "Insufficient traffic data for a financial capacity decision."
+            dim["explanation"] = (
+                "No token usage was observed in the selected analysis window."
+            )
+            dim["is_positive"] = False
+            dim["confidence"] = 0.0
+        elif "capacity" in lowered:
             dim["score"] = financial_score
             dim["summary"] = (
                 f"At {baseline_ptu} PTU, monthly delta is {savings_pct:.1f}% "
@@ -923,9 +1306,15 @@ def _serialize_analysis(
                 "p99": float(p99.mean) if p99 else 0.0,
             },
             "cache_match_rate": {
-                "avg_pct": float(cache_match.mean * 100) if cache_match else 0.0,
-                "p95_pct": float(cache_match.p95 * 100) if cache_match else 0.0,
-                "available": cache_match is not None and len(cache_match) > 0,
+                "avg_pct": cache_impact.avg_match_rate_pct,
+                "p95_pct": cache_impact.p95_match_rate_pct,
+                "available": cache_impact.source != "unavailable",
+                "source": cache_impact.source,
+                "quality": cache_impact.quality,
+                "coverage_pct": cache_impact.coverage_pct,
+                "cached_prompt_tokens": cache_impact.total_cached_prompt_tokens,
+                "active_prompt_tokens": cache_impact.total_active_prompt_tokens,
+                "active_tokens_observed": cache_impact.active_tokens_observed,
             },
             "utilization": utilization,
             "series_summary": {
@@ -939,6 +1328,7 @@ def _serialize_analysis(
                 "latency_p95": _series_payload(p95),
                 "latency_p99": _series_payload(p99),
                 "cache_match_rate": _series_payload(cache_match),
+                "active_tokens": _series_payload(active_tokens),
             },
         },
         charts={
@@ -961,6 +1351,11 @@ def _serialize_analysis(
                     completion_values=[float(v) for v in completion.values] if completion else [],
                     payg_input_rate=payg_input_rate,
                     payg_output_rate=payg_output_rate,
+                    cached_prompt_values=(
+                        cache_impact.cached_prompt_tokens if cache_impact.applied else None
+                    ),
+                    payg_cached_input_rate=payg_cached_input_rate,
+                    interval_minutes=metrics_interval_minutes,
                 ),
                 "ptu_daily_cost": round(ptu_baseline_cost / 30, 2),
             },
@@ -970,6 +1365,14 @@ def _serialize_analysis(
                 "avg": float(tpm.mean) if tpm else 0.0,
                 "p25": float(np.percentile(tpm_values, 25)) if tpm_values else 0.0,
                 "p95": float(tpm.p95) if tpm else 0.0,
+            },
+            "prompt_cache": {
+                "timestamps": [ts.isoformat() for ts in cache_impact.timestamps],
+                "match_rate_pct": cache_impact.match_rate_pct,
+                "prompt_tokens": cache_impact.prompt_tokens,
+                "cached_prompt_tokens": cache_impact.cached_prompt_tokens,
+                "active_prompt_tokens": cache_impact.active_prompt_tokens,
+                "source": cache_impact.source,
             },
             "throttling": {
                 "timestamps": [
@@ -990,6 +1393,9 @@ def _serialize_analysis(
                 if not cost_curves_df.empty
                 else [],
                 "break_even_tpm": float(break_even_tpm) if break_even_tpm else None,
+                "upper_break_even_tpm": (
+                    float(upper_break_even_tpm) if upper_break_even_tpm else None
+                ),
                 "break_even_reason": break_even_reason,
                 "ptu_capacity_tpm": float(ptu_capacity_tpm),
                 "avg_tpm": float(avg_tpm),
@@ -999,6 +1405,7 @@ def _serialize_analysis(
             },
         },
         cost_analysis={
+            "status": "ready" if has_cost_data else "insufficient_data",
             "pricing": {
                 "focus_topic": focus_topic,
                 "reservation_type": reservation_type,
@@ -1010,9 +1417,12 @@ def _serialize_analysis(
                 "deployment_type_label": deployment_cfg.label,
                 "payg_blended_rate_per_million": payg_blended_rate,
                 "payg_input_rate_per_million": payg_input_rate,
+                "payg_cached_input_rate_per_million": payg_cached_input_rate,
+                "cached_input_pricing_source": pricing.cached_input_source,
                 "payg_output_rate_per_million": payg_output_rate,
                 "output_ratio": round(output_ratio, 4),
                 "ptu_hourly_rate": ptu_hourly,
+                "ptu_pricing_source": pricing.ptu_pricing_source,
                 "ptu_capacity_per_unit": ptu_capacity,
                 "input_tpm_per_ptu": input_tpm_per_ptu,
                 "model_output_multiplier": model_output_multiplier,
@@ -1025,6 +1435,8 @@ def _serialize_analysis(
             },
             "payg": {
                 "monthly_tokens": float(monthly_tokens),
+                "no_cache_payg_monthly": float(no_cache_payg),
+                "payg_cache_savings": float(no_cache_payg - payg_base),
                 "payg_base": float(payg_base),
                 "throttle_impact": float(throttle_impact),
                 "payg_total": float(payg_total),
@@ -1056,13 +1468,65 @@ def _serialize_analysis(
                 "savings": float(savings),
                 "savings_pct": float(savings_pct),
                 "break_even_tpm": float(break_even_tpm) if break_even_tpm else None,
-                "cheaper_strategy": "PTU + Spillover" if savings > 0 else "PAYG",
+                "upper_break_even_tpm": (
+                    float(upper_break_even_tpm) if upper_break_even_tpm else None
+                ),
+                "cheaper_strategy": (
+                    "PTU + Spillover"
+                    if has_cost_data and savings > 0
+                    else "PAYG"
+                    if has_cost_data
+                    else None
+                ),
+            },
+            "no_cache_comparison": {
+                "payg_total": float(no_cache_payg_total),
+                "ptu_baseline_cost": float(no_cache_spillover["ptu_monthly_cost"]),
+                "spillover_cost": float(no_cache_spillover["spillover_cost"]),
+                "hybrid_total": no_cache_hybrid_total,
+                "savings": float(no_cache_savings),
+                "savings_pct": float(no_cache_savings_pct),
+                "recommendation": no_cache_recommendation,
+                "break_even_tpm": no_cache_break_even_tpm,
+                "upper_break_even_tpm": no_cache_upper_break_even_tpm,
+                "commitment_safety": {
+                    "savings_margin_pct": round(no_cache_savings_pct, 1),
+                    "spillover_pct": round(no_cache_spillover_pct, 1),
+                    "capacity_coverage_pct": round(no_cache_coverage_pct, 1),
+                    "safety_verdict": no_cache_safety_verdict,
+                },
             },
             "commitment_safety": {
                 "savings_margin_pct": round(savings_margin_pct, 1),
                 "spillover_pct": round(spillover_pct, 1),
                 "capacity_coverage_pct": round(capacity_coverage_pct, 1),
                 "safety_verdict": safety_verdict,
+            },
+            "cache_impact": {
+                "applied": cache_impact.applied,
+                "source": cache_impact.source,
+                "quality": cache_impact.quality,
+                "coverage_pct": cache_impact.coverage_pct,
+                "no_cache_normalized_avg_tpm": cache_impact.no_cache_normalized_avg_tpm,
+                "cache_adjusted_normalized_avg_tpm": (
+                    cache_impact.cache_adjusted_normalized_avg_tpm
+                ),
+                "normalized_tpm_reduction_pct": cache_impact.normalized_tpm_reduction_pct,
+                "no_cache_recommended_ptu": cache_impact.no_cache_recommended_ptu,
+                "cache_aware_recommended_ptu": cache_impact.cache_aware_recommended_ptu,
+                "ptu_avoided": cache_impact.ptu_avoided,
+                "no_cache_payg_monthly": float(no_cache_payg),
+                "cache_aware_payg_monthly": float(payg_base),
+                "payg_cache_savings": float(no_cache_payg - payg_base),
+                "fixed_ptu_cost_changed": False,
+                "validation_warnings": cache_impact.validation_warnings,
+                "calculation_note": (
+                    "Cached prompt tokens reduce modeled utilization; fixed PTU cost "
+                    "changes only when the selected PTU count changes."
+                    if cache_impact.applied
+                    else "Cache telemetry was unavailable, disabled, or insufficient; "
+                    "the primary estimate conservatively assumes no cache benefit."
+                ),
             },
             "formula_blocks": _build_formula_blocks(
                 avg_tpm=avg_tpm,
@@ -1089,6 +1553,11 @@ def _serialize_analysis(
                 input_tpm_per_ptu=input_tpm_per_ptu,
                 model_output_multiplier=model_output_multiplier,
                 pricing_source=pricing.source,
+                avg_active_prompt_tpm=avg_active_prompt_tpm,
+                avg_cached_prompt_tpm=avg_cached_prompt_tpm,
+                avg_completion_tpm=avg_completion_tpm,
+                payg_cached_input_rate=payg_cached_input_rate,
+                cache_source=cache_impact.source,
             ),
         },
         insights={
@@ -1099,6 +1568,7 @@ def _serialize_analysis(
                 "Throttling above 1% usually indicates capacity pressure affecting reliability.",
                 "Stable utilization patterns improve PTU ROI.",
             ]
+            + cache_impact.validation_warnings
             + (
                 [
                     "High usage variance (CV > 1.5) means spillover costs remain significant "
@@ -1152,7 +1622,7 @@ def pricing_options() -> Dict[str, Any]:
 def pricing_rates(
     model: str = Query(..., description="Model name (e.g. gpt-4o, gpt-5)"),
     region: str = Query("eastus", description="Azure region slug"),
-    deployment_type: str = Query(
+    deployment_type: Literal["global", "data_zone", "regional"] = Query(
         "global", description="Deployment type: global, data_zone, regional"
     ),
 ) -> Dict[str, Any]:
@@ -1171,9 +1641,12 @@ def pricing_rates(
         "region": result.region,
         "deployment_type": result.deployment_type,
         "payg_input_rate_per_million": round(result.payg_input_rate, 4),
+        "payg_cached_input_rate_per_million": round(result.payg_cached_input_rate, 4),
         "payg_output_rate_per_million": round(result.payg_output_rate, 4),
         "ptu_hourly_rate": round(result.ptu_hourly_rate, 4),
+        "ptu_pricing_source": result.ptu_pricing_source,
         "pricing_source": result.source,
+        "cached_input_pricing_source": result.cached_input_source,
         "pricing_as_of": result.as_of.isoformat(),
         "pricing_currency": result.currency,
     }
@@ -1190,13 +1663,14 @@ def auth_status() -> Dict[str, Any]:
             "email": user_info.email,
             "tenant_id": user_info.tenant_id,
         }
-    except Exception as e:
+    except Exception:
+        logger.exception("Azure authentication status check failed")
         return {
             "authenticated": False,
             "display_name": "",
             "email": "",
             "tenant_id": "",
-            "error": str(e),
+            "error": "Azure authentication unavailable.",
         }
 
 
@@ -1204,20 +1678,21 @@ def auth_status() -> Dict[str, Any]:
 def subscriptions() -> List[Dict[str, Any]]:
     try:
         credential = get_azure_credential()
-    except Exception as e:
+    except Exception:
+        logger.exception("Azure credential acquisition failed")
         raise HTTPException(
             status_code=401,
-            detail="Not authenticated. Please run `az login` in your terminal, then refresh this page. "
-            f"Error: {e}",
+            detail="Not authenticated. Please run `az login` in your terminal, then refresh this page.",
         )
     try:
         subs = list_subscriptions(credential)
-    except Exception as e:
+    except Exception:
+        logger.exception("Azure subscription discovery failed")
         raise HTTPException(
             status_code=403,
             detail="Failed to list subscriptions. Ensure your account has Reader access to at least "
             "one Azure subscription. You can check access in the Azure Portal under "
-            f"'Subscriptions'. Error: {e}",
+            "'Subscriptions'.",
         )
     if not subs:
         raise HTTPException(
@@ -1240,15 +1715,17 @@ def subscriptions() -> List[Dict[str, Any]]:
 def accounts(subscription_id: str = Query(...)) -> List[Dict[str, Any]]:
     try:
         credential = get_azure_credential()
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Authentication failed: {e}")
+    except Exception:
+        logger.exception("Azure credential acquisition failed")
+        raise HTTPException(status_code=401, detail="Authentication failed.")
     try:
         items = list_ai_accounts(credential, subscription_id)
-    except Exception as e:
+    except Exception:
+        logger.exception("Azure AI Services account discovery failed")
         raise HTTPException(
             status_code=403,
             detail="Failed to list AI Services accounts. Ensure you have Reader access to "
-            f"the subscription. Error: {e}",
+            "the subscription.",
         )
     return [
         {
@@ -1271,16 +1748,17 @@ def deployments(
 ) -> List[Dict[str, Any]]:
     try:
         credential = get_azure_credential()
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Authentication failed: {e}")
+    except Exception:
+        logger.exception("Azure credential acquisition failed")
+        raise HTTPException(status_code=401, detail="Authentication failed.")
     try:
         items = list_deployments(credential, subscription_id, resource_group, account_name)
-    except Exception as e:
+    except Exception:
+        logger.exception("Azure deployment discovery failed")
         raise HTTPException(
             status_code=403,
             detail="Failed to list deployments. Ensure you have Cognitive Services User or "
-            "Reader role on this account, plus Monitoring Reader for metrics. "
-            f"Error: {e}",
+            "Reader role on this account, plus Monitoring Reader for metrics.",
         )
     result: List[Dict[str, Any]] = []
     for dep in items:
@@ -1289,6 +1767,7 @@ def deployments(
         entry: Dict[str, Any] = {
             "name": dep.name,
             "model": dep.model,
+            "model_version": dep.model_version,
             "model_family": family,
             "sku_type": dep.sku_type,
             "sku_capacity": dep.sku_capacity,
@@ -1344,6 +1823,9 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
             payg_input_rate_override=payload.payg_input_rate_override,
             payg_output_rate_override=payload.payg_output_rate_override,
             ptu_hourly_rate_override=payload.ptu_hourly_rate_override,
+            cache_mode=payload.cache_mode,
+            cache_match_rate_override_pct=payload.cache_match_rate_override_pct,
+            cached_input_rate_override=payload.cached_input_rate_override,
         )
 
     if not payload.subscription_id or not payload.resource_group or not payload.workspace:
@@ -1453,6 +1935,9 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
         payg_input_rate_override=payload.payg_input_rate_override,
         payg_output_rate_override=payload.payg_output_rate_override,
         ptu_hourly_rate_override=payload.ptu_hourly_rate_override,
+        cache_mode=payload.cache_mode,
+        cache_match_rate_override_pct=payload.cache_match_rate_override_pct,
+        cached_input_rate_override=payload.cached_input_rate_override,
     )
 
 
@@ -1465,6 +1950,7 @@ def _series_to_az_data_points(
     *,
     include_total: bool,
     include_average: bool,
+    multiplier: float = 1.0,
 ) -> List[Dict[str, Any]]:
     """Serialize a TimeSeries into the az-CLI ``data`` array shape."""
     if series is None:
@@ -1475,9 +1961,9 @@ def _series_to_az_data_points(
             "timeStamp": ts.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
         }
         if include_total:
-            point["total"] = float(val)
+            point["total"] = float(val) * multiplier
         if include_average:
-            point["average"] = float(val)
+            point["average"] = float(val) * multiplier
         points.append(point)
     return points
 
@@ -1488,6 +1974,8 @@ def _build_token_snapshot_payload(
     resource_id: str,
     interval: str,
     namespace: str = "microsoft.cognitiveservices/accounts",
+    cache_mode: Literal["auto", "disabled", "override"] = "auto",
+    cache_match_rate_override_pct: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Build a JSON payload matching ``az monitor metrics list`` output for the
     three GBB metrics: InputTokens, OutputTokens, AzureOpenAIContextTokensCacheMatchRate.
@@ -1496,6 +1984,21 @@ def _build_token_snapshot_payload(
         f"{metrics.start_time.strftime('%Y-%m-%dT%H:%M:%S+00:00')}/"
         f"{metrics.end_time.strftime('%Y-%m-%dT%H:%M:%S+00:00')}"
     )
+    cache_impact = build_cache_impact(
+        prompt_tokens=metrics.prompt_tokens,
+        completion_tokens=metrics.completion_tokens,
+        cache_match_rate=metrics.cache_match_rate,
+        active_tokens=metrics.active_tokens,
+        output_multiplier=(get_model_config(metrics.model_name).output_ratio if get_model_config(metrics.model_name) else 3),
+        input_tpm_per_ptu=(get_model_config(metrics.model_name).input_tpm_per_ptu if get_model_config(metrics.model_name) else 2500),
+        min_ptu=15,
+        ptu_increment=5,
+        interval_minutes=_infer_interval_minutes(metrics.prompt_tokens),
+        coverage_pct_override=metrics.cache_coverage_pct,
+        cache_mode=cache_mode,
+        override_pct=cache_match_rate_override_pct,
+    )
+    interval_multiplier = _interval_to_minutes(interval)
 
     def metric_entry(
         name: str,
@@ -1503,6 +2006,7 @@ def _build_token_snapshot_payload(
         unit: str,
         series: Optional[TimeSeries],
         description: str,
+        multiplier: float = 1.0,
     ) -> Dict[str, Any]:
         return {
             "displayDescription": description,
@@ -1512,7 +2016,10 @@ def _build_token_snapshot_payload(
             "timeseries": [
                 {
                     "data": _series_to_az_data_points(
-                        series, include_total=True, include_average=True
+                        series,
+                        include_total=True,
+                        include_average=True,
+                        multiplier=multiplier,
                     ),
                     "metadatavalues": [],
                 }
@@ -1534,6 +2041,7 @@ def _build_token_snapshot_payload(
                 "Count",
                 metrics.prompt_tokens,
                 "Number of prompt tokens processed (input) on a model deployment.",
+                multiplier=interval_multiplier,
             ),
             metric_entry(
                 "OutputTokens",
@@ -1541,6 +2049,7 @@ def _build_token_snapshot_payload(
                 "Count",
                 metrics.completion_tokens,
                 "Number of tokens generated (output) from a model deployment.",
+                multiplier=interval_multiplier,
             ),
             metric_entry(
                 "AzureOpenAIContextTokensCacheMatchRate",
@@ -1548,12 +2057,22 @@ def _build_token_snapshot_payload(
                 "Percent",
                 metrics.cache_match_rate,
                 "The percentage of context tokens that hit the prompt cache.",
+                multiplier=100.0,
             ),
         ],
         "_meta": {
             "deployment_name": metrics.deployment_name,
             "model_name": metrics.model_name,
             "source": "ptu-advisor",
+            "cache_analysis": {
+                "source": cache_impact.source,
+                "quality": cache_impact.quality,
+                "coverage_pct": cache_impact.coverage_pct,
+                "effective_rate_pct": cache_impact.avg_match_rate_pct,
+                "active_prompt_tokens": cache_impact.total_active_prompt_tokens,
+                "cached_prompt_tokens": cache_impact.total_cached_prompt_tokens,
+                "override_used": cache_impact.source == "override",
+            },
         },
     }
 
@@ -1573,17 +2092,19 @@ def export_token_snapshot(payload: TokenSnapshotRequest) -> Dict[str, Any]:
         metrics, _scenario_cfg = generate_demo_metrics(
             scenario,
             lookback_days=payload.days,
-            granularity_minutes=interval_minutes if interval_minutes in (1, 5, 15, 30) else 5,
+            granularity_minutes=interval_minutes,
         )
         resource_id = (
             "/subscriptions/00000000-0000-0000-0000-000000000000/"
             "resourceGroups/demo-rg/providers/Microsoft.CognitiveServices/"
-            f"accounts/demo-workspace"
+            "accounts/demo-workspace"
         )
         return _build_token_snapshot_payload(
             metrics,
             resource_id=resource_id,
             interval=payload.interval,
+            cache_mode=payload.cache_mode,
+            cache_match_rate_override_pct=payload.cache_match_rate_override_pct,
         )
 
     if not payload.subscription_id or not payload.resource_group or not payload.workspace:
@@ -1601,7 +2122,7 @@ def export_token_snapshot(payload: TokenSnapshotRequest) -> Dict[str, Any]:
         deployment=payload.deployment,
         subscription_id=payload.subscription_id,
         lookback_days=payload.days,
-        aggregation_interval_minutes=interval_minutes if interval_minutes in (1, 5, 15, 30) else 5,
+        aggregation_interval_minutes=interval_minutes,
     )
     collector = MetricsCollector(credential, config)
     metrics = collector.collect()
@@ -1611,6 +2132,8 @@ def export_token_snapshot(payload: TokenSnapshotRequest) -> Dict[str, Any]:
         metrics,
         resource_id=resource_id,
         interval=payload.interval,
+        cache_mode=payload.cache_mode,
+        cache_match_rate_override_pct=payload.cache_match_rate_override_pct,
     )
 
 
@@ -1701,6 +2224,20 @@ def analyze_consolidation(payload: ConsolidationRequest) -> ConsolidationRespons
             ),
         )
 
+    model_versions = {
+        m.deployment_info.model_version
+        for m in all_metrics
+        if m.deployment_info is not None and m.deployment_info.model_version is not None
+    }
+    if len(model_versions) > 1:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Cannot consolidate deployments with different model versions: "
+                f"{sorted(model_versions)}. PTU capacity and PAYG pricing may be version-specific."
+            ),
+        )
+
     if len(all_metrics) < 2:
         raise HTTPException(
             status_code=422,
@@ -1755,6 +2292,12 @@ def analyze_consolidation(payload: ConsolidationRequest) -> ConsolidationRespons
     # 3. Merge into combined virtual deployment
     # ------------------------------------------------------------------
     combined_metrics = merge_deployment_metrics(all_metrics)
+    if combined_metrics.cache_coverage_pct is not None and combined_metrics.cache_coverage_pct < 100:
+        consolidation_warnings.append(
+            "Cache telemetry is incomplete across the selected deployments "
+            f"({combined_metrics.cache_coverage_pct:.1f}% prompt-token coverage). "
+            "Missing deployment intervals receive no modeled cache benefit."
+        )
 
     # ------------------------------------------------------------------
     # 4. Run analysis engine on combined metrics
@@ -1799,6 +2342,9 @@ def analyze_consolidation(payload: ConsolidationRequest) -> ConsolidationRespons
         payg_input_rate_override=payload.payg_input_rate_override,
         payg_output_rate_override=payload.payg_output_rate_override,
         ptu_hourly_rate_override=payload.ptu_hourly_rate_override,
+        cache_mode=payload.cache_mode,
+        cache_match_rate_override_pct=payload.cache_match_rate_override_pct,
+        cached_input_rate_override=payload.cached_input_rate_override,
     )
 
     # ------------------------------------------------------------------
@@ -1820,7 +2366,21 @@ def analyze_consolidation(payload: ConsolidationRequest) -> ConsolidationRespons
                 total_requests=int(m.total_requests),
                 latency_p50=float(p50.mean) if p50 else 0.0,
                 latency_p95=float(p95.mean) if p95 else 0.0,
-                payg_monthly_cost=compute_individual_payg_cost(m, payg_blended_rate),
+                payg_monthly_cost=compute_individual_payg_cost(
+                    m,
+                    payg_blended_rate,
+                    payg_input_rate=base_response.cost_analysis["pricing"][
+                        "payg_input_rate_per_million"
+                    ],
+                    payg_cached_input_rate=base_response.cost_analysis["pricing"][
+                        "payg_cached_input_rate_per_million"
+                    ],
+                    payg_output_rate=base_response.cost_analysis["pricing"][
+                        "payg_output_rate_per_million"
+                    ],
+                    cache_mode=payload.cache_mode,
+                    cache_override_pct=payload.cache_match_rate_override_pct,
+                ),
             )
         )
 
@@ -1851,6 +2411,8 @@ def analyze_consolidation(payload: ConsolidationRequest) -> ConsolidationRespons
     # ------------------------------------------------------------------
     # Use the combined timestamps from the token chart (canonical axis)
     combined_ts_iso = base_response.charts.get("tokens", {}).get("timestamps", [])
+    if not combined_ts_iso and combined_tpm:
+        combined_ts_iso = [timestamp.isoformat() for timestamp in combined_tpm.timestamps]
     per_dep_charts = serialize_per_deployment_charts(all_metrics, combined_ts_iso)
 
     # Merge per_deployment data into existing chart sections
@@ -1861,6 +2423,12 @@ def analyze_consolidation(payload: ConsolidationRequest) -> ConsolidationRespons
                 **enriched_charts[chart_key],
                 **per_dep_charts[chart_key],
             }
+
+    if "prompt_cache" in enriched_charts:
+        enriched_charts["prompt_cache"] = {
+            **enriched_charts["prompt_cache"],
+            **per_dep_charts.get("prompt_cache", {}),
+        }
 
     # Latency chart section does not exist in single-deployment mode.
     # For consolidation, build it from the combined + per-deployment data.
@@ -1996,6 +2564,16 @@ def deployment_preview(
 # ---------------------------------------------------------------------------
 from pathlib import Path  # noqa: E402
 
+
+def _resolve_static_file(static_dir: Path, full_path: str) -> Optional[Path]:
+    static_root = static_dir.resolve()
+    candidate = (static_root / full_path).resolve()
+    try:
+        candidate.relative_to(static_root)
+    except ValueError:
+        return None
+    return candidate if candidate.is_file() else None
+
 _STATIC_CANDIDATES = [
     # Source layout (repo/local editable installs)
     Path(__file__).resolve().parent.parent.parent / "static",
@@ -2011,7 +2589,7 @@ if _STATIC_DIR:
     @app.get("/{full_path:path}")
     async def _serve_spa(full_path: str) -> FileResponse:
         """Serve React SPA; fall back to index.html for client-side routing."""
-        file_path = _STATIC_DIR / full_path
-        if full_path and file_path.is_file():
+        file_path = _resolve_static_file(_STATIC_DIR, full_path)
+        if file_path is not None:
             return FileResponse(file_path)
         return FileResponse(_STATIC_DIR / "index.html")

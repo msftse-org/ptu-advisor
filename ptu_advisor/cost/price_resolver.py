@@ -13,6 +13,7 @@ Reference:
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -42,6 +43,9 @@ API_TIMEOUT_SECONDS = 5
 # "Foundry Models" in early 2026.  We try the new name first and fall back
 # to the legacy name for backwards compatibility.
 API_SERVICE_NAMES = ("Foundry Models", "Azure OpenAI Service")
+MODEL_PRODUCT_NAMES: Dict[str, str] = {
+    "o4-mini": "Azure OpenAI Reasoning",
+}
 
 # ---------------------------------------------------------------------------
 # Model-to-meter mapping
@@ -58,12 +62,24 @@ API_SERVICE_NAMES = ("Foundry Models", "Azure OpenAI Service")
 # Each entry is a *list* of candidate search patterns (tried in order).
 # The first pattern that returns results is used.
 MODEL_METER_PATTERNS: Dict[str, List[str]] = {
-    "gpt-5": ["GPT 5 Chat", "GPT 5 Inpt"],
-    "gpt-4.1": ["gpt 4.1 Inp", "gpt-4.1 Inp"],
-    "gpt-4.1-mini": ["gpt 4.1 mini Inp", "gpt-4.1-mini Inp"],
-    "gpt-4.1-nano": ["gpt 4.1 nano Inp", "gpt-4.1-nano Inp"],
+    "gpt-4o-2024-11-20": ["gpt 4o 1120"],
+    "gpt-4o-2024-08-06": ["gpt 4o 0806"],
+    "gpt-4o-2024-05-13": ["gpt 4o 0513"],
+    "gpt-5.5": ["5.5 ShortCo"],
+    "gpt-5.4-mini": ["5.4 mini"],
+    "gpt-5.4": ["5.4"],
+    "gpt-5.3-codex": ["5.3 codex"],
+    "gpt-5.2-codex": ["5.2 codex"],
+    "gpt-5.2": ["GPT 5.2"],
+    "gpt-5.1-codex": ["5.1 codex"],
+    "gpt-5.1": ["GPT 5.1"],
+    "gpt-5-mini": ["GPT 5 Mini"],
+    "gpt-5": ["GPT 5 Inpt", "GPT 5 cchd", "GPT 5 outpt"],
+    "gpt-4.1": ["gpt 4.1"],
+    "gpt-4.1-mini": ["gpt 4.1 mini"],
+    "gpt-4.1-nano": ["gpt 4.1 nano"],
     "gpt-4o": ["gpt 4o 1120", "gpt 4o 0806", "gpt 4o 0513"],
-    "gpt-4o-mini": ["gpt-4o-mini-0718"],
+    "gpt-4o-mini": ["gpt-4o-mini-0718", "gpt 4o mini 0718"],
     "o1": ["o1 1217"],
     "o3-mini": ["o3 mini 0131", "o3-mini"],
     "o4-mini": ["o4-mini 0416", "o4-mini"],
@@ -72,10 +88,10 @@ MODEL_METER_PATTERNS: Dict[str, List[str]] = {
 # ---------------------------------------------------------------------------
 # PTU meter patterns per deployment type
 # ---------------------------------------------------------------------------
-PTU_METER_KEYWORDS: Dict[str, str] = {
-    "global": "Global Provisioned Managed",
-    "data_zone": "Data Zone Provisioned Managed",
-    "regional": "Provisioned Managed",
+PTU_METER_KEYWORDS: Dict[str, Tuple[str, ...]] = {
+    "global": ("Provisioned Managed Global", "Global Provisioned Managed"),
+    "data_zone": ("Provisioned Managed Data Zone", "Data Zone Provisioned Managed"),
+    "regional": ("Provisioned Managed Regional", "Regional Provisioned Managed"),
 }
 
 # ---------------------------------------------------------------------------
@@ -95,6 +111,70 @@ STATIC_PAYG_RATES: Dict[str, Tuple[float, float]] = {
     "o1": (15.00, 60.00),
     "o3-mini": (1.10, 4.40),
     "o4-mini": (1.10, 4.40),
+}
+
+# Verified standard input, cached input, and output rates per 1M tokens.
+# Source: Azure Retail Prices API, queried July 14, 2026 in East US. Global
+# meters use Gl/glbl; Data Zone meters use Dz/DZone/Data Zone. Regional rates
+# are included only where explicit regnl meters exist. Unknown combinations
+# deliberately price cached input at the standard input rate.
+STATIC_TOKEN_RATES: Dict[Tuple[str, str], Tuple[float, float, float]] = {
+    ("gpt-4o-2024-11-20", "global"): (2.50, 1.25, 10.00),
+    ("gpt-4o-2024-11-20", "data_zone"): (2.75, 1.375, 11.00),
+    ("gpt-4o-2024-08-06", "global"): (2.50, 1.25, 10.00),
+    ("gpt-4o-2024-08-06", "data_zone"): (2.75, 1.375, 11.00),
+    ("gpt-4o-2024-05-13", "global"): (5.00, 5.00, 15.00),
+    ("gpt-4o-2024-05-13", "data_zone"): (5.50, 5.50, 16.50),
+    ("gpt-4o", "global"): (2.50, 1.25, 10.00),
+    ("gpt-4o", "data_zone"): (2.75, 1.375, 11.00),
+    ("gpt-4o-mini", "global"): (0.15, 0.075, 0.60),
+    ("gpt-4o-mini", "data_zone"): (0.165, 0.0825, 0.66),
+    ("gpt-4.1", "global"): (2.00, 0.50, 8.00),
+    ("gpt-4.1", "data_zone"): (2.20, 0.55, 8.80),
+    ("gpt-4.1-mini", "global"): (0.40, 0.10, 1.60),
+    ("gpt-4.1-mini", "data_zone"): (0.44, 0.11, 1.76),
+    ("gpt-4.1-nano", "global"): (0.10, 0.025, 0.40),
+    ("gpt-4.1-nano", "data_zone"): (0.11, 0.0275, 0.44),
+    ("gpt-5", "global"): (1.25, 0.125, 10.00),
+    ("gpt-5", "data_zone"): (1.375, 0.1375, 11.00),
+    ("gpt-5-mini", "global"): (0.25, 0.025, 2.00),
+    ("gpt-5-mini", "data_zone"): (0.275, 0.0275, 2.20),
+    ("gpt-5.1", "global"): (1.25, 0.125, 10.00),
+    ("gpt-5.1", "data_zone"): (1.375, 0.1375, 11.00),
+    ("gpt-5.1-codex", "global"): (1.25, 0.125, 10.00),
+    ("gpt-5.1-codex", "data_zone"): (1.375, 0.1375, 11.00),
+    ("gpt-5.2", "global"): (1.75, 0.175, 14.00),
+    ("gpt-5.2", "data_zone"): (1.925, 0.1925, 15.40),
+    ("gpt-5.2-codex", "global"): (1.75, 0.175, 14.00),
+    ("gpt-5.2-codex", "data_zone"): (1.925, 0.1925, 15.40),
+    ("gpt-5.3-codex", "global"): (1.75, 0.175, 14.00),
+    ("gpt-5.3-codex", "data_zone"): (1.925, 0.1925, 15.40),
+    ("gpt-5.4", "global"): (2.50, 0.25, 15.00),
+    ("gpt-5.4", "data_zone"): (2.75, 0.275, 16.50),
+    ("gpt-5.4-mini", "global"): (0.75, 0.075, 4.50),
+    ("gpt-5.4-mini", "data_zone"): (0.825, 0.0825, 4.95),
+    ("gpt-5.5", "global"): (5.00, 0.50, 30.00),
+    ("gpt-5.5", "data_zone"): (5.50, 0.55, 33.00),
+    ("o1", "global"): (15.00, 7.50, 60.00),
+    ("o1", "data_zone"): (16.50, 8.25, 66.00),
+    ("o3-mini", "global"): (1.10, 0.55, 4.40),
+    ("o3-mini", "data_zone"): (1.21, 0.605, 4.84),
+    ("o4-mini", "global"): (1.10, 0.275, 4.40),
+    ("o4-mini", "data_zone"): (1.21, 0.303, 4.84),
+}
+
+STATIC_REGIONAL_TOKEN_RATES: Dict[Tuple[str, str], Tuple[float, float, float]] = {
+    ("gpt-4o-2024-11-20", "eastus"): (2.75, 1.375, 11.00),
+    ("gpt-4o-2024-08-06", "eastus"): (2.75, 1.375, 11.00),
+    ("gpt-4o-2024-05-13", "eastus"): (5.50, 5.50, 16.50),
+    ("gpt-4o", "eastus"): (2.75, 1.375, 11.00),
+    ("gpt-4o-mini", "eastus"): (0.165, 0.0825, 0.66),
+    ("gpt-4.1", "eastus"): (2.20, 0.55, 8.80),
+    ("gpt-4.1-mini", "eastus"): (0.44, 0.11, 1.76),
+    ("gpt-4.1-nano", "eastus"): (0.11, 0.0275, 0.44),
+    ("o1", "eastus"): (16.50, 8.25, 66.00),
+    ("o3-mini", "eastus"): (1.21, 0.605, 4.84),
+    ("o4-mini", "eastus"): (1.21, 0.303, 4.84),
 }
 
 # Static PTU hourly rates per deployment type (from pricing.py)
@@ -191,6 +271,11 @@ class PricingResult:
     ptu_hourly_rate: float  # $ per PTU-hour (region- and type-specific)
     source: Literal["live", "cached", "fallback", "manual"]
     as_of: datetime
+    payg_cached_input_rate: float = 0.0  # $ per 1M cached input tokens
+    cached_input_source: Literal[
+        "live", "cached", "fallback", "manual", "conservative"
+    ] = "conservative"
+    ptu_pricing_source: Literal["live", "cached", "fallback", "manual"] = "fallback"
     currency: str = "USD"
     model_name: str = ""
     region: str = ""
@@ -213,6 +298,9 @@ class PricingResolver:
     def __init__(self, cache_ttl_hours: int = 24) -> None:
         self._cache: Dict[str, Tuple[PricingResult, datetime]] = {}
         self._ttl = timedelta(hours=cache_ttl_hours)
+        self._warmup_lock = threading.Lock()
+        self._warmup_stop = threading.Event()
+        self._warmup_thread: Optional[threading.Thread] = None
 
     # -- public API --------------------------------------------------------
 
@@ -224,6 +312,7 @@ class PricingResolver:
         *,
         payg_input_override: Optional[float] = None,
         payg_output_override: Optional[float] = None,
+        payg_cached_input_override: Optional[float] = None,
         ptu_hourly_override: Optional[float] = None,
     ) -> PricingResult:
         """Resolve pricing for the given model/region/deployment-type.
@@ -246,24 +335,48 @@ class PricingResolver:
         dtype_key = (
             (deployment_type or "global").strip().lower().replace("-", "_").replace(" ", "_")
         )
+        if dtype_key not in {"global", "data_zone", "regional"}:
+            raise ValueError("deployment_type must be global, data_zone, or regional")
 
         # ------------------------------------------------------------------
         # Layer 1: Manual overrides
         # ------------------------------------------------------------------
         if any(
-            v is not None for v in (payg_input_override, payg_output_override, ptu_hourly_override)
+            v is not None
+            for v in (
+                payg_input_override,
+                payg_output_override,
+                payg_cached_input_override,
+                ptu_hourly_override,
+            )
         ):
             fallback = self._static_fallback(model_key, region_key, dtype_key, now)
-            result = PricingResult(
-                payg_input_rate=payg_input_override
+            resolved_input = (
+                payg_input_override
                 if payg_input_override is not None
-                else fallback.payg_input_rate,
+                else fallback.payg_input_rate
+            )
+            result = PricingResult(
+                payg_input_rate=resolved_input,
                 payg_output_rate=payg_output_override
                 if payg_output_override is not None
                 else fallback.payg_output_rate,
+                payg_cached_input_rate=payg_cached_input_override
+                if payg_cached_input_override is not None
+                else resolved_input
+                if payg_input_override is not None
+                else fallback.payg_cached_input_rate,
+                cached_input_source="manual"
+                if payg_cached_input_override is not None
+                else "conservative"
+                if payg_input_override is not None
+                else fallback.cached_input_source,
                 ptu_hourly_rate=ptu_hourly_override
                 if ptu_hourly_override is not None
                 else fallback.ptu_hourly_rate,
+                ptu_pricing_source="manual"
+                if ptu_hourly_override is not None
+                else fallback.ptu_pricing_source,
                 source="manual",
                 as_of=now,
                 model_name=model_key,
@@ -284,7 +397,14 @@ class PricingResolver:
                 cached_result = PricingResult(
                     payg_input_rate=result.payg_input_rate,
                     payg_output_rate=result.payg_output_rate,
+                    payg_cached_input_rate=result.payg_cached_input_rate,
+                    cached_input_source=(
+                        "cached" if result.cached_input_source == "live" else result.cached_input_source
+                    ),
                     ptu_hourly_rate=result.ptu_hourly_rate,
+                    ptu_pricing_source=(
+                        "cached" if result.ptu_pricing_source == "live" else result.ptu_pricing_source
+                    ),
                     source="cached",
                     as_of=result.as_of,
                     currency=result.currency,
@@ -305,7 +425,8 @@ class PricingResolver:
             # Sanity check against fallback
             fallback = self._static_fallback(model_key, region_key, dtype_key, now)
             if self._passes_sanity_check(live, fallback):
-                self._cache[cache_key] = (live, now)
+                if live.source == "live":
+                    self._cache[cache_key] = (live, now)
                 self._log_resolution(live, time.monotonic() - t0)
                 return live
             else:
@@ -366,13 +487,22 @@ class PricingResolver:
             ``"o4-mini-2025-04-16"`` -> ``"o4-mini"``
         """
         name = (raw or "").strip().lower()
+        parenthesized = re.fullmatch(r"(.+?)\s*\((\d{4}-\d{2}-\d{2})\)", name)
+        if parenthesized:
+            base_name, version = parenthesized.groups()
+            exact_version = f"{base_name.strip()}-{version}"
+            if exact_version in MODEL_METER_PATTERNS:
+                return exact_version
+            if base_name.strip() in MODEL_METER_PATTERNS:
+                return base_name.strip()
         # Try exact match first
         if name in MODEL_METER_PATTERNS:
             return name
-        # Try prefix match from longest to shortest (to prefer "gpt-4.1-mini" over "gpt-4.1")
+        # Only strip a date suffix. Unknown sibling variants must remain unknown
+        # so they receive conservative pricing instead of a cheaper base model.
         sorted_keys = sorted(MODEL_METER_PATTERNS.keys(), key=len, reverse=True)
         for key in sorted_keys:
-            if name.startswith(key):
+            if re.fullmatch(rf"{re.escape(key)}-\d{{4}}-\d{{2}}-\d{{2}}", name):
                 return key
         return name  # return as-is if unrecognized
 
@@ -395,11 +525,12 @@ class PricingResolver:
 
         # -- Fetch PAYG rates --
         payg_input: Optional[float] = None
+        payg_cached_input: Optional[float] = None
         payg_output: Optional[float] = None
 
         try:
-            payg_input, payg_output = self._fetch_payg_rates(
-                meter_patterns, region, deployment_type
+            payg_input, payg_cached_input, payg_output = self._fetch_payg_rates(
+                model_key, meter_patterns, region, deployment_type
             )
         except Exception:
             logger.warning(
@@ -424,13 +555,34 @@ class PricingResolver:
             )
 
         # If we got at least one rate, build a result (fill gaps from fallback)
-        if payg_input is not None or payg_output is not None or ptu_hourly is not None:
+        if (
+            payg_input is not None
+            or payg_cached_input is not None
+            or payg_output is not None
+            or ptu_hourly is not None
+        ):
             fb = self._static_fallback(model_key, region, deployment_type, now)
+            token_rates_complete = (
+                payg_input is not None
+                and payg_cached_input is not None
+                and payg_output is not None
+            )
             return PricingResult(
                 payg_input_rate=payg_input if payg_input is not None else fb.payg_input_rate,
                 payg_output_rate=payg_output if payg_output is not None else fb.payg_output_rate,
+                payg_cached_input_rate=payg_cached_input
+                if payg_cached_input is not None
+                else payg_input
+                if payg_input is not None
+                else fb.payg_cached_input_rate,
+                cached_input_source="live"
+                if payg_cached_input is not None
+                else "conservative"
+                if payg_input is not None
+                else fb.cached_input_source,
                 ptu_hourly_rate=ptu_hourly if ptu_hourly is not None else fb.ptu_hourly_rate,
-                source="live",
+                ptu_pricing_source="live" if ptu_hourly is not None else fb.ptu_pricing_source,
+                source="live" if token_rates_complete else "fallback",
                 as_of=now,
                 model_name=model_key,
                 region=region,
@@ -441,22 +593,32 @@ class PricingResolver:
 
     def _fetch_payg_rates(
         self,
+        model_key: str,
         meter_patterns: List[str],
         region: str,
         deployment_type: str,
-    ) -> Tuple[Optional[float], Optional[float]]:
+    ) -> Tuple[Optional[float], Optional[float], Optional[float]]:
         """Fetch PAYG input/output rates, trying each meter pattern in order."""
         # Map deployment type to the region qualifier used in meter names
-        region_qualifier = {
-            "global": "glbl",
-            "data_zone": "Zone",
-            "regional": "regnl",
-        }.get(deployment_type, "glbl")
+        scope_tokens = {
+            "global": ("glbl", " global", " gl "),
+            "data_zone": ("data zone", "dzone", " dz "),
+            "regional": ("regnl", "regional", " rgnl"),
+        }.get(deployment_type, ("glbl", " global", " gl "))
+
+        resolved_input: Optional[float] = None
+        resolved_cached_input: Optional[float] = None
+        resolved_output: Optional[float] = None
 
         for svc_name in API_SERVICE_NAMES:
             for pattern in meter_patterns:
+                product_name = MODEL_PRODUCT_NAMES.get(
+                    model_key,
+                    "Azure OpenAI GPT5" if model_key.startswith("gpt-5") else "Azure OpenAI",
+                )
                 payg_filter = (
                     f"serviceName eq '{svc_name}' "
+                    f"and productName eq '{product_name}' "
                     f"and armRegionName eq '{region}' "
                     f"and priceType eq 'Consumption' "
                     f"and contains(meterName, '{pattern}')"
@@ -472,14 +634,14 @@ class PricingResolver:
                 if not items:
                     continue
 
-                payg_input: Optional[float] = None
-                payg_output: Optional[float] = None
-
                 for item in items:
                     meter = item.get("meterName", "")
+                    sku_name = item.get("skuName", "")
                     unit_price = float(item.get("unitPrice", 0))
                     unit_of_measure = item.get("unitOfMeasure", "")
                     meter_lower = meter.lower()
+                    sku_lower = sku_name.lower()
+                    classifier_text = f" {meter_lower} {sku_lower} "
 
                     # Skip non-standard meters (batch, cached, fine-tuned,
                     # audio, realtime, transcribe, tts)
@@ -487,8 +649,7 @@ class PricingResolver:
                         kw in meter_lower
                         for kw in (
                             "batch",
-                            "cchd",
-                            "cached",
+                            " pp ",
                             "ft ",
                             "-ft ",
                             "-ft-",
@@ -506,74 +667,71 @@ class PricingResolver:
                         continue
 
                     # Check deployment scope qualifier (glbl, regnl, Zone, etc.)
-                    if region_qualifier.lower() not in meter_lower:
-                        # Also accept "Glbl" / "global" as alternate spellings
-                        alt_qualifiers = {
-                            "glbl": ["global"],
-                            "regnl": ["regional"],
-                            "zone": ["dz", "data zone", "dzone"],
-                        }
-                        alts = alt_qualifiers.get(region_qualifier.lower(), [])
-                        if not any(a in meter_lower for a in alts):
-                            continue
+                    if not any(token in classifier_text for token in scope_tokens):
+                        continue
+                    if not self._meter_matches_model(classifier_text, pattern):
+                        continue
 
                     rate_per_1m = self._normalize_rate(unit_price, unit_of_measure)
 
                     # Classify as input or output
-                    if self._is_input_meter(meter_lower) and payg_input is None:
-                        payg_input = rate_per_1m
-                    elif self._is_output_meter(meter_lower) and payg_output is None:
-                        payg_output = rate_per_1m
+                    is_cached = self._is_cached_input_meter(classifier_text)
+                    if is_cached:
+                        if resolved_cached_input is None:
+                            resolved_cached_input = rate_per_1m
+                    elif self._is_input_meter(classifier_text) and resolved_input is None:
+                        resolved_input = rate_per_1m
+                    elif self._is_output_meter(classifier_text) and resolved_output is None:
+                        resolved_output = rate_per_1m
 
-                if payg_input is not None or payg_output is not None:
-                    return payg_input, payg_output
+                if (
+                    resolved_input is not None
+                    and resolved_cached_input is not None
+                    and resolved_output is not None
+                ):
+                    return resolved_input, resolved_cached_input, resolved_output
 
-        return None, None
+        return resolved_input, resolved_cached_input, resolved_output
 
     def _fetch_ptu_rate(self, region: str, deployment_type: str) -> Optional[float]:
         """Fetch PTU hourly rate for the given region and deployment type."""
-        ptu_keyword = PTU_METER_KEYWORDS.get(deployment_type, "Provisioned Managed")
-        ptu_hourly: Optional[float] = None
+        ptu_keywords = PTU_METER_KEYWORDS.get(
+            deployment_type,
+            ("Provisioned Managed Regional", "Regional Provisioned Managed"),
+        )
 
         for svc_name in API_SERVICE_NAMES:
-            ptu_filter = (
-                f"serviceName eq '{svc_name}' "
-                f"and armRegionName eq '{region}' "
-                f"and contains(meterName, '{ptu_keyword}')"
-            )
-            resp = _httpx.get(
-                RETAIL_PRICES_URL,
-                params={"$filter": ptu_filter},
-                timeout=API_TIMEOUT_SECONDS,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            items = data.get("Items", [])
+            for ptu_keyword in ptu_keywords:
+                ptu_filter = (
+                    f"serviceName eq '{svc_name}' "
+                    f"and productName eq 'Azure OpenAI' "
+                    f"and armRegionName eq '{region}' "
+                    f"and contains(meterName, '{ptu_keyword}')"
+                )
+                resp = _httpx.get(
+                    RETAIL_PRICES_URL,
+                    params={"$filter": ptu_filter},
+                    timeout=API_TIMEOUT_SECONDS,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                items = data.get("Items", [])
 
-            for item in items:
-                meter = item.get("meterName", "")
-                unit_price = float(item.get("unitPrice", 0))
-                uom = item.get("unitOfMeasure", "")
+                for item in items:
+                    meter = item.get("meterName", "")
+                    product_name = item.get("productName", "")
+                    unit_price = float(item.get("unitPrice", 0))
+                    uom = item.get("unitOfMeasure", "")
+                    meter_lower = meter.lower()
 
-                # PTU meters: "1/Hour" → per-PTU per-hour directly
-                # Skip monthly commitment meters (large values like $286, $2916)
-                if "Provisioned" not in meter or unit_price <= 0:
-                    continue
-                if "month" in uom.lower():
-                    continue
-                # Skip obviously wrong values (commitment tiers reported hourly
-                # but with huge unit prices — they represent bulk commitments)
-                if unit_price > 10:
-                    continue
-
-                if ptu_keyword.lower() in meter.lower():
-                    ptu_hourly = unit_price
-                    break
-                elif ptu_hourly is None:
-                    ptu_hourly = unit_price
-
-            if ptu_hourly is not None:
-                return ptu_hourly
+                    if product_name and product_name != "Azure OpenAI":
+                        continue
+                    if "provisioned" not in meter_lower or unit_price <= 0:
+                        continue
+                    if "month" in uom.lower() or unit_price > 10:
+                        continue
+                    if ptu_keyword.lower() in meter_lower:
+                        return unit_price
 
         return None
 
@@ -585,7 +743,47 @@ class PricingResolver:
     @staticmethod
     def _is_output_meter(meter_lower: str) -> bool:
         """Return True if the meter name indicates an output token meter."""
-        return any(kw in meter_lower for kw in ("outp", "output", "outpt"))
+        return any(kw in meter_lower for kw in ("outp", "output", "outpt", " opt "))
+
+    @staticmethod
+    def _is_cached_input_meter(meter_lower: str) -> bool:
+        """Return True for cached-input meter naming variants."""
+        return (
+            "cached" in meter_lower
+            or "cchd" in meter_lower
+            or " cched " in meter_lower
+            or " cd inp" in meter_lower
+        ) and PricingResolver._is_input_meter(meter_lower)
+
+    @staticmethod
+    def _meter_matches_model(classifier_text: str, primary_pattern: str) -> bool:
+        """Reject sibling model variants returned by broad Retail API filters."""
+        pattern = primary_pattern.lower()
+        if pattern in classifier_text:
+            if pattern == "gpt 4.1" and any(
+                sibling in classifier_text for sibling in ("gpt 4.1 mini", "gpt 4.1 nano")
+            ):
+                return False
+            if pattern == "5.4" and "5.4 mini" in classifier_text:
+                return False
+            if pattern == "5.4" and any(
+                sibling in classifier_text for sibling in ("5.4 nano", "5.4 pro", "5.4 longco")
+            ):
+                return False
+            if pattern == "5.1 codex" and any(
+                sibling in classifier_text for sibling in ("codex mini", "codex max")
+            ):
+                return False
+            if pattern == "gpt 5.2" and any(
+                sibling in classifier_text for sibling in ("5.2 chat", "5.2 codex", "5.2 pro")
+            ):
+                return False
+            if pattern == "gpt 5.1" and any(
+                sibling in classifier_text for sibling in ("5.1 chat", "5.1 codex")
+            ):
+                return False
+            return True
+        return False
 
     @staticmethod
     def _normalize_rate(unit_price: float, unit_of_measure: str) -> float:
@@ -615,8 +813,21 @@ class PricingResolver:
         now: datetime,
     ) -> PricingResult:
         """Build a PricingResult from hardcoded static rates."""
-        input_rate, output_rate = STATIC_PAYG_RATES.get(
-            model_key, (DEFAULT_PAYG_INPUT, DEFAULT_PAYG_OUTPUT)
+        scoped_rates = (
+            STATIC_REGIONAL_TOKEN_RATES.get((model_key, region))
+            if deployment_type == "regional"
+            else STATIC_TOKEN_RATES.get((model_key, deployment_type))
+        )
+        if scoped_rates is not None:
+            input_rate, cached_input_rate, output_rate = scoped_rates
+        else:
+            input_rate, output_rate = STATIC_PAYG_RATES.get(
+                model_key, (DEFAULT_PAYG_INPUT, DEFAULT_PAYG_OUTPUT)
+            )
+            cached_input_rate = input_rate
+        has_verified_cached_fallback = scoped_rates is not None and cached_input_rate < input_rate
+        cached_input_source: Literal["fallback", "conservative"] = (
+            "fallback" if has_verified_cached_fallback else "conservative"
         )
 
         # PTU hourly: use the accurate per-region rates for Regional,
@@ -632,7 +843,10 @@ class PricingResolver:
         return PricingResult(
             payg_input_rate=input_rate,
             payg_output_rate=output_rate,
+            payg_cached_input_rate=cached_input_rate,
+            cached_input_source=cached_input_source,
             ptu_hourly_rate=ptu_hourly,
+            ptu_pricing_source="fallback",
             source="fallback",
             as_of=now,
             model_name=model_key,
@@ -645,6 +859,7 @@ class PricingResolver:
         """Return True if the live result is within reasonable bounds of the fallback."""
         for live_val, fallback_val in [
             (live.payg_input_rate, fallback.payg_input_rate),
+            (live.payg_cached_input_rate, fallback.payg_cached_input_rate),
             (live.payg_output_rate, fallback.payg_output_rate),
             (live.ptu_hourly_rate, fallback.ptu_hourly_rate),
         ]:
@@ -697,20 +912,47 @@ class PricingResolver:
         Returns:
             The daemon thread (already started).
         """
-        interval = interval_seconds or WARMUP_INTERVAL_SECONDS
+        interval = max(1, interval_seconds or WARMUP_INTERVAL_SECONDS)
 
-        def _loop() -> None:
-            while True:
-                try:
-                    self.warm_cache()
-                except Exception:
-                    logger.warning("Background cache warm-up cycle failed.", exc_info=True)
-                time.sleep(interval)
+        with self._warmup_lock:
+            if self._warmup_thread is not None and self._warmup_thread.is_alive():
+                return self._warmup_thread
 
-        t = threading.Thread(target=_loop, name="pricing-cache-warmup", daemon=True)
-        t.start()
+            self._warmup_stop.clear()
+
+            def _loop() -> None:
+                while not self._warmup_stop.is_set():
+                    try:
+                        self.warm_cache()
+                    except Exception:
+                        logger.warning("Background cache warm-up cycle failed.", exc_info=True)
+                    if self._warmup_stop.wait(interval):
+                        break
+
+            thread = threading.Thread(
+                target=_loop,
+                name="pricing-cache-warmup",
+                daemon=True,
+            )
+            self._warmup_thread = thread
+            thread.start()
         logger.info("pricing_background_warmup started interval_s=%d", interval)
-        return t
+        return thread
+
+    def stop_background_warmup(self, timeout_seconds: float = 5.0) -> None:
+        """Stop the owned warm-up worker and wait briefly for it to exit."""
+        with self._warmup_lock:
+            thread = self._warmup_thread
+            if thread is None:
+                return
+            self._warmup_stop.set()
+
+        if thread is not threading.current_thread():
+            thread.join(timeout=max(0.0, timeout_seconds))
+
+        with self._warmup_lock:
+            if self._warmup_thread is thread and not thread.is_alive():
+                self._warmup_thread = None
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from './echarts-setup'
-import { CHART_COLORS, PTU_CHART_THEME, fmtTooltipDay } from './theme'
+import { CHART_COLORS, PTU_CHART_THEME, fmtTooltipDay, makeCompactChartMedia } from './theme'
 import type { ZoomState } from './use-chart-zoom'
 
 type Props = {
@@ -16,6 +16,23 @@ type Props = {
 }
 
 export function DailyCostChart({ timestamps, inputCost, outputCost, avgDailyCost, ptuDailyCost, height, zoomState, onDataZoom, selectedTimestamp }: Props) {
+  const referenceLines = [
+    ...(avgDailyCost > 0 ? [{
+      yAxis: avgDailyCost,
+      lineStyle: { color: CHART_COLORS.neutral, type: 'dashed' as const, width: 1 },
+      label: { show: true, formatter: 'Avg Daily', color: CHART_COLORS.neutral, fontSize: 10, position: 'insideEndTop' as const },
+    }] : []),
+    ...(ptuDailyCost > 0 ? [{
+      yAxis: ptuDailyCost,
+      lineStyle: { color: CHART_COLORS.danger, type: 'dashed' as const, width: 1 },
+      label: { show: true, formatter: 'PTU Daily', color: CHART_COLORS.danger, fontSize: 10, position: 'insideEndBottom' as const },
+    }] : []),
+    ...(selectedTimestamp && timestamps.includes(selectedTimestamp) ? [{
+      xAxis: selectedTimestamp,
+      lineStyle: { color: 'rgba(215, 225, 255, 0.7)', type: 'dashed' as const, width: 1 },
+      label: { show: false },
+    }] : []),
+  ]
   const option = {
     ...PTU_CHART_THEME,
     tooltip: {
@@ -31,6 +48,8 @@ export function DailyCostChart({ timestamps, inputCost, outputCost, avgDailyCost
           if (p.seriesName === 'Avg Daily' || p.seriesName === 'PTU Daily') continue
           result += `<div>${p.marker} ${p.seriesName}: $${typeof p.value === 'number' ? Math.round(p.value).toLocaleString() : p.value}</div>`
         }
+        if (avgDailyCost > 0) result += `<div>Average daily reference: $${Math.round(avgDailyCost).toLocaleString()}</div>`
+        if (ptuDailyCost > 0) result += `<div>PTU daily reference: $${Math.round(ptuDailyCost).toLocaleString()}</div>`
         return result
       },
     },
@@ -79,26 +98,24 @@ export function DailyCostChart({ timestamps, inputCost, outputCost, avgDailyCost
         markLine: {
           silent: true,
           symbol: 'none',
-          data: [
-            ...(avgDailyCost > 0 ? [{
-              yAxis: avgDailyCost,
-              lineStyle: { color: CHART_COLORS.neutral, type: 'dashed' as const, width: 1 },
-              label: { show: true, formatter: 'Avg Daily', color: CHART_COLORS.neutral, fontSize: 10, position: 'insideEndTop' as const },
-            }] : []),
-            ...(ptuDailyCost > 0 ? [{
-              yAxis: ptuDailyCost,
-              lineStyle: { color: CHART_COLORS.danger, type: 'dashed' as const, width: 1 },
-              label: { show: true, formatter: 'PTU Daily', color: CHART_COLORS.danger, fontSize: 10, position: 'insideEndBottom' as const },
-            }] : []),
-            ...(selectedTimestamp && timestamps.includes(selectedTimestamp) ? [{
-              xAxis: selectedTimestamp,
-              lineStyle: { color: 'rgba(215, 225, 255, 0.7)', type: 'dashed' as const, width: 1 },
-              label: { show: false },
-            }] : []),
-          ],
+          data: referenceLines,
         },
       },
     ],
+    media: makeCompactChartMedia({
+      grid: { top: 42, bottom: 66 },
+      series: [
+        {},
+        {
+          markLine: {
+            data: referenceLines.map((line) => ({
+              ...line,
+              label: { ...line.label, show: false },
+            })),
+          },
+        },
+      ],
+    }),
   }
 
   return (

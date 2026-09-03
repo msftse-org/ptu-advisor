@@ -5,18 +5,21 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
+import numpy as np
 from jinja2 import Environment, FileSystemLoader, select_autoescape
+from markupsafe import escape
 
+from ptu_advisor.analysis.rule_explainer import Explainer
 from ptu_advisor.config import AnalysisConfig
 from ptu_advisor.metrics.models import (
     AnalysisResult,
     DeploymentMetrics,
     DimensionScore,
     Recommendation,
+    TimeSeries,
 )
-from ptu_advisor.analysis.rule_explainer import Explainer
 from ptu_advisor.visualization.charts import Chart
 
 
@@ -144,6 +147,25 @@ class ReportGenerator:
         completion_tokens = metrics.completion_tokens.total if metrics.completion_tokens else 0
         total_tokens = prompt_tokens + completion_tokens
         prompt_ratio = prompt_tokens / total_tokens if total_tokens > 0 else 0
+        from ptu_advisor.config import get_model_config as _get_cache_model_config
+        from ptu_advisor.cost.cache import build_cache_impact as _build_cache_impact
+
+        cache_model = _get_cache_model_config(metrics.model_name)
+        cache_impact = _build_cache_impact(
+            prompt_tokens=metrics.prompt_tokens,
+            completion_tokens=metrics.completion_tokens,
+            cache_match_rate=metrics.cache_match_rate,
+            active_tokens=metrics.active_tokens,
+            output_multiplier=cache_model.output_ratio if cache_model else 1,
+            input_tpm_per_ptu=cache_model.input_tpm_per_ptu if cache_model else 1,
+            min_ptu=1,
+            ptu_increment=1,
+            interval_minutes=self._metric_interval_minutes(metrics.prompt_tokens),
+            coverage_pct_override=metrics.cache_coverage_pct,
+        )
+        cache_match_rate = cache_impact.avg_match_rate_pct / 100.0
+        cached_prompt_tokens = cache_impact.total_cached_prompt_tokens
+        active_prompt_tokens = cache_impact.total_active_prompt_tokens
 
         # TPM stats
         tpm_mean = metrics.tokens_per_minute.mean if metrics.tokens_per_minute else 0
@@ -217,6 +239,13 @@ class ReportGenerator:
             "total_tokens": total_tokens,
             "prompt_ratio": prompt_ratio,
             "completion_ratio": 1 - prompt_ratio,
+            "cache_match_rate": cache_match_rate,
+            "cached_prompt_tokens": cached_prompt_tokens,
+            "active_prompt_tokens": active_prompt_tokens,
+            "cache_source": cache_impact.source,
+            "cache_quality": cache_impact.quality,
+            "cache_coverage_pct": cache_impact.coverage_pct,
+            "cache_validation_warnings": cache_impact.validation_warnings,
             # Latency metrics
             "p50_min": p50_min,
             "p50_max": p50_max,
@@ -262,6 +291,8 @@ class ReportGenerator:
         if not text:
             return text
 
+        text = str(escape(text))
+
         # Convert **bold** to <strong>
         text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
 
@@ -300,7 +331,8 @@ class ReportGenerator:
         completion_ratio = completion_tokens / total_tokens if total_tokens > 0 else 0.4
 
         # Use centralized model configs from config.py (single source of truth)
-        from ptu_advisor.config import get_model_config as _get_model_config, MODEL_CAPACITY_CONFIGS
+        from ptu_advisor.config import MODEL_CAPACITY_CONFIGS
+        from ptu_advisor.config import get_model_config as _get_model_config
 
         model_config = _get_model_config(metrics.model_name)
 
@@ -326,21 +358,42 @@ class ReportGenerator:
             "regional_inc": model_config.regional_increment,
         }
 
+        from ptu_advisor.cost.cache import build_cache_impact
+
+        cache_impact = build_cache_impact(
+            prompt_tokens=metrics.prompt_tokens,
+            completion_tokens=metrics.completion_tokens,
+            cache_match_rate=metrics.cache_match_rate,
+            active_tokens=metrics.active_tokens,
+            output_multiplier=config["output_ratio"],
+            input_tpm_per_ptu=config["input_tpm_per_ptu"],
+            min_ptu=config["global_min"],
+            ptu_increment=config["global_inc"],
+            interval_minutes=self._metric_interval_minutes(metrics.prompt_tokens),
+            coverage_pct_override=metrics.cache_coverage_pct,
+        )
+
         # Calculate effective TPM considering output token weight
         # Effective TPM = input_tokens + (output_tokens * output_ratio)
         prompt_ratio = 1 - completion_ratio
         effective_multiplier = prompt_ratio + (completion_ratio * config["output_ratio"])
 
-        # PTU needed = Peak TPM / (TPM per PTU / effective_multiplier)
-        # With safety margin of 1.2x
-        safety_margin = 1.2
-
-        raw_ptu_needed = (peak_tpm * effective_multiplier * safety_margin) / config[
-            "input_tpm_per_ptu"
-        ]
-        avg_ptu_needed = (avg_tpm * effective_multiplier * safety_margin) / config[
-            "input_tpm_per_ptu"
-        ]
+        if cache_impact.adjusted_normalized_tpm:
+            raw_ptu_needed = (
+                float(np.percentile(cache_impact.adjusted_normalized_tpm, 95))
+                / config["input_tpm_per_ptu"]
+            )
+            avg_ptu_needed = (
+                cache_impact.cache_adjusted_normalized_avg_tpm
+                / config["input_tpm_per_ptu"]
+            )
+        else:
+            raw_ptu_needed = (peak_tpm * effective_multiplier) / config[
+                "input_tpm_per_ptu"
+            ]
+            avg_ptu_needed = (avg_tpm * effective_multiplier) / config[
+                "input_tpm_per_ptu"
+            ]
 
         # Round to deployment increments
         def round_to_increment(value: float, minimum: int, increment: int) -> int:
@@ -348,7 +401,7 @@ class ReportGenerator:
                 return minimum
             return max(minimum, int(((value - minimum) // increment + 1) * increment + minimum))
 
-        global_ptu = round_to_increment(raw_ptu_needed, config["global_min"], config["global_inc"])
+        global_ptu = cache_impact.cache_aware_recommended_ptu
         regional_ptu = round_to_increment(
             raw_ptu_needed, config["regional_min"], config["regional_inc"]
         )
@@ -366,10 +419,13 @@ class ReportGenerator:
         from ptu_advisor.cost.price_resolver import get_pricing_resolver
 
         _resolver = get_pricing_resolver()
+        pricing_model_name = metrics.model_name
+        if metrics.deployment_info and metrics.deployment_info.model_version:
+            pricing_model_name = f"{metrics.model_name}-{metrics.deployment_info.model_version}"
 
         # Resolve pricing for Global deployment (report default)
         _global_pricing = _resolver.resolve(
-            model_name=metrics.model_name,
+            model_name=pricing_model_name,
             region="eastus",
             deployment_type="global",
         )
@@ -377,7 +433,7 @@ class ReportGenerator:
 
         # Resolve pricing for Regional deployment
         _regional_pricing = _resolver.resolve(
-            model_name=metrics.model_name,
+            model_name=pricing_model_name,
             region="eastus",
             deployment_type="regional",
         )
@@ -387,16 +443,25 @@ class ReportGenerator:
 
         # --- PAYG cost estimation (from resolver) ---
         payg_input_rate = _global_pricing.payg_input_rate
+        payg_cached_input_rate = _global_pricing.payg_cached_input_rate
         payg_output_rate = _global_pricing.payg_output_rate
 
-        monthly_tokens = avg_tpm * 60 * 730
+        monthly_tokens = avg_tpm * 43_200
         monthly_input_tokens = monthly_tokens * (1 - completion_ratio)
         monthly_output_tokens = monthly_tokens * completion_ratio
-        payg_monthly_cost = (monthly_input_tokens / 1_000_000) * payg_input_rate + (
+        cached_monthly_input = monthly_input_tokens * (
+            cache_impact.avg_match_rate_pct / 100.0 if cache_impact.applied else 0.0
+        )
+        active_monthly_input = monthly_input_tokens - cached_monthly_input
+        payg_monthly_cost = (
+            active_monthly_input / 1_000_000 * payg_input_rate
+            + cached_monthly_input / 1_000_000 * payg_cached_input_rate
+            + (
             monthly_output_tokens / 1_000_000
-        ) * payg_output_rate
+            ) * payg_output_rate
+        )
 
-        ptu_monthly_global = global_ptu * global_hourly_rate * 730
+        ptu_monthly_global = global_ptu * global_hourly_rate * 720
         ptu_savings_pct = (
             (payg_monthly_cost - ptu_monthly_global) / payg_monthly_cost * 100
             if payg_monthly_cost > 0
@@ -417,18 +482,18 @@ class ReportGenerator:
             "global_ptu_recommended": global_ptu,
             "global_ptu_conservative": global_ptu_conservative,
             "global_hourly_cost": global_ptu * global_hourly_rate,
-            "global_monthly_cost": global_ptu * global_hourly_rate * 730,
-            "global_monthly_reserved": global_ptu * global_hourly_rate * 730 * reservation_discount,
+            "global_monthly_cost": global_ptu * global_hourly_rate * 720,
+            "global_monthly_reserved": global_ptu * global_hourly_rate * 720 * reservation_discount,
             # Regional Provisioned
             "regional_min": config["regional_min"],
             "regional_inc": config["regional_inc"],
             "regional_ptu_recommended": regional_ptu,
             "regional_ptu_conservative": regional_ptu_conservative,
             "regional_hourly_cost": regional_ptu * regional_hourly_rate,
-            "regional_monthly_cost": regional_ptu * regional_hourly_rate * 730,
+            "regional_monthly_cost": regional_ptu * regional_hourly_rate * 720,
             "regional_monthly_reserved": regional_ptu
             * regional_hourly_rate
-            * 730
+            * 720
             * reservation_discount,
             # PAYG cost estimate
             "payg_input_rate_per_1m": payg_input_rate,
@@ -442,4 +507,25 @@ class ReportGenerator:
             # PTU specs
             "input_tpm_per_ptu": config["input_tpm_per_ptu"],
             "output_ratio": config["output_ratio"],
+            "cache_match_rate": cache_impact.avg_match_rate_pct / 100.0,
+            "cache_source": cache_impact.source,
+            "cache_quality": cache_impact.quality,
+            "ptu_avoided": cache_impact.ptu_avoided,
+            "no_cache_recommended_ptu": cache_impact.no_cache_recommended_ptu,
+            "cache_aware_recommended_ptu": cache_impact.cache_aware_recommended_ptu,
+            "no_cache_payg_estimate": (
+                monthly_input_tokens / 1_000_000 * payg_input_rate
+                + monthly_output_tokens / 1_000_000 * payg_output_rate
+            ),
         }
+
+    @staticmethod
+    def _metric_interval_minutes(series: Optional[TimeSeries]) -> int:
+        if series is None or len(series.timestamps) < 2:
+            return 1
+        deltas = [
+            (current - previous).total_seconds() / 60.0
+            for previous, current in zip(series.timestamps, series.timestamps[1:])
+            if current > previous
+        ]
+        return max(1, int(round(float(np.median(deltas))))) if deltas else 1

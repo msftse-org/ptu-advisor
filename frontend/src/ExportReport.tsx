@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import type { AnalysisResponse, ConsolidationSummary } from './types'
 import { api } from './api'
+import { RecommendationIcon, type RecommendationIconKind } from './RecommendationIcon'
 import './export-report.css'
 
 export interface TokenSnapshotContext {
@@ -12,6 +13,8 @@ export interface TokenSnapshotContext {
   resource_group?: string
   workspace?: string
   deployment?: string
+  cache_mode?: 'auto' | 'disabled' | 'override'
+  cache_match_rate_override_pct?: number | null
 }
 
 interface ExportReportProps {
@@ -38,15 +41,16 @@ function fmtPct(value: number, decimals = 1): string {
 
 /* ── Recommendation display mapping ── */
 
-const RECOMMENDATION_MAP: Record<string, { label: string; icon: string; className: string }> = {
-  ptu_recommended: { label: 'PTU Recommended', icon: '✅', className: 'report-rec--green' },
-  borderline: { label: 'Borderline — Further Analysis Suggested', icon: '⚠️', className: 'report-rec--amber' },
-  ptu_not_recommended: { label: 'PTU Not Recommended — Stay on PAYG', icon: 'ℹ️', className: 'report-rec--blue' },
+const RECOMMENDATION_MAP: Record<string, { label: string; icon: RecommendationIconKind; className: string }> = {
+  ptu_recommended: { label: 'PTU Recommended', icon: 'recommended', className: 'report-rec--green' },
+  borderline: { label: 'Borderline — Further Analysis Suggested', icon: 'borderline', className: 'report-rec--amber' },
+  ptu_not_recommended: { label: 'PTU Not Recommended — Stay on PAYG', icon: 'info', className: 'report-rec--blue' },
+  insufficient_data: { label: 'Insufficient Data', icon: 'insufficient', className: 'report-rec--blue' },
 }
 
 function getRecDisplay(recommendation: string) {
   const key = recommendation.toLowerCase()
-  return RECOMMENDATION_MAP[key] ?? { label: recommendation, icon: '•', className: 'report-rec--blue' }
+  return RECOMMENDATION_MAP[key] ?? { label: recommendation, icon: 'insufficient' as const, className: 'report-rec--blue' }
 }
 
 /* ── Next steps templates ── */
@@ -345,7 +349,7 @@ function ReportContent({ analysis, baseAnalysis, isZoomed, consolidationSummary 
       <section className="report-section">
         <h2 className="report-section-title">1. Recommendation</h2>
         <div className={`report-rec-banner ${rec.className}`}>
-          <span className="report-rec-icon">{rec.icon}</span>
+          <RecommendationIcon kind={rec.icon} className="report-rec-icon" />
           <div>
             <strong>{rec.label}</strong>
             <span className="report-rec-confidence"> · Confidence: {fmtPct(analysis.confidence * 100)}</span>
@@ -528,7 +532,7 @@ const REPORT_INLINE_CSS = `
   .report-rec--green { background: #dff6dd; color: #107c10; }
   .report-rec--amber { background: #fff4ce; color: #7a6400; }
   .report-rec--blue { background: #deecf9; color: #0078d4; }
-  .report-rec-icon { font-size: 18px; }
+  .report-rec-icon { width: 18px; height: 18px; flex: 0 0 auto; }
   .report-rec-confidence { font-weight: 400; opacity: 0.85; }
   .report-summary { font-size: 13px; line-height: 1.6; color: #323130; }
   .report-metrics-table, .report-cost-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
@@ -632,6 +636,10 @@ export function ExportReport({ analysis, baseAnalysis, isZoomed, consolidationSu
         focus_topic: tokenSnapshotContext.focusTopic ?? 'Cost Reduction',
         days: tokenSnapshotContext.days ?? 7,
         interval: tokenSnapshotContext.interval ?? 'PT1M',
+        cache_mode: tokenSnapshotContext.cache_mode ?? 'auto',
+      }
+      if (tokenSnapshotContext.cache_match_rate_override_pct != null) {
+        payload.cache_match_rate_override_pct = tokenSnapshotContext.cache_match_rate_override_pct
       }
       if (tokenSnapshotContext.mode === 'live') {
         payload.subscription_id = tokenSnapshotContext.subscription_id
@@ -640,19 +648,18 @@ export function ExportReport({ analysis, baseAnalysis, isZoomed, consolidationSu
         payload.deployment = tokenSnapshotContext.deployment
       }
       const data = await api.exportTokenSnapshot(payload)
-      const jsonStr = JSON.stringify(data, null, 2)
-      const blob = new Blob([jsonStr], { type: 'application/json' })
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
+      const anchor = document.createElement('a')
+      anchor.href = url
       const deploymentName = analysis.metrics.deployment_name || 'deployment'
-      a.download = `token-usage-${deploymentName}-${new Date().toISOString().slice(0, 10)}.json`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
+      anchor.download = `token-usage-${deploymentName}-${new Date().toISOString().slice(0, 10)}.json`
+      document.body.appendChild(anchor)
+      anchor.click()
+      document.body.removeChild(anchor)
       URL.revokeObjectURL(url)
-    } catch (e) {
-      const message = e instanceof Error ? e.message : 'Snapshot export failed'
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Snapshot export failed'
       alert(`Token snapshot failed: ${message}`)
     } finally {
       setSnapshotBusy(false)
@@ -669,7 +676,10 @@ export function ExportReport({ analysis, baseAnalysis, isZoomed, consolidationSu
           aria-haspopup="true"
           aria-expanded={dropdownOpen}
         >
-          Export Report ▾
+          <span>Export Report</span>
+          <svg className="export-chevron" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="m4 6 4 4 4-4" />
+          </svg>
         </button>
         {dropdownOpen && (
           <ul className="export-menu" role="menu">
@@ -677,7 +687,11 @@ export function ExportReport({ analysis, baseAnalysis, isZoomed, consolidationSu
             <li role="menuitem"><button onClick={handleHTML}>Download HTML</button></li>
             {tokenSnapshotContext && (
               <li role="menuitem">
-                <button onClick={handleTokenSnapshot} disabled={snapshotBusy} title="JSON matching the GBB az monitor metrics list output (InputTokens, OutputTokens, prompt-cache hit rate)">
+                <button
+                  onClick={handleTokenSnapshot}
+                  disabled={snapshotBusy}
+                  title="JSON matching the GBB az monitor metrics list output (InputTokens, OutputTokens, prompt-cache hit rate)"
+                >
                   {snapshotBusy ? 'Building…' : 'Download GBB Token Snapshot (JSON)'}
                 </button>
               </li>
@@ -686,8 +700,8 @@ export function ExportReport({ analysis, baseAnalysis, isZoomed, consolidationSu
         )}
       </div>
 
-      {/* Hidden report content (used as source for export) */}
-      <div ref={reportRef} style={{ position: 'absolute', left: '-9999px', top: 0 }} aria-hidden="true">
+      {/* Non-rendering report source used to build the downloadable document. */}
+      <div ref={reportRef} hidden aria-hidden="true" data-testid="export-report-source">
         <ReportContent analysis={analysis} baseAnalysis={baseAnalysis} isZoomed={isZoomed} consolidationSummary={consolidationSummary} />
       </div>
     </>

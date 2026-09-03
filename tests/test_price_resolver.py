@@ -48,13 +48,19 @@ def _payg_item(
     }
 
 
-def _ptu_item(meter_name: str, unit_price: float, region: str = "eastus") -> Dict[str, Any]:
+def _ptu_item(
+    meter_name: str,
+    unit_price: float,
+    region: str = "eastus",
+    product_name: str = "Azure OpenAI",
+) -> Dict[str, Any]:
     return {
         "currencyCode": "USD",
         "unitPrice": unit_price,
         "armRegionName": region,
         "meterName": meter_name,
         "serviceName": "Foundry Models",
+        "productName": product_name,
         "unitOfMeasure": "1 Hour",
         "type": "Consumption",
         "effectiveStartDate": "2025-11-01T00:00:00Z",
@@ -110,7 +116,19 @@ class TestModelNormalization:
         assert PricingResolver._normalize_model("gpt-4o") == "gpt-4o"
 
     def test_versioned_model(self) -> None:
-        assert PricingResolver._normalize_model("gpt-4o-2024-11-20") == "gpt-4o"
+        assert PricingResolver._normalize_model("gpt-4o-2024-11-20") == "gpt-4o-2024-11-20"
+
+    def test_parenthesized_versioned_model(self) -> None:
+        assert (
+            PricingResolver._normalize_model("gpt-4o (2024-11-20)")
+            == "gpt-4o-2024-11-20"
+        )
+
+    def test_parenthesized_versioned_mini_model(self) -> None:
+        assert (
+            PricingResolver._normalize_model("gpt-4o-mini (2024-07-18)")
+            == "gpt-4o-mini"
+        )
 
     def test_mini_model(self) -> None:
         assert PricingResolver._normalize_model("gpt-4.1-mini-2025-04-14") == "gpt-4.1-mini"
@@ -125,11 +143,21 @@ class TestModelNormalization:
         assert PricingResolver._normalize_model("") == ""
 
     def test_prefers_longer_prefix(self) -> None:
-        # "gpt-4.1-mini" should match over "gpt-4.1"
-        assert PricingResolver._normalize_model("gpt-4.1-mini-2025-04") == "gpt-4.1-mini"
+        assert PricingResolver._normalize_model("gpt-4.1-mini-2025-04") == "gpt-4.1-mini-2025-04"
 
     def test_gpt5(self) -> None:
-        assert PricingResolver._normalize_model("gpt-5-turbo-2026-01-01") == "gpt-5"
+        assert PricingResolver._normalize_model("gpt-5-turbo-2026-01-01") == "gpt-5-turbo-2026-01-01"
+
+    @pytest.mark.parametrize("model", ["gpt-5.4-pro", "gpt-5.4-longco", "gpt-5.2-pro"])
+    def test_unknown_gpt5_siblings_do_not_collapse_to_base(self, model: str) -> None:
+        assert PricingResolver._normalize_model(model) == model
+
+    @pytest.mark.parametrize(
+        "model",
+        ["gpt-5-mini", "gpt-5.1", "gpt-5.2", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"],
+    )
+    def test_gpt5_variants_do_not_collapse_to_base_model(self, model: str) -> None:
+        assert PricingResolver._normalize_model(model) == model
 
 
 # ---------------------------------------------------------------------------
@@ -139,11 +167,25 @@ class TestModelNormalization:
 
 @patch("ptu_advisor.cost.price_resolver._httpx", None)
 class TestStaticFallback:
+    def test_gpt4o_0513_does_not_receive_unsupported_cache_discount(self) -> None:
+        result = PricingResolver().resolve("gpt-4o-2024-05-13", "eastus", "global")
+
+        assert result.payg_input_rate == pytest.approx(5.0)
+        assert result.payg_cached_input_rate == pytest.approx(5.0)
+        assert result.payg_output_rate == pytest.approx(15.0)
+        assert result.cached_input_source == "conservative"
+
+    def test_invalid_deployment_type_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="deployment_type"):
+            PricingResolver().resolve("gpt-4o", "eastus", "globall")
+
     def test_known_model_global(self) -> None:
         resolver = PricingResolver()
         result = resolver.resolve("gpt-4o", "eastus", "global")
         assert result.source == "fallback"
         assert result.payg_input_rate == 2.50
+        assert result.payg_cached_input_rate == 1.25
+        assert result.cached_input_source == "fallback"
         assert result.payg_output_rate == 10.00
         assert result.ptu_hourly_rate == 1.00  # global flat rate
         assert result.currency == "USD"
@@ -154,16 +196,52 @@ class TestStaticFallback:
         resolver = PricingResolver()
         result = resolver.resolve("gpt-4o", "westeurope", "data_zone")
         assert result.ptu_hourly_rate == 1.10  # data zone flat rate
+        assert result.payg_input_rate == pytest.approx(2.75)
+        assert result.payg_cached_input_rate == pytest.approx(1.375)
+        assert result.payg_output_rate == pytest.approx(11.0)
+        assert result.cached_input_source == "fallback"
 
     def test_known_model_regional_tier1(self) -> None:
         resolver = PricingResolver()
         result = resolver.resolve("gpt-4o", "eastus", "regional")
         assert result.ptu_hourly_rate == 2.00
+        assert result.payg_input_rate == pytest.approx(2.75)
+        assert result.payg_cached_input_rate == pytest.approx(1.375)
+        assert result.payg_output_rate == pytest.approx(11.0)
+
+    @pytest.mark.parametrize(
+        ("model", "deployment_type", "expected"),
+        [
+            ("gpt-4.1", "data_zone", (2.2, 0.55, 8.8)),
+            ("gpt-4.1-mini", "regional", (0.44, 0.11, 1.76)),
+            ("o1", "global", (15.0, 7.5, 60.0)),
+            ("o3-mini", "data_zone", (1.21, 0.605, 4.84)),
+            ("o4-mini", "global", (1.10, 0.275, 4.40)),
+            ("gpt-5.2", "global", (1.75, 0.175, 14.0)),
+            ("gpt-5.4-mini", "data_zone", (0.825, 0.0825, 4.95)),
+        ],
+    )
+    def test_scoped_static_token_rates(
+        self,
+        model: str,
+        deployment_type: str,
+        expected: tuple[float, float, float],
+    ) -> None:
+        result = PricingResolver().resolve(model, "eastus", deployment_type)
+
+        assert (
+            result.payg_input_rate,
+            result.payg_cached_input_rate,
+            result.payg_output_rate,
+        ) == pytest.approx(expected)
+        assert result.cached_input_source == "fallback"
 
     def test_known_model_regional_tier2(self) -> None:
         resolver = PricingResolver()
         result = resolver.resolve("gpt-4o", "switzerlandnorth", "regional")
         assert result.ptu_hourly_rate == 2.20
+        assert result.payg_cached_input_rate == result.payg_input_rate
+        assert result.cached_input_source == "conservative"
 
     def test_known_model_regional_tier3(self) -> None:
         resolver = PricingResolver()
@@ -198,11 +276,14 @@ class TestManualOverrides:
             "global",
             payg_input_override=5.0,
             payg_output_override=20.0,
+            payg_cached_input_override=1.25,
             ptu_hourly_override=3.0,
         )
         assert result.source == "manual"
         assert result.payg_input_rate == 5.0
         assert result.payg_output_rate == 20.0
+        assert result.payg_cached_input_rate == 1.25
+        assert result.cached_input_source == "manual"
         assert result.ptu_hourly_rate == 3.0
 
     def test_partial_override_fills_from_fallback(self) -> None:
@@ -215,6 +296,8 @@ class TestManualOverrides:
         )
         assert result.source == "manual"
         assert result.payg_input_rate == 5.0
+        assert result.payg_cached_input_rate == 5.0
+        assert result.cached_input_source == "conservative"
         assert result.payg_output_rate == 10.0  # fallback
         assert result.ptu_hourly_rate == 1.00  # fallback
 
@@ -307,11 +390,150 @@ class TestCache:
 
 class TestLiveFetch:
     @patch("ptu_advisor.cost.price_resolver._httpx")
+    def test_live_fetch_matches_current_global_ptu_meter_name(
+        self, mock_httpx: MagicMock
+    ) -> None:
+        payg_items = [
+            _payg_item("gpt 4o 1120 Inp glbl Tokens", 0.0025),
+            _payg_item("gpt 4o 1120 cached Inp glbl Tokens", 0.00125),
+            _payg_item("gpt 4o 1120 Outp glbl Tokens", 0.01),
+        ]
+
+        def route(*args: Any, **kwargs: Any) -> FakeResponse:
+            filter_text = kwargs.get("params", {}).get("$filter", "")
+            if "Provisioned Managed Global" in filter_text:
+                return FakeResponse(
+                    _make_api_response([_ptu_item("Provisioned Managed Global Unit", 1.00)])
+                )
+            if "Provisioned" in filter_text:
+                return FakeResponse(_make_api_response([]))
+            return FakeResponse(_make_api_response(payg_items))
+
+        mock_httpx.get.side_effect = route
+
+        result = PricingResolver().resolve("gpt-4o-2024-11-20", "eastus", "global")
+
+        assert result.source == "live"
+        assert result.cached_input_source == "live"
+        assert result.ptu_pricing_source == "live"
+
+    @patch("ptu_advisor.cost.price_resolver._httpx")
+    def test_live_fetch_resolves_cached_input_meter(self, mock_httpx: MagicMock) -> None:
+        mock_httpx.get.side_effect = _route_api_calls(
+            payg_items=[
+                _payg_item("gpt 4o 1120 Inp glbl Tokens", 0.0025),
+                _payg_item("gpt 4o 1120 Cchd Inp glbl Tokens", 0.00125),
+                _payg_item("gpt 4o 1120 Outp glbl Tokens", 0.01),
+            ],
+            ptu_items=[_ptu_item("Global Provisioned Managed Base Unit", 1.00)],
+        )
+
+        result = PricingResolver().resolve("gpt-4o", "eastus", "global")
+
+        assert result.payg_cached_input_rate == pytest.approx(1.25, rel=0.01)
+        assert result.cached_input_source == "live"
+
+    @patch("ptu_advisor.cost.price_resolver._httpx")
+    def test_gpt41_live_fetch_includes_cached_and_output_meters(
+        self, mock_httpx: MagicMock
+    ) -> None:
+        mock_httpx.get.side_effect = _route_api_calls(
+            payg_items=[
+                _payg_item("gpt 4.1 Inp glbl Tokens", 0.002),
+                _payg_item("gpt 4.1 cached Inp glbl Tokens", 0.0005),
+                _payg_item("gpt 4.1 Outp glbl Tokens", 0.008),
+            ],
+            ptu_items=[_ptu_item("Global Provisioned Managed Base Unit", 1.00)],
+        )
+
+        result = PricingResolver().resolve("gpt-4.1", "eastus", "global")
+
+        assert result.payg_input_rate == pytest.approx(2.0)
+        assert result.payg_cached_input_rate == pytest.approx(0.5)
+        assert result.payg_output_rate == pytest.approx(8.0)
+
+    @patch("ptu_advisor.cost.price_resolver._httpx")
+    def test_gpt52_cd_input_is_not_classified_as_standard_input(
+        self, mock_httpx: MagicMock
+    ) -> None:
+        mock_httpx.get.side_effect = _route_api_calls(
+            payg_items=[
+                _payg_item("GPT 5.2 inp Gl 1M Tokens", 1.75, uom="1M"),
+                _payg_item("GPT 5.2 cd inp Gl 1M Tokens", 0.175, uom="1M"),
+                _payg_item("GPT 5.2 opt Gl 1M Tokens", 14.0, uom="1M"),
+                _payg_item("GPT 5.2 chat inp Gl 1M Tokens", 1.75, uom="1M"),
+            ],
+            ptu_items=[_ptu_item("Global Provisioned Managed Base Unit", 1.00)],
+        )
+
+        result = PricingResolver().resolve("gpt-5.2", "eastus", "global")
+
+        assert result.payg_input_rate == pytest.approx(1.75)
+        assert result.payg_cached_input_rate == pytest.approx(0.175)
+        assert result.payg_output_rate == pytest.approx(14.0)
+
+    @patch("ptu_advisor.cost.price_resolver._httpx")
+    def test_live_fetch_combines_rates_across_meter_patterns(
+        self, mock_httpx: MagicMock
+    ) -> None:
+        def route(*args: Any, **kwargs: Any) -> FakeResponse:
+            filter_text = kwargs.get("params", {}).get("$filter", "")
+            if "Provisioned" in filter_text:
+                return FakeResponse(
+                    _make_api_response([_ptu_item("Global Provisioned Managed Base Unit", 1.0)])
+                )
+            if "gpt 4o mini 0718" in filter_text:
+                return FakeResponse(
+                    _make_api_response(
+                        [_payg_item("gpt 4o mini 0718 cached Inp glbl Tokens", 0.000075)]
+                    )
+                )
+            if "gpt-4o-mini-0718" in filter_text:
+                return FakeResponse(
+                    _make_api_response(
+                        [
+                            _payg_item("gpt-4o-mini-0718-Inp-glbl Tokens", 0.00015),
+                            _payg_item("gpt-4o-mini-0718-Outp-glbl Tokens", 0.0006),
+                        ]
+                    )
+                )
+            return FakeResponse(_make_api_response([]))
+
+        mock_httpx.get.side_effect = route
+
+        result = PricingResolver().resolve("gpt-4o-mini", "eastus", "global")
+
+        assert result.payg_input_rate == pytest.approx(0.15)
+        assert result.payg_cached_input_rate == pytest.approx(0.075)
+        assert result.payg_output_rate == pytest.approx(0.6)
+
+    @patch("ptu_advisor.cost.price_resolver._httpx")
+    def test_standard_meters_exclude_priority_processing(self, mock_httpx: MagicMock) -> None:
+        mock_httpx.get.side_effect = _route_api_calls(
+            payg_items=[
+                _payg_item("5.4 mini pp Inp Gl 1M Tokens", 1.5, uom="1M"),
+                _payg_item("5.4 mini pp cd Inp Gl 1M Tokens", 0.15, uom="1M"),
+                _payg_item("5.4 mini pp Opt Gl 1M Tokens", 9.0, uom="1M"),
+                _payg_item("5.4 mini Inp Gl 1M Tokens", 0.75, uom="1M"),
+                _payg_item("5.4 mini cd Inp Gl 1M Tokens", 0.075, uom="1M"),
+                _payg_item("5.4 mini Opt Gl 1M Tokens", 4.5, uom="1M"),
+            ],
+            ptu_items=[_ptu_item("Global Provisioned Managed Base Unit", 1.0)],
+        )
+
+        result = PricingResolver().resolve("gpt-5.4-mini", "eastus", "global")
+
+        assert result.payg_input_rate == pytest.approx(0.75)
+        assert result.payg_cached_input_rate == pytest.approx(0.075)
+        assert result.payg_output_rate == pytest.approx(4.5)
+
+    @patch("ptu_advisor.cost.price_resolver._httpx")
     def test_successful_live_fetch(self, mock_httpx: MagicMock) -> None:
         """Simulate a successful API call returning PAYG + PTU rates."""
         mock_httpx.get.side_effect = _route_api_calls(
             payg_items=[
                 _payg_item("gpt 4o 1120 Inp glbl Tokens", 0.0025),  # $2.50/1M
+                _payg_item("gpt 4o 1120 cached Inp glbl Tokens", 0.00125),
                 _payg_item("gpt 4o 1120 Outp glbl Tokens", 0.01),  # $10.00/1M
             ],
             ptu_items=[
@@ -334,6 +556,7 @@ class TestLiveFetch:
         mock_httpx.get.side_effect = _route_api_calls(
             payg_items=[
                 _payg_item("gpt 4o 1120 Inp glbl Tokens", 0.0025),
+                _payg_item("gpt 4o 1120 cached Inp glbl Tokens", 0.00125),
                 _payg_item("gpt 4o 1120 Outp glbl Tokens", 0.01),
             ],
             ptu_items=[
@@ -387,9 +610,11 @@ class TestLiveFetch:
         resolver = PricingResolver()
         result = resolver.resolve("gpt-4o", "eastus", "global")
 
-        assert result.source == "live"
+        assert result.source == "fallback"
         assert result.payg_input_rate == pytest.approx(3.00, rel=0.01)
         assert result.payg_output_rate == 10.00  # fallback
+        assert result.payg_cached_input_rate == 3.00  # no unverified discount
+        assert result.cached_input_source == "conservative"
         assert result.ptu_hourly_rate == 1.00  # fallback
 
 
@@ -659,9 +884,31 @@ class TestCacheWarmup:
         """start_background_warmup should return a running daemon thread."""
         resolver = PricingResolver()
         thread = resolver.start_background_warmup(interval_seconds=999999)
-        assert thread.is_alive()
-        assert thread.daemon is True
-        assert thread.name == "pricing-cache-warmup"
+        try:
+            assert thread.is_alive()
+            assert thread.daemon is True
+            assert thread.name == "pricing-cache-warmup"
+        finally:
+            resolver.stop_background_warmup()
+
+    def test_background_warmup_start_is_idempotent(self) -> None:
+        resolver = PricingResolver()
+
+        first = resolver.start_background_warmup(interval_seconds=999999)
+        second = resolver.start_background_warmup(interval_seconds=999999)
+        try:
+            assert second is first
+        finally:
+            resolver.stop_background_warmup()
+
+    def test_background_warmup_can_stop_while_waiting(self) -> None:
+        resolver = PricingResolver()
+        resolver.warm_cache = lambda combos=None: 0  # type: ignore[assignment]
+
+        thread = resolver.start_background_warmup(interval_seconds=999999)
+        resolver.stop_background_warmup(timeout_seconds=1.0)
+
+        assert thread.is_alive() is False
 
 
 # ---------------------------------------------------------------------------

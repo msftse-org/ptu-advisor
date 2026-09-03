@@ -1,0 +1,135 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-30T07:20:19Z",
+  "title": "Design System: PTU Advisor",
+  "extensions": {
+    "typographyMeta": {
+      "display": {
+        "displayName": "Workspace display",
+        "purpose": "Product identity and top-level workspace headings."
+      },
+      "body": {
+        "displayName": "Operational body",
+        "purpose": "Controls, explanations, and supporting copy."
+      },
+      "data": {
+        "displayName": "Measured data",
+        "purpose": "Costs, throughput, percentages, and capacity values."
+      }
+    },
+    "shadows": [
+      {
+        "name": "surface-low",
+        "value": "0 1px 2px rgba(0, 0, 0, 0.28)",
+        "purpose": "Resting analytical cards and controls."
+      },
+      {
+        "name": "surface-elevated",
+        "value": "0 12px 32px rgba(0, 0, 0, 0.28), 0 1px 2px rgba(0, 0, 0, 0.42)",
+        "purpose": "Panels, menus, and floating tool surfaces."
+      }
+    ],
+    "motion": [
+      {
+        "name": "product-enter",
+        "value": "240ms ease-out",
+        "purpose": "Single restrained workspace entrance; disabled under reduced motion."
+      },
+      {
+        "name": "state-fast",
+        "value": "140ms cubic-bezier(0.2, 0, 0, 1)",
+        "purpose": "Hover, focus, and tooltip state changes."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact",
+        "value": "560px"
+      },
+      {
+        "name": "single-column",
+        "value": "860px"
+      },
+      {
+        "name": "workspace-tight",
+        "value": "1120px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Main analysis and confirmation action.",
+      "html": "<button class=\"ds-btn-primary\">Run analysis</button>",
+      "css": ".ds-btn-primary { min-height: 44px; padding: 10px 16px; border: 1px solid #7894ff; border-radius: 6px; color: #08101f; background: #7894ff; font: 600 14px 'Segoe UI Variable Text', sans-serif; cursor: pointer; } .ds-btn-primary:hover { border-color: #91a7ff; background: #91a7ff; } .ds-btn-primary:focus-visible { outline: 3px solid rgba(111, 140, 255, 0.38); outline-offset: 2px; } .ds-btn-primary:active { transform: scale(0.96); }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Supporting command such as reset or export.",
+      "html": "<button class=\"ds-btn-secondary\">Reset zoom</button>",
+      "css": ".ds-btn-secondary { min-height: 40px; padding: 9px 14px; border: 1px solid #3a475c; border-radius: 6px; color: #d3dbe8; background: #171e2b; font: 600 14px 'Segoe UI Variable Text', sans-serif; cursor: pointer; } .ds-btn-secondary:hover { border-color: #596a84; color: #edf2f7; background: #202a3a; } .ds-btn-secondary:focus-visible { outline: 3px solid rgba(111, 140, 255, 0.38); outline-offset: 2px; }"
+    },
+    {
+      "name": "Operational Field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "Labeled analysis assumption field.",
+      "html": "<label class=\"ds-field-label\">PTU Pricing Term<select class=\"ds-field\"><option>Monthly · Est. 64% off</option></select></label>",
+      "css": ".ds-field-label { display: grid; gap: 6px; color: #b4bfd0; font: 600 12px 'Segoe UI Variable Text', sans-serif; } .ds-field { min-height: 40px; padding: 9px 12px; border: 1px solid #344158; border-radius: 6px; color: #edf2f7; background: #0c121c; font: 400 14px 'Segoe UI Variable Text', sans-serif; } .ds-field:focus-visible { border-color: #6f8cff; outline: 3px solid rgba(111, 140, 255, 0.38); outline-offset: 2px; }"
+    },
+    {
+      "name": "Analysis Card",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "Quiet bordered surface for evidence, charts, and economics.",
+      "html": "<article class=\"ds-card\"><strong>Average TPM</strong><span>42,300</span></article>",
+      "css": ".ds-card { display: grid; gap: 8px; padding: 16px; border: 1px solid #273244; border-radius: 8px; color: #edf2f7; background: #111722; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28); } .ds-card strong { color: #b4bfd0; font: 600 12px 'Segoe UI Variable Text', sans-serif; } .ds-card span { font: 650 18px 'SFMono-Regular', Consolas, monospace; font-variant-numeric: tabular-nums; }"
+    },
+    {
+      "name": "Demo Provenance",
+      "kind": "chip",
+      "description": "Persistent neutral provenance for generated analysis data.",
+      "html": "<span class=\"ds-demo\">Synthetic demo data</span>",
+      "css": ".ds-demo { display: inline-flex; min-height: 26px; align-items: center; padding: 3px 9px; border: 1px solid #4a5a72; border-radius: 6px; color: #cbd5e3; background: #202a38; font: 650 12px 'Segoe UI Variable Text', sans-serif; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Financial Control Room",
+    "overview": "PTU Advisor is an operate-mode analytics workspace built for repeated inspection and comparison. Its near-black canvas, cool layered panels, compact controls, and tabular numeric typography prioritize state, evidence, and economics over decorative expression. The interface stays restrained so recommendation and warning colors remain meaningful. Direction contract provenance: FORM: Operate-mode financial control room, preserved incumbent system; seed key: ptu-operational-control-room. Reproduced with Impeccable 4.1.1 using --scope direction --mode operate --from ptu-operational-control-room --candidate-count 7: round 0, assigned position 7 of 7, local approved-pool revision 6c20a02b6dc4. This records the roll behind the existing direction; it does not establish a new visual direction.",
+    "keyCharacteristics": [
+      "Broad analytical canvas with dense but orderly evidence",
+      "Cool neutral surfaces with one blue interaction accent",
+      "Semantic green, amber, and muted status treatments",
+      "Flat chart surfaces without decorative top stripes",
+      "Monospaced numerals for measured and financial values"
+    ],
+    "rules": [
+      {
+        "name": "The Semantic Accent Rule",
+        "body": "Blue communicates interaction; green and amber communicate decision state. Decorative gradients never borrow those meanings.",
+        "section": "colors"
+      },
+      {
+        "name": "The Flat Evidence Rule",
+        "body": "Analytical cards remain visually quiet at rest. Elevation may clarify interaction, but it must not compete with the data.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Do use the broad canvas for charts, metrics, and economic comparisons.",
+      "Do cap prose near 72 characters and keep numeric values tabular.",
+      "Do preserve visible demo provenance and pricing-source context.",
+      "Do keep mobile chart labels inside the canvas and move long legends into scrolling controls."
+    ],
+    "donts": [
+      "Don't add decorative chart-top gradients, thick informational stripes, or glow effects.",
+      "Don't use status colors for decoration.",
+      "Don't truncate a selected commitment term without preserving its full accessible value.",
+      "Don't collapse desktop chart grids into a narrow reading column."
+    ]
+  }
+}

@@ -57,6 +57,7 @@ export type AccountInfo = {
 export type DeploymentInfo = {
   name: string
   model: string
+  model_version?: string | null
   model_family: string
   sku_type: string
   sku_capacity: number | null
@@ -104,6 +105,12 @@ export type AnalysisResponse = {
       avg_pct: number
       p95_pct: number
       available: boolean
+      source: 'observed' | 'inferred' | 'mixed' | 'override' | 'disabled' | 'unavailable'
+      quality: 'good' | 'partial' | 'limited' | 'unavailable'
+      coverage_pct: number
+      cached_prompt_tokens: number
+      active_prompt_tokens: number
+      active_tokens_observed: number
     }
     utilization: {
       peak_to_average_ratio: number
@@ -145,12 +152,21 @@ export type AnalysisResponse = {
       timestamps: string[]
       values: number[]
     }
+    prompt_cache: {
+      timestamps: string[]
+      match_rate_pct: Array<number | null>
+      prompt_tokens: number[]
+      cached_prompt_tokens: number[]
+      active_prompt_tokens: number[]
+      source: 'observed' | 'inferred' | 'mixed' | 'override' | 'disabled' | 'unavailable'
+    }
     cost_curves: {
       sustained_tpm: number[]
       payg_monthly: number[]
       ptu_spill_monthly: number[]
       break_even_tpm: number | null
-      break_even_reason: 'exists' | 'ptu_always_more_expensive' | 'ptu_always_cheaper'
+      upper_break_even_tpm?: number | null
+      break_even_reason: 'exists' | 'ptu_always_more_expensive' | 'ptu_always_cheaper' | 'insufficient_data'
       ptu_capacity_tpm: number
       avg_tpm: number
       selected_ptu: number
@@ -159,6 +175,7 @@ export type AnalysisResponse = {
     }
   }
   cost_analysis: {
+    status?: 'ready' | 'insufficient_data'
     pricing: {
       focus_topic: string
       reservation_type: string
@@ -170,9 +187,12 @@ export type AnalysisResponse = {
       deployment_type_label: string
       payg_blended_rate_per_million: number
       payg_input_rate_per_million: number
+      payg_cached_input_rate_per_million: number
+      cached_input_pricing_source: 'live' | 'cached' | 'fallback' | 'manual' | 'conservative'
       payg_output_rate_per_million: number
       output_ratio: number
       ptu_hourly_rate: number
+      ptu_pricing_source?: 'live' | 'cached' | 'fallback' | 'manual'
       ptu_capacity_per_unit: number
       ptu_increment: number
       ptu_minimum: number
@@ -211,13 +231,49 @@ export type AnalysisResponse = {
       savings: number
       savings_pct: number
       break_even_tpm: number | null
-      cheaper_strategy: string
+      upper_break_even_tpm?: number | null
+      cheaper_strategy: string | null
+    }
+    no_cache_comparison?: {
+      payg_total: number
+      ptu_baseline_cost: number
+      spillover_cost: number
+      hybrid_total: number
+      savings: number
+      savings_pct: number
+      recommendation: 'ptu_recommended' | 'borderline' | 'ptu_not_recommended' | 'insufficient_data'
+      break_even_tpm: number | null
+      upper_break_even_tpm?: number | null
+      commitment_safety: {
+        savings_margin_pct: number
+        spillover_pct: number
+        capacity_coverage_pct: number
+        safety_verdict: 'safe' | 'efficient_but_risky' | 'not_justified' | 'insufficient_data'
+      }
     }
     commitment_safety: {
       savings_margin_pct: number
       spillover_pct: number
       capacity_coverage_pct: number
-      safety_verdict: 'safe' | 'efficient_but_risky' | 'not_justified'
+      safety_verdict: 'safe' | 'efficient_but_risky' | 'not_justified' | 'insufficient_data'
+    }
+    cache_impact: {
+      applied: boolean
+      source: 'observed' | 'inferred' | 'mixed' | 'override' | 'disabled' | 'unavailable'
+      quality: 'good' | 'partial' | 'limited' | 'unavailable'
+      coverage_pct: number
+      no_cache_normalized_avg_tpm: number
+      cache_adjusted_normalized_avg_tpm: number
+      normalized_tpm_reduction_pct: number
+      no_cache_recommended_ptu: number
+      cache_aware_recommended_ptu: number
+      ptu_avoided: number
+      no_cache_payg_monthly: number
+      cache_aware_payg_monthly: number
+      payg_cache_savings: number
+      fixed_ptu_cost_changed: boolean
+      validation_warnings?: string[]
+      calculation_note: string
     }
     formula_blocks: {
       payg: string
@@ -283,6 +339,13 @@ export type PerDeploymentTpm = Record<string, number[]>
 /** Per-deployment throttling (429) event values. */
 export type PerDeploymentThrottling = Record<string, number[]>
 
+export type PerDeploymentCache = Record<string, {
+  match_rate_pct: Array<number | null>
+  cached_prompt_tokens: number[]
+  active_prompt_tokens: number[]
+  source: 'observed' | 'inferred' | 'mixed' | 'unavailable'
+}>
+
 /** Extended charts shape returned by consolidation endpoint. */
 export type ConsolidationCharts = AnalysisResponse['charts'] & {
   tokens: AnalysisResponse['charts']['tokens'] & {
@@ -296,6 +359,9 @@ export type ConsolidationCharts = AnalysisResponse['charts'] & {
   }
   throttling: AnalysisResponse['charts']['throttling'] & {
     per_deployment: PerDeploymentThrottling
+  }
+  prompt_cache: AnalysisResponse['charts']['prompt_cache'] & {
+    per_deployment: PerDeploymentCache
   }
   latency: {
     timestamps: string[]

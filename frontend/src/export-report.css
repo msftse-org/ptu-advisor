@@ -8,10 +8,13 @@
 }
 
 .export-btn {
-  background: rgba(18, 28, 48, 0.9);
-  color: #c3cbe0;
-  border: 1px solid rgba(165, 177, 255, 0.4);
-  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #171e2b;
+  color: #d3dbe8;
+  border: 1px solid #3a475c;
+  border-radius: 6px;
   padding: 7px 14px;
   font-family: inherit;
   font-size: 0.85rem;
@@ -21,10 +24,17 @@
   transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease, border-color 0.15s ease;
   white-space: nowrap;
 }
+.export-chevron {
+  flex: 0 0 auto;
+  transition: transform 0.15s ease;
+}
+.export-btn[aria-expanded="true"] .export-chevron {
+  transform: rotate(180deg);
+}
 .export-btn:hover {
-  border-color: rgba(165, 177, 255, 0.65);
-  background: rgba(25, 38, 65, 0.95);
-  color: #d0daff;
+  border-color: #596a84;
+  background: #202a3a;
+  color: #edf2f7;
   transform: translateY(-1px);
   box-shadow: 0 4px 14px rgba(95, 114, 242, 0.18);
 }
@@ -38,10 +48,10 @@
   top: calc(100% + 6px);
   right: 0;
   min-width: 170px;
-  background: rgba(18, 28, 48, 0.96);
-  border: 1px solid rgba(165, 177, 255, 0.3);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  background: #111722;
+  border: 1px solid #344158;
+  border-radius: 6px;
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.4);
   list-style: none;
   padding: 4px 0;
   z-index: 100;
@@ -53,7 +63,7 @@
   padding: 9px 16px;
   background: none;
   border: none;
-  color: #c3cbe0;
+  color: #d3dbe8;
   font-family: inherit;
   font-size: 0.85rem;
   font-weight: 600;
@@ -62,8 +72,8 @@
   transition: background 0.15s ease, color 0.15s ease;
 }
 .export-menu li button:hover {
-  background: rgba(124, 140, 255, 0.12);
-  color: #d0daff;
+  background: #202a3a;
+  color: #b8c6ff;
 }
 
 /* ── Print stylesheet: only show the report, everything else hidden ── */

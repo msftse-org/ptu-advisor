@@ -1,8 +1,12 @@
+from dataclasses import replace
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 
+import ptu_advisor.api.server as api_server
 from ptu_advisor.api.server import app
-
 
 client = TestClient(app)
 
@@ -12,6 +16,179 @@ def test_health_endpoint_returns_ok():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_easy_auth_mode_rejects_unauthenticated_api_request(monkeypatch):
+    monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "easy_auth")
+    monkeypatch.setenv("WEBSITE_INSTANCE_ID", "test-app-service-instance")
+
+    response = client.get("/api/focus-topics")
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Authentication required."}
+
+
+def test_easy_auth_mode_accepts_authenticated_api_request(monkeypatch):
+    monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "easy_auth")
+    monkeypatch.setenv("WEBSITE_INSTANCE_ID", "test-app-service-instance")
+
+    response = client.get(
+        "/api/focus-topics",
+        headers={"X-MS-CLIENT-PRINCIPAL-ID": "test-user-id"},
+    )
+
+    assert response.status_code == 200
+
+
+def test_easy_auth_mode_keeps_health_endpoint_public(monkeypatch):
+    monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "easy_auth")
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+
+
+def test_easy_auth_mode_rejects_identity_header_outside_app_service(monkeypatch):
+    monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "easy_auth")
+    monkeypatch.delenv("WEBSITE_INSTANCE_ID", raising=False)
+
+    response = client.get(
+        "/api/focus-topics",
+        headers={"X-MS-CLIENT-PRINCIPAL-ID": "spoofed-user-id"},
+    )
+
+    assert response.status_code == 500
+    assert response.json() == {
+        "detail": "Easy Auth mode requires Azure App Service hosting."
+    }
+
+
+def test_local_auth_mode_allows_api_request_without_identity_header(monkeypatch):
+    monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "local")
+
+    response = client.get("/api/focus-topics")
+
+    assert response.status_code == 200
+
+
+def test_cors_rejects_unneeded_cross_origin_methods(monkeypatch):
+    monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "local")
+
+    response = client.options(
+        "/api/analyze",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "DELETE",
+        },
+    )
+
+    assert response.status_code == 400
+
+
+def test_auth_status_does_not_expose_raw_authentication_error(monkeypatch):
+    marker = "credential-secret-value"
+
+    def fail_authentication():
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(api_server, "authenticate", fail_authentication)
+
+    response = client.get("/api/discovery/auth-status")
+
+    assert response.status_code == 200
+    assert response.json()["error"] == "Azure authentication unavailable."
+    assert marker not in response.text
+
+
+def test_discovery_does_not_expose_raw_credential_error(monkeypatch):
+    marker = "credential-secret-value"
+
+    def fail_credential():
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(api_server, "get_azure_credential", fail_credential)
+
+    response = client.get("/api/discovery/subscriptions")
+
+    assert response.status_code == 401
+    assert marker not in response.text
+
+
+@pytest.mark.parametrize(
+    ("path", "target"),
+    [
+        ("/api/discovery/subscriptions", "list_subscriptions"),
+        ("/api/discovery/accounts?subscription_id=sub", "list_ai_accounts"),
+        (
+            "/api/discovery/deployments?subscription_id=sub&resource_group=rg&account_name=acct",
+            "list_deployments",
+        ),
+    ],
+)
+def test_discovery_does_not_expose_raw_azure_error(monkeypatch, path, target):
+    marker = "azure-response-secret-value"
+
+    def fail_azure_call(*args, **kwargs):
+        raise RuntimeError(marker)
+
+    monkeypatch.setattr(api_server, "get_azure_credential", lambda: object())
+    monkeypatch.setattr(api_server, target, fail_azure_call)
+
+    response = client.get(path)
+
+    assert response.status_code == 403
+    assert marker not in response.text
+
+
+def test_startup_pricing_warmup_is_non_blocking(monkeypatch):
+    class FakeResolver:
+        def __init__(self):
+            self.warm_cache_called = False
+            self.background_called = False
+
+        def warm_cache(self):
+            self.warm_cache_called = True
+
+        def start_background_warmup(self):
+            self.background_called = True
+
+    resolver = FakeResolver()
+    monkeypatch.setattr(api_server, "get_pricing_resolver", lambda: resolver)
+
+    api_server._startup_warm_pricing_cache()
+
+    assert resolver.background_called is True
+    assert resolver.warm_cache_called is False
+
+
+def test_shutdown_stops_pricing_warmup(monkeypatch):
+    class FakeResolver:
+        def __init__(self):
+            self.stop_called = False
+
+        def stop_background_warmup(self):
+            self.stop_called = True
+
+    resolver = FakeResolver()
+    monkeypatch.setattr(api_server, "get_pricing_resolver", lambda: resolver)
+
+    shutdown = getattr(api_server, "_shutdown_pricing_cache", None)
+
+    assert shutdown is not None
+    shutdown()
+    assert resolver.stop_called is True
+
+
+def test_static_file_resolution_rejects_path_outside_root(tmp_path):
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    secret_file = tmp_path / "secret.txt"
+    secret_file.write_text("secret", encoding="utf-8")
+
+    resolver = getattr(api_server, "_resolve_static_file", None)
+
+    assert resolver is not None
+    assert resolver(static_dir, "../secret.txt") is None
 
 
 def test_focus_topics_endpoint_returns_list():
@@ -60,10 +237,29 @@ def test_demo_analyze_returns_expected_shape():
     assert "requests" in payload["charts"]
     assert "daily_cost" in payload["charts"]
     assert "cost_curves" in payload["charts"]
+    assert "prompt_cache" in payload["charts"]
     assert "payg" in payload["cost_analysis"]
     assert "hybrid" in payload["cost_analysis"]
     assert "formula_blocks" in payload["cost_analysis"]
+    assert "cache_impact" in payload["cost_analysis"]
     assert "max_viable_baseline_ptu" in payload["cost_analysis"]["hybrid"]
+
+
+def test_demo_analyze_generates_only_the_visible_cost_curve(monkeypatch):
+    generate_curves = api_server.generate_cache_aware_cost_curves
+    call_count = 0
+
+    def count_curve_generation(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return generate_curves(*args, **kwargs)
+
+    monkeypatch.setattr(api_server, "generate_cache_aware_cost_curves", count_curve_generation)
+
+    response = client.post("/api/analyze", json={"mode": "demo"})
+
+    assert response.status_code == 200
+    assert call_count == 1
 
 
 def test_demo_analyze_supports_granularity_and_time_window():
@@ -191,6 +387,49 @@ def test_max_viable_baseline_is_not_below_default_baseline():
         assert max_viable >= default_ptu
 
 
+def test_analysis_without_usable_tpm_sweep_returns_no_max_viable_ptu(monkeypatch):
+    original_generate = api_server.generate_demo_metrics
+    original_build_cache_impact = api_server.build_cache_impact
+
+    def generate_without_tpm(*args, **kwargs):
+        metrics, scenario = original_generate(*args, **kwargs)
+        metrics.tokens_per_minute = None
+        return metrics, scenario
+
+    def build_without_normalized_shape(**kwargs):
+        impact = original_build_cache_impact(**kwargs)
+        return replace(impact, adjusted_normalized_tpm=[])
+
+    monkeypatch.setattr(api_server, "generate_demo_metrics", generate_without_tpm)
+    monkeypatch.setattr(api_server, "build_cache_impact", build_without_normalized_shape)
+
+    response = client.post("/api/analyze", json={"mode": "demo"})
+
+    assert response.status_code == 200
+    assert response.json()["cost_analysis"]["hybrid"]["max_viable_baseline_ptu"] is None
+
+
+def test_cost_curve_uses_final_optimized_baseline():
+    response = client.post(
+        "/api/analyze",
+        json={
+            "mode": "demo",
+            "focus_topic": "Cost Reduction",
+            "lookback_days": 14,
+            "reservation_type": "Monthly Commitment (Estimated 64% off)",
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    hybrid = payload["cost_analysis"]["hybrid"]
+    curves = payload["charts"]["cost_curves"]
+
+    assert curves["selected_ptu"] == hybrid["baseline_ptu"]
+    assert curves["ptu_capacity_tpm"] == pytest.approx(hybrid["ptu_capacity_tpm"])
+    assert curves["ptu_spill_monthly"][0] == pytest.approx(hybrid["ptu_baseline_cost"])
+
+
 # ---------------------------------------------------------------------------
 # Phase 3.2: /api/pricing/rates endpoint
 # ---------------------------------------------------------------------------
@@ -223,8 +462,34 @@ def test_pricing_rates_returns_valid_shape():
     assert payload["ptu_hourly_rate"] > 0
 
 
-def test_pricing_rates_with_region_and_deployment_type():
+def test_pricing_rates_with_region_and_deployment_type(monkeypatch):
     """GET /api/pricing/rates respects region and deployment_type params."""
+    requested = {}
+
+    class FakeResolver:
+        def resolve(self, *, model_name, region, deployment_type):
+            requested.update(
+                model_name=model_name,
+                region=region,
+                deployment_type=deployment_type,
+            )
+            return SimpleNamespace(
+                model_name=model_name,
+                region=region,
+                deployment_type=deployment_type,
+                payg_input_rate=2.50,
+                payg_cached_input_rate=1.25,
+                payg_output_rate=10.00,
+                ptu_hourly_rate=2.20,
+                ptu_pricing_source="fallback",
+                source="fallback",
+                cached_input_source="fallback",
+                as_of=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                currency="USD",
+            )
+
+    monkeypatch.setattr(api_server, "get_pricing_resolver", lambda: FakeResolver())
+
     response = client.get(
         "/api/pricing/rates",
         params={"model": "gpt-4o", "region": "swedencentral", "deployment_type": "regional"},
@@ -234,6 +499,11 @@ def test_pricing_rates_with_region_and_deployment_type():
     payload = response.json()
     assert payload["region"] == "swedencentral"
     assert payload["deployment_type"] == "regional"
+    assert requested == {
+        "model_name": "gpt-4o",
+        "region": "swedencentral",
+        "deployment_type": "regional",
+    }
     # Regional Sweden → tier 2 → $2.20
     assert payload["ptu_hourly_rate"] == pytest.approx(2.20, rel=0.01)
 
@@ -253,6 +523,15 @@ def test_pricing_rates_unknown_model():
 def test_pricing_rates_requires_model_param():
     """GET /api/pricing/rates without model param returns 422."""
     response = client.get("/api/pricing/rates")
+    assert response.status_code == 422
+
+
+def test_pricing_rates_rejects_invalid_deployment_type():
+    response = client.get(
+        "/api/pricing/rates",
+        params={"model": "gpt-4o", "deployment_type": "globall"},
+    )
+
     assert response.status_code == 422
 
 
@@ -299,6 +578,197 @@ def test_demo_analyze_with_overrides_returns_manual_source():
     assert pricing["ptu_hourly_rate"] == pytest.approx(3.0, rel=0.01)
 
 
+def test_demo_analyze_applies_cache_override() -> None:
+    response = client.post(
+        "/api/analyze",
+        json={
+            "mode": "demo",
+            "focus_topic": "Cost Reduction",
+            "lookback_days": 14,
+            "cache_mode": "override",
+            "cache_match_rate_override_pct": 50.0,
+            "cached_input_rate_override": 0.5,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    cache = payload["cost_analysis"]["cache_impact"]
+    assert cache["applied"] is True
+    assert cache["source"] == "override"
+    assert cache["no_cache_normalized_avg_tpm"] > cache["cache_adjusted_normalized_avg_tpm"]
+    assert cache["fixed_ptu_cost_changed"] is False
+    assert payload["metrics"]["cache_match_rate"]["avg_pct"] == pytest.approx(50.0)
+    assert payload["cost_analysis"]["pricing"]["payg_cached_input_rate_per_million"] == 0.5
+    assert "cached_input_cost" in payload["cost_analysis"]["formula_blocks"]["payg"]
+    assert "fixed PTU cost" in payload["cost_analysis"]["formula_blocks"]["hybrid"]
+    no_cache = payload["cost_analysis"]["no_cache_comparison"]
+    assert no_cache["payg_total"] >= payload["cost_analysis"]["payg"]["payg_total"]
+    assert no_cache["ptu_baseline_cost"] == pytest.approx(
+        payload["cost_analysis"]["hybrid"]["ptu_baseline_cost"]
+    )
+    assert no_cache["hybrid_total"] >= payload["cost_analysis"]["hybrid"]["hybrid_total"]
+    assert no_cache["recommendation"] in {
+        "ptu_recommended",
+        "borderline",
+        "ptu_not_recommended",
+    }
+    assert "commitment_safety" in no_cache
+    assert "break_even_tpm" in no_cache
+
+
+def test_demo_analyze_rejects_override_without_rate() -> None:
+    response = client.post(
+        "/api/analyze",
+        json={"mode": "demo", "cache_mode": "override"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_demo_analyze_disabled_cache_preserves_no_cache_load() -> None:
+    response = client.post(
+        "/api/analyze",
+        json={"mode": "demo", "cache_mode": "disabled"},
+    )
+
+    assert response.status_code == 200
+    cache = response.json()["cost_analysis"]["cache_impact"]
+    assert cache["source"] == "disabled"
+    assert cache["applied"] is False
+    assert cache["no_cache_normalized_avg_tpm"] == pytest.approx(
+        cache["cache_adjusted_normalized_avg_tpm"]
+    )
+
+
+def test_token_snapshot_includes_cache_analysis_metadata() -> None:
+    response = client.post(
+        "/api/export/token-snapshot",
+        json={"mode": "demo", "focus_topic": "Cost Reduction", "days": 7},
+    )
+
+    assert response.status_code == 200
+    cache = response.json()["_meta"]["cache_analysis"]
+    assert cache["source"] == "observed"
+    assert cache["coverage_pct"] == pytest.approx(100.0)
+    assert cache["cached_prompt_tokens"] > 0
+    cache_metric = response.json()["value"][2]
+    assert cache_metric["unit"] == "Percent"
+    assert cache_metric["timeseries"][0]["data"][0]["average"] > 1
+
+
+def test_analyze_rejects_negative_ptu_baseline() -> None:
+    response = client.post(
+        "/api/analyze",
+        json={"mode": "demo", "baseline_ptu": -5},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize("baseline_percentile", [-1, 96])
+def test_analyze_rejects_out_of_range_baseline_percentile(
+    baseline_percentile: int,
+) -> None:
+    response = client.post(
+        "/api/analyze",
+        json={"mode": "demo", "baseline_percentile": baseline_percentile},
+    )
+
+    assert response.status_code == 422
+
+
+def test_analyze_rounds_ptu_baseline_to_minimum_and_increment() -> None:
+    below_minimum = client.post(
+        "/api/analyze",
+        json={"mode": "demo", "baseline_ptu": 1},
+    ).json()
+    off_increment = client.post(
+        "/api/analyze",
+        json={"mode": "demo", "baseline_ptu": 17},
+    ).json()
+
+    assert below_minimum["cost_analysis"]["hybrid"]["baseline_ptu"] == 15
+    assert off_increment["cost_analysis"]["hybrid"]["baseline_ptu"] == 20
+
+
+def test_daily_cost_aggregation_scales_per_minute_rates_by_interval() -> None:
+    from ptu_advisor.api.server import _aggregate_daily_costs
+
+    result = _aggregate_daily_costs(
+        timestamps=["2026-07-01T00:00:00Z", "2026-07-01T00:05:00Z"],
+        prompt_values=[100.0, 100.0],
+        completion_values=[0.0, 0.0],
+        payg_input_rate=1_000.0,
+        payg_output_rate=0.0,
+        interval_minutes=5,
+    )
+
+    assert result["input_cost"] == [1.0]
+
+
+def test_unavailable_cache_is_labeled_conservative_not_measured_zero() -> None:
+    response = client.post(
+        "/api/analyze",
+        json={"mode": "demo", "cache_mode": "disabled"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["cost_analysis"]["cache_impact"]["applied"] is False
+    assert "assumes no cache benefit" in payload["cost_analysis"]["cache_impact"][
+        "calculation_note"
+    ]
+
+
+def test_zero_traffic_returns_insufficient_cost_data(monkeypatch) -> None:
+    generate_demo_metrics = api_server.generate_demo_metrics
+
+    def generate_zero_traffic_metrics(*args, **kwargs):
+        metrics, scenario = generate_demo_metrics(*args, **kwargs)
+        for attribute in [
+            "tokens_per_minute",
+            "prompt_tokens",
+            "completion_tokens",
+            "requests_per_minute",
+            "successful_requests",
+            "throttled_requests",
+            "cache_match_rate",
+            "active_tokens",
+        ]:
+            series = getattr(metrics, attribute)
+            if series is not None:
+                setattr(metrics, attribute, replace(series, values=[0.0] * len(series.values)))
+        return metrics, scenario
+
+    monkeypatch.setattr(api_server, "generate_demo_metrics", generate_zero_traffic_metrics)
+
+    response = client.post("/api/analyze", json={"mode": "demo"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["recommendation"] == "insufficient_data"
+    assert payload["cost_analysis"]["status"] == "insufficient_data"
+    assert payload["cost_analysis"]["comparison"]["cheaper_strategy"] is None
+    assert payload["cost_analysis"]["comparison"]["break_even_tpm"] is None
+    assert "insufficient traffic data" in payload["insights"]["break_even_message"].lower()
+
+
+def test_hourly_token_snapshot_serializes_hourly_totals() -> None:
+    response = client.post(
+        "/api/export/token-snapshot",
+        json={"mode": "demo", "focus_topic": "Cost Reduction", "days": 1, "interval": "PT1H"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["interval"] == "PT1H"
+    input_points = payload["value"][0]["timeseries"][0]["data"]
+    assert input_points
+    # Snapshot token entries are interval totals, not normalized TPM values.
+    assert input_points[0]["total"] > 60_000
+
+
 def test_demo_analyze_with_partial_override():
     """A partial override (only one rate) should still set source to 'manual'."""
     response = client.post(
@@ -315,6 +785,21 @@ def test_demo_analyze_with_partial_override():
     pricing = response.json()["cost_analysis"]["pricing"]
     assert pricing["pricing_source"] == "manual"
     assert pricing["ptu_hourly_rate"] == pytest.approx(2.5, rel=0.01)
+
+
+def test_demo_analyze_accepts_one_year_commitment() -> None:
+    response = client.post(
+        "/api/analyze",
+        json={
+            "mode": "demo",
+            "reservation_type": "1-Year Commitment (Estimated 69% off)",
+        },
+    )
+
+    assert response.status_code == 200
+    pricing = response.json()["cost_analysis"]["pricing"]
+    assert pricing["reservation_type"] == "1-Year Commitment (Estimated 69% off)"
+    assert pricing["reservation_discount_pct"] == 69
 
 
 def test_formula_blocks_annotated_with_custom_rate_on_manual():

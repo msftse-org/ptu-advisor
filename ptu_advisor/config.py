@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Dict, Optional
 
 
@@ -68,17 +69,26 @@ class ModelCapacityConfig:
     regional_increment: int
 
 
-# Known model capacity configurations (as of January 2026)
-# Source: https://learn.microsoft.com/azure/ai-services/openai/quotas-limits
+# Model capacity configurations from Microsoft Foundry provisioned-throughput
+# sizing documentation (verified July 2026).
 MODEL_CAPACITY_CONFIGS: Dict[str, ModelCapacityConfig] = {
-    "gpt-5": ModelCapacityConfig(450_000, 3400, 8, 15, 5, 50, 50),
-    "gpt-4.1": ModelCapacityConfig(720_000, 4750, 4, 15, 5, 50, 50),
-    "gpt-4.1-mini": ModelCapacityConfig(2_000_000, 23750, 4, 15, 5, 25, 25),
+    "gpt-5.5": ModelCapacityConfig(450_000, 1200, 6, 15, 5, 50, 50),
+    "gpt-5.4-mini": ModelCapacityConfig(450_000, 7900, 6, 15, 5, 25, 25),
+    "gpt-5.4": ModelCapacityConfig(450_000, 2400, 6, 15, 5, 50, 50),
+    "gpt-5.3-codex": ModelCapacityConfig(450_000, 3400, 8, 15, 5, 50, 50),
+    "gpt-5.2-codex": ModelCapacityConfig(450_000, 3400, 8, 15, 5, 50, 50),
+    "gpt-5.2": ModelCapacityConfig(450_000, 3400, 8, 15, 5, 50, 50),
+    "gpt-5.1-codex": ModelCapacityConfig(450_000, 4750, 8, 15, 5, 50, 50),
+    "gpt-5.1": ModelCapacityConfig(450_000, 4750, 8, 15, 5, 50, 50),
+    "gpt-5-mini": ModelCapacityConfig(450_000, 23750, 8, 15, 5, 25, 25),
+    "gpt-5": ModelCapacityConfig(450_000, 4750, 8, 15, 5, 50, 50),
+    "gpt-4.1": ModelCapacityConfig(720_000, 3000, 4, 15, 5, 50, 50),
+    "gpt-4.1-mini": ModelCapacityConfig(2_000_000, 14900, 4, 15, 5, 25, 25),
     "gpt-4.1-nano": ModelCapacityConfig(4_000_000, 59400, 4, 15, 5, 25, 25),
-    "gpt-4o": ModelCapacityConfig(450_000, 2500, 3, 15, 5, 50, 50),
-    "gpt-4o-mini": ModelCapacityConfig(2_000_000, 37000, 3, 15, 5, 25, 25),
-    "o1": ModelCapacityConfig(450_000, 3000, 4, 15, 5, 50, 50),
-    "o3-mini": ModelCapacityConfig(2_000_000, 14900, 4, 15, 5, 25, 25),
+    "gpt-4o": ModelCapacityConfig(450_000, 2500, 4, 15, 5, 50, 50),
+    "gpt-4o-mini": ModelCapacityConfig(2_000_000, 37000, 4, 15, 5, 25, 25),
+    "o1": ModelCapacityConfig(450_000, 230, 4, 15, 5, 25, 50),
+    "o3-mini": ModelCapacityConfig(2_000_000, 2500, 4, 15, 5, 25, 25),
     "o4-mini": ModelCapacityConfig(2_000_000, 5400, 4, 15, 5, 25, 25),
 }
 
@@ -91,6 +101,8 @@ def get_model_config(model_name: str) -> Optional[ModelCapacityConfig]:
     """
     model_lower = model_name.lower()
     for key in sorted(MODEL_CAPACITY_CONFIGS, key=len, reverse=True):
+        if key == "gpt-5" and re.search(r"gpt-5\.\d", model_lower):
+            continue
         if key in model_lower:
             return MODEL_CAPACITY_CONFIGS[key]
     return None
@@ -214,8 +226,8 @@ class AnalysisConfig:
             raise ValueError("lookback_days must be at least 1")
         if self.lookback_days > 90:
             raise ValueError("lookback_days cannot exceed 90")
-        if self.aggregation_interval_minutes not in [1, 5, 15, 30]:
-            raise ValueError("aggregation_interval_minutes must be 1, 5, 15, or 30")
+        if self.aggregation_interval_minutes not in [1, 5, 15, 30, 60]:
+            raise ValueError("aggregation_interval_minutes must be 1, 5, 15, 30, or 60")
 
 
 # Default configuration instance
