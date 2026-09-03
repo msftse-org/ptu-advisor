@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import ptu_advisor.api.server as api_server
+from ptu_advisor import __version__
 from ptu_advisor.api.server import app
 
 client = TestClient(app)
@@ -16,6 +17,14 @@ def test_health_endpoint_returns_ok():
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_api_metadata_matches_package_release_version():
+    response = client.get("/openapi.json")
+
+    assert __version__ == "1.1.0"
+    assert response.status_code == 200
+    assert response.json()["info"]["version"] == __version__
 
 
 def test_easy_auth_mode_rejects_unauthenticated_api_request(monkeypatch):

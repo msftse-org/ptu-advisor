@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, model_validator
 from starlette.responses import JSONResponse
 
+from ptu_advisor import __version__
 from ptu_advisor.analysis.engine import DecisionEngine
 from ptu_advisor.auth import get_azure_credential
 from ptu_advisor.config import (
@@ -271,7 +272,7 @@ async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
         _shutdown_pricing_cache()
 
 
-app = FastAPI(title="PTU Advisor API", version="0.1.0", lifespan=_app_lifespan)
+app = FastAPI(title="PTU Advisor API", version=__version__, lifespan=_app_lifespan)
 
 
 @app.middleware("http")

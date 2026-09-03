@@ -35,6 +35,8 @@ app = typer.Typer(
     name="ptu-advisor",
     help="Automated PTU vs PAYG recommendation tool for Azure AI Foundry deployments.",
     add_completion=False,
+    invoke_without_command=True,
+    no_args_is_help=True,
 )
 console = Console()
 
@@ -42,22 +44,20 @@ console = Console()
 def version_callback(value: bool) -> None:
     """Print version and exit."""
     if value:
-        console.print(f"PTU Advisor v{__version__}")
+        typer.echo(f"PTU Advisor v{__version__}")
         raise typer.Exit()
 
 
 @app.callback()
 def main(
-    version: Annotated[
-        Optional[bool],
-        typer.Option(
-            "--version",
-            "-v",
-            help="Show version and exit.",
-            callback=version_callback,
-            is_eager=True,
-        ),
-    ] = None,
+    version: Optional[bool] = typer.Option(
+        None,
+        "--version",
+        "-v",
+        help="Show version and exit.",
+        callback=version_callback,
+        is_eager=True,
+    ),
 ) -> None:
     """PTU Advisor - Automated PTU vs PAYG recommendations for Azure AI Foundry."""
     pass
