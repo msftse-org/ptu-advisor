@@ -9,4 +9,4 @@ def test_version_flag_reports_package_release_without_command() -> None:
     result = CliRunner().invoke(app, ["--version"])
 
     assert result.exit_code == 0
-    assert "PTU Advisor v1.1.0" in result.stdout
+    assert "PTU Advisor v1.1.1" in result.stdout

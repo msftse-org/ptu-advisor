@@ -2,6 +2,18 @@
 
 const CHART_DATA_FONT = 'SFMono-Regular, Cascadia Code, Roboto Mono, Consolas, monospace'
 
+const HTML_ENTITIES: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+}
+
+export function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => HTML_ENTITIES[character])
+}
+
 /** Format a timestamp for tooltip headers: M/D HH:mm */
 export function fmtTooltipDate(iso: string): string {
   const d = new Date(iso)

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -9,7 +12,7 @@ from typing import Any, AsyncIterator, Dict, List, Literal, Optional
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from starlette.responses import JSONResponse
 
 from ptu_advisor import __version__
@@ -64,6 +67,13 @@ from ptu_advisor.metrics.models import DeploymentMetrics, TimeSeries
 logger = logging.getLogger(__name__)
 
 
+def _validate_region(region: str) -> str:
+    normalized = normalize_region(region)
+    if normalized not in REGION_CONFIGS:
+        raise ValueError("Unsupported Azure region.")
+    return normalized
+
+
 class AnalyzeRequest(BaseModel):
     mode: Literal["demo", "live"] = "live"
     focus_topic: str = "Cost Reduction"
@@ -93,6 +103,11 @@ class AnalyzeRequest(BaseModel):
     cache_mode: Literal["auto", "disabled", "override"] = "auto"
     cache_match_rate_override_pct: Optional[float] = Field(default=None, ge=0, le=100)
     cached_input_rate_override: Optional[float] = Field(default=None, ge=0)
+
+    @field_validator("region")
+    @classmethod
+    def validate_region(cls, value: str) -> str:
+        return _validate_region(value)
 
     @model_validator(mode="after")
     def validate_cache_override(self) -> "AnalyzeRequest":
@@ -187,6 +202,11 @@ class ConsolidationRequest(BaseModel):
     cache_match_rate_override_pct: Optional[float] = Field(default=None, ge=0, le=100)
     cached_input_rate_override: Optional[float] = Field(default=None, ge=0)
 
+    @field_validator("region")
+    @classmethod
+    def validate_region(cls, value: str) -> str:
+        return _validate_region(value)
+
     @model_validator(mode="after")
     def validate_cache_override(self) -> "ConsolidationRequest":
         if self.cache_mode == "override" and self.cache_match_rate_override_pct is None:
@@ -275,11 +295,51 @@ async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="PTU Advisor API", version=__version__, lifespan=_app_lifespan)
 
 
+def _easy_auth_roles(encoded_principal: str) -> set[str]:
+    try:
+        decoded = base64.b64decode(encoded_principal, validate=True)
+        principal = json.loads(decoded)
+    except (binascii.Error, json.JSONDecodeError, TypeError, ValueError):
+        return set()
+
+    claims = principal.get("claims", []) if isinstance(principal, dict) else []
+    return {
+        str(claim.get("val", ""))
+        for claim in claims
+        if isinstance(claim, dict)
+        and str(claim.get("typ", "")).lower().endswith("/role")
+        and claim.get("val")
+    }
+
+
+def _allowed_subscription_ids() -> set[str]:
+    raw_ids = os.getenv("PTU_ADVISOR_ALLOWED_SUBSCRIPTION_IDS", "")
+    return {value.strip().lower() for value in raw_ids.split(",") if value.strip()}
+
+
+def _require_subscription_allowed(subscription_id: str) -> None:
+    if os.getenv("PTU_ADVISOR_AUTH_MODE", "").strip().lower() != "easy_auth":
+        return
+
+    allowed_ids = _allowed_subscription_ids()
+    if not allowed_ids:
+        raise HTTPException(status_code=500, detail="Subscription allowlist is not configured.")
+    if subscription_id.strip().lower() not in allowed_ids:
+        raise HTTPException(status_code=403, detail="Subscription is not allowed.")
+
+
 @app.middleware("http")
 async def require_api_authentication(request: Request, call_next):
-    auth_mode = os.getenv("PTU_ADVISOR_AUTH_MODE", "local").strip().lower()
+    auth_mode = os.getenv("PTU_ADVISOR_AUTH_MODE", "").strip().lower()
     is_protected_api = request.url.path.startswith("/api/") and request.url.path != "/api/health"
 
+    if not is_protected_api:
+        return await call_next(request)
+    if not auth_mode:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Server authentication mode must be configured."},
+        )
     if auth_mode not in {"local", "easy_auth"}:
         return JSONResponse(
             status_code=500,
@@ -293,6 +353,18 @@ async def require_api_authentication(request: Request, call_next):
             )
         if not request.headers.get("X-MS-CLIENT-PRINCIPAL-ID"):
             return JSONResponse(status_code=401, content={"detail": "Authentication required."})
+        required_role = os.getenv("PTU_ADVISOR_REQUIRED_APP_ROLE", "").strip()
+        if not required_role:
+            return JSONResponse(
+                status_code=500,
+                content={"detail": "Required application role is not configured."},
+            )
+        roles = _easy_auth_roles(request.headers.get("X-MS-CLIENT-PRINCIPAL", ""))
+        if required_role not in roles:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Required application role is missing."},
+            )
 
     return await call_next(request)
 
@@ -1631,6 +1703,10 @@ def pricing_rates(
 
     This is useful for dashboards, CI scripts, and ad-hoc rate checks.
     """
+    try:
+        region = _validate_region(region)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     resolver = get_pricing_resolver()
     result = resolver.resolve(
         model_name=model,
@@ -1701,6 +1777,14 @@ def subscriptions() -> List[Dict[str, Any]]:
             detail="No Azure subscriptions found for your account. "
             "Ensure you have at least one enabled subscription in this tenant.",
         )
+    if os.getenv("PTU_ADVISOR_AUTH_MODE", "").strip().lower() == "easy_auth":
+        allowed_ids = _allowed_subscription_ids()
+        if not allowed_ids:
+            raise HTTPException(
+                status_code=500,
+                detail="Subscription allowlist is not configured.",
+            )
+        subs = [sub for sub in subs if sub.subscription_id.lower() in allowed_ids]
     return [
         {
             "subscription_id": sub.subscription_id,
@@ -1714,6 +1798,7 @@ def subscriptions() -> List[Dict[str, Any]]:
 
 @app.get("/api/discovery/accounts")
 def accounts(subscription_id: str = Query(...)) -> List[Dict[str, Any]]:
+    _require_subscription_allowed(subscription_id)
     try:
         credential = get_azure_credential()
     except Exception:
@@ -1747,6 +1832,7 @@ def deployments(
     resource_group: str = Query(...),
     account_name: str = Query(...),
 ) -> List[Dict[str, Any]]:
+    _require_subscription_allowed(subscription_id)
     try:
         credential = get_azure_credential()
     except Exception:
@@ -1838,6 +1924,7 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
     if not payload.deployment:
         raise HTTPException(status_code=400, detail="deployment is required in live mode")
 
+    _require_subscription_allowed(payload.subscription_id)
     credential = get_azure_credential()
     config = AnalysisConfig(
         resource_group=payload.resource_group,
@@ -1870,44 +1957,12 @@ def analyze(payload: AnalyzeRequest) -> AnalyzeResponse:
     )
 
     if metrics.tokens_per_minute is None and metrics.requests_per_minute is None:
-        diagnostics = collector.get_diagnostics()
-        metric_items = diagnostics.get("metrics", [])
-        context = diagnostics.get("context", {})
-
-        # Build a human-readable hint from the diagnostics
-        account_empty = [d for d in metric_items if d.get("status") == "account_empty"]
-        probe_diags = [d for d in metric_items if d.get("status") == "fallback_probe"]
-
-        if account_empty:
-            hint = (
-                f"{account_empty[0]['message']}\n\n"
-                "Troubleshooting steps:\n"
-                "1. Verify the resource has had API traffic in the selected "
-                f"lookback window ({payload.lookback_days} days).\n"
-                "2. Check that 'Diagnostic settings' are enabled on the "
-                "Cognitive Services resource in the Azure portal "
-                "(Settings → Diagnostic settings → Add diagnostic setting).\n"
-                "3. Confirm the signed-in identity has at least 'Monitoring "
-                "Reader' role on the resource.\n"
-                f"4. Resource ID used: {context.get('resource_id', 'N/A')}"
-            )
-        elif probe_diags:
-            hint = probe_diags[0]["message"]
-        else:
-            missing = [d["metric_name"] for d in metric_items if d.get("status") == "missing"]
-            hint = (
-                f"No data returned for metrics: {', '.join(missing)}. "
-                f"The deployment '{payload.deployment}' may have had no traffic "
-                f"in the last {payload.lookback_days} days, or the resource may "
-                f"not expose these metrics. "
-                f"Resource ID: {context.get('resource_id', 'N/A')}"
-            )
+        logger.warning("No metrics returned for selected deployment")
         raise HTTPException(
             status_code=502,
             detail={
                 "message": "No metrics returned for selected deployment",
-                "hint": hint,
-                "diagnostics": diagnostics,
+                "hint": "No metrics were returned. Verify recent traffic and Monitoring Reader access.",
             },
         )
 
@@ -2116,6 +2171,7 @@ def export_token_snapshot(payload: TokenSnapshotRequest) -> Dict[str, Any]:
     if not payload.deployment:
         raise HTTPException(status_code=400, detail="deployment is required in live mode")
 
+    _require_subscription_allowed(payload.subscription_id)
     credential = get_azure_credential()
     config = AnalysisConfig(
         resource_group=payload.resource_group,
@@ -2175,6 +2231,7 @@ def analyze_consolidation(payload: ConsolidationRequest) -> ConsolidationRespons
                 detail="subscription_id, resource_group, and workspace are required in live mode",
             )
 
+        _require_subscription_allowed(payload.subscription_id)
         credential = get_azure_credential()
         for dep_name in payload.deployments:
             config = AnalysisConfig(
@@ -2475,11 +2532,15 @@ class DeploymentPreview(BaseModel):
 @app.get("/api/deployments/preview", response_model=List[DeploymentPreview])
 def deployment_preview(
     mode: str = Query("demo"),
-    deployments: str = Query("", description="Comma-separated deployment names"),
+    deployments: str = Query(
+        "",
+        max_length=650,
+        description="Comma-separated deployment names",
+    ),
     subscription_id: Optional[str] = Query(None),
     resource_group: Optional[str] = Query(None),
     workspace: Optional[str] = Query(None),
-    lookback_days: int = Query(7),
+    lookback_days: int = Query(7, ge=1, le=30),
     focus_topic: str = Query("Cost Reduction"),
 ) -> List[DeploymentPreview]:
     """Return lightweight TPM and throttle preview for deployments.
@@ -2518,10 +2579,15 @@ def deployment_preview(
             detail="subscription_id, resource_group, and workspace are required in live mode",
         )
 
-    dep_names = [d.strip() for d in deployments.split(",") if d.strip()]
+    dep_names = list(dict.fromkeys(d.strip() for d in deployments.split(",") if d.strip()))
     if not dep_names:
         raise HTTPException(status_code=400, detail="At least one deployment name is required")
+    if len(dep_names) > 10:
+        raise HTTPException(status_code=422, detail="Preview supports at most 10 deployments.")
+    if any(len(dep_name) > 64 for dep_name in dep_names):
+        raise HTTPException(status_code=422, detail="Deployment names must be 64 characters or fewer.")
 
+    _require_subscription_allowed(subscription_id)
     credential = get_azure_credential()
     results = []
     for dep_name in dep_names:

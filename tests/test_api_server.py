@@ -1,3 +1,5 @@
+import base64
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -12,6 +14,29 @@ from ptu_advisor.api.server import app
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def configure_local_auth(monkeypatch):
+    monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "local")
+
+
+def _easy_auth_headers(*roles: str) -> dict[str, str]:
+    principal = {
+        "auth_typ": "aad",
+        "claims": [
+            {
+                "typ": "http://schemas.microsoft.com/ws/2008/06/identity/claims/role",
+                "val": role,
+            }
+            for role in roles
+        ],
+    }
+    encoded = base64.b64encode(json.dumps(principal).encode("utf-8")).decode("ascii")
+    return {
+        "X-MS-CLIENT-PRINCIPAL-ID": "test-user-id",
+        "X-MS-CLIENT-PRINCIPAL": encoded,
+    }
+
+
 def test_health_endpoint_returns_ok():
     response = client.get("/api/health")
 
@@ -22,7 +47,7 @@ def test_health_endpoint_returns_ok():
 def test_api_metadata_matches_package_release_version():
     response = client.get("/openapi.json")
 
-    assert __version__ == "1.1.0"
+    assert __version__ == "1.1.1"
     assert response.status_code == 200
     assert response.json()["info"]["version"] == __version__
 
@@ -40,13 +65,37 @@ def test_easy_auth_mode_rejects_unauthenticated_api_request(monkeypatch):
 def test_easy_auth_mode_accepts_authenticated_api_request(monkeypatch):
     monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "easy_auth")
     monkeypatch.setenv("WEBSITE_INSTANCE_ID", "test-app-service-instance")
+    monkeypatch.setenv("PTU_ADVISOR_REQUIRED_APP_ROLE", "PTUAdvisor.User")
 
     response = client.get(
         "/api/focus-topics",
-        headers={"X-MS-CLIENT-PRINCIPAL-ID": "test-user-id"},
+        headers=_easy_auth_headers("PTUAdvisor.User"),
     )
 
     assert response.status_code == 200
+
+
+def test_unset_auth_mode_fails_closed(monkeypatch):
+    monkeypatch.delenv("PTU_ADVISOR_AUTH_MODE", raising=False)
+
+    response = client.get("/api/focus-topics")
+
+    assert response.status_code == 500
+    assert response.json() == {"detail": "Server authentication mode must be configured."}
+
+
+def test_easy_auth_mode_requires_configured_app_role(monkeypatch):
+    monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "easy_auth")
+    monkeypatch.setenv("WEBSITE_INSTANCE_ID", "test-app-service-instance")
+    monkeypatch.setenv("PTU_ADVISOR_REQUIRED_APP_ROLE", "PTUAdvisor.User")
+
+    response = client.get(
+        "/api/focus-topics",
+        headers=_easy_auth_headers("Other.Role"),
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Required application role is missing."}
 
 
 def test_easy_auth_mode_keeps_health_endpoint_public(monkeypatch):
@@ -121,6 +170,88 @@ def test_discovery_does_not_expose_raw_credential_error(monkeypatch):
 
     assert response.status_code == 401
     assert marker not in response.text
+
+
+def test_easy_auth_filters_subscriptions_to_configured_allowlist(monkeypatch):
+    monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "easy_auth")
+    monkeypatch.setenv("WEBSITE_INSTANCE_ID", "test-app-service-instance")
+    monkeypatch.setenv("PTU_ADVISOR_REQUIRED_APP_ROLE", "PTUAdvisor.User")
+    monkeypatch.setenv("PTU_ADVISOR_ALLOWED_SUBSCRIPTION_IDS", "allowed-sub")
+    monkeypatch.setattr(api_server, "get_azure_credential", lambda: object())
+    monkeypatch.setattr(
+        api_server,
+        "list_subscriptions",
+        lambda _credential: [
+            SimpleNamespace(
+                subscription_id="allowed-sub",
+                display_name="Allowed",
+                state="Enabled",
+                label="Allowed",
+            ),
+            SimpleNamespace(
+                subscription_id="blocked-sub",
+                display_name="Blocked",
+                state="Enabled",
+                label="Blocked",
+            ),
+        ],
+    )
+
+    response = client.get(
+        "/api/discovery/subscriptions",
+        headers=_easy_auth_headers("PTUAdvisor.User"),
+    )
+
+    assert response.status_code == 200
+    assert [item["subscription_id"] for item in response.json()] == ["allowed-sub"]
+
+
+def test_easy_auth_blocks_disallowed_subscription_before_azure_call(monkeypatch):
+    monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "easy_auth")
+    monkeypatch.setenv("WEBSITE_INSTANCE_ID", "test-app-service-instance")
+    monkeypatch.setenv("PTU_ADVISOR_REQUIRED_APP_ROLE", "PTUAdvisor.User")
+    monkeypatch.setenv("PTU_ADVISOR_ALLOWED_SUBSCRIPTION_IDS", "allowed-sub")
+
+    def fail_credential():
+        raise AssertionError("Azure credential should not be acquired")
+
+    monkeypatch.setattr(api_server, "get_azure_credential", fail_credential)
+
+    response = client.get(
+        "/api/discovery/accounts",
+        params={"subscription_id": "blocked-sub"},
+        headers=_easy_auth_headers("PTUAdvisor.User"),
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Subscription is not allowed."}
+
+
+def test_easy_auth_blocks_disallowed_export_before_credential_acquisition(monkeypatch):
+    monkeypatch.setenv("PTU_ADVISOR_AUTH_MODE", "easy_auth")
+    monkeypatch.setenv("WEBSITE_INSTANCE_ID", "test-app-service-instance")
+    monkeypatch.setenv("PTU_ADVISOR_REQUIRED_APP_ROLE", "PTUAdvisor.User")
+    monkeypatch.setenv("PTU_ADVISOR_ALLOWED_SUBSCRIPTION_IDS", "allowed-sub")
+
+    def fail_credential():
+        raise AssertionError("Azure credential should not be acquired")
+
+    monkeypatch.setattr(api_server, "get_azure_credential", fail_credential)
+
+    response = client.post(
+        "/api/export/token-snapshot",
+        json={
+            "mode": "live",
+            "subscription_id": "blocked-sub",
+            "resource_group": "rg",
+            "workspace": "workspace",
+            "deployment": "deployment",
+        },
+        headers=_easy_auth_headers("PTUAdvisor.User"),
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Subscription is not allowed."}
 
 
 @pytest.mark.parametrize(
@@ -295,6 +426,54 @@ def test_live_analyze_without_required_fields_returns_400():
 
     assert response.status_code == 400
     assert "required in live mode" in response.json().get("detail", "")
+
+
+def test_live_analyze_sanitizes_no_metrics_diagnostics(monkeypatch):
+    marker = "azure-sdk-secret-diagnostic"
+    metrics, _scenario = api_server.generate_demo_metrics(api_server.DemoScenario.COST_HIGH_VOLUME)
+    metrics.tokens_per_minute = None
+    metrics.requests_per_minute = None
+
+    class EmptyMetricsCollector:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def collect(self):
+            return metrics
+
+        def get_diagnostics(self):
+            return {
+                "context": {"resource_id": "/subscriptions/private-sub/resourceGroups/private-rg"},
+                "metrics": [
+                    {
+                        "metric_name": "TokenTransaction",
+                        "status": "missing",
+                        "message": marker,
+                    }
+                ],
+            }
+
+    monkeypatch.setattr(api_server, "get_azure_credential", lambda: object())
+    monkeypatch.setattr(api_server, "MetricsCollector", EmptyMetricsCollector)
+
+    response = client.post(
+        "/api/analyze",
+        json={
+            "mode": "live",
+            "subscription_id": "sub",
+            "resource_group": "rg",
+            "workspace": "workspace",
+            "deployment": "deployment",
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == {
+        "message": "No metrics returned for selected deployment",
+        "hint": "No metrics were returned. Verify recent traffic and Monitoring Reader access.",
+    }
+    assert marker not in response.text
+    assert "private-sub" not in response.text
 
 
 def test_daily_cost_total_updates_with_time_window():
@@ -542,6 +721,22 @@ def test_pricing_rates_rejects_invalid_deployment_type():
     )
 
     assert response.status_code == 422
+
+
+def test_pricing_rates_rejects_unknown_region_before_resolution(monkeypatch):
+    class UnexpectedResolver:
+        def resolve(self, **_kwargs):
+            raise AssertionError("Resolver must not receive an unknown region")
+
+    monkeypatch.setattr(api_server, "get_pricing_resolver", lambda: UnexpectedResolver())
+
+    response = client.get(
+        "/api/pricing/rates",
+        params={"model": "gpt-4o", "region": "eastus' or 1 eq 1 or '"},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Unsupported Azure region."}
 
 
 # ---------------------------------------------------------------------------

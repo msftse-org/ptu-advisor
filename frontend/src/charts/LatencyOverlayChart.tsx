@@ -1,6 +1,6 @@
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from './echarts-setup'
-import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, fmtTooltipDate, fmtNum, makeAxisDateFormatter, getDeploymentColor, hexToRgba } from './theme'
+import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, escapeHtml, fmtTooltipDate, fmtNum, makeAxisDateFormatter, getDeploymentColor, hexToRgba } from './theme'
 import type { ZoomState } from './use-chart-zoom'
 
 type Props = {
@@ -94,7 +94,7 @@ export function LatencyOverlayChart({ timestamps, combined, perDeployment, heigh
           const p50Val = data.p50[idx] ?? 0
           const marker = p95Param?.marker ?? ''
           const color = getDeploymentColor(entries.findIndex(([n]) => n === name))
-          result += `<div>${marker} <b>${name}</b>: P95 ${fmtNum(p95Val)} ms <span style="opacity:0.7;color:${hexToRgba(color, 0.7)}">· P50 ${fmtNum(p50Val)} ms</span></div>`
+          result += `<div>${marker} <b>${escapeHtml(name)}</b>: P95 ${fmtNum(p95Val)} ms <span style="opacity:0.7;color:${hexToRgba(color, 0.7)}">· P50 ${fmtNum(p50Val)} ms</span></div>`
         }
         return result
       },

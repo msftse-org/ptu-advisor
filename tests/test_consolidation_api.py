@@ -755,6 +755,43 @@ class TestDeploymentPreviewLiveMode:
         assert len(result) == 2
         assert mock_collector_cls.call_count == 2
 
+    def test_live_mode_deduplicates_deployments_before_collection(self):
+        mock_metrics = _make_stub_metrics(
+            "dep-a",
+            datetime.now(timezone.utc) - timedelta(days=7),
+            datetime.now(timezone.utc),
+        )
+        with (
+            patch("ptu_advisor.api.server.get_azure_credential"),
+            patch("ptu_advisor.api.server.MetricsCollector") as mock_collector_cls,
+        ):
+            mock_collector_cls.return_value.collect.return_value = mock_metrics
+            result = _call_preview(
+                mode="live",
+                deployments="dep-a,dep-a,dep-b",
+                subscription_id="sub-123",
+                resource_group="rg",
+                workspace="ws",
+            )
+
+        assert len(result) == 2
+        assert mock_collector_cls.call_count == 2
+
+    def test_live_mode_rejects_more_than_ten_unique_deployments(self):
+        deployments = ",".join(f"dep-{index}" for index in range(11))
+
+        with pytest.raises(HTTPException) as exc_info:
+            _call_preview(
+                mode="live",
+                deployments=deployments,
+                subscription_id="sub-123",
+                resource_group="rg",
+                workspace="ws",
+            )
+
+        assert exc_info.value.status_code == 422
+        assert "at most 10" in str(exc_info.value.detail)
+
     def test_live_mode_graceful_fallback_on_collection_error(self):
         """If MetricsCollector raises, the deployment should get zero values."""
         with (

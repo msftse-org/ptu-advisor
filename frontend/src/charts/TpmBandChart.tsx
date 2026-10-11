@@ -1,6 +1,6 @@
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from './echarts-setup'
-import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, fmtTooltipDate, fmtNum, fmtPct, makeAxisDateFormatter, makeCompactChartMedia, getDeploymentColor, hexToRgba } from './theme'
+import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, escapeHtml, fmtTooltipDate, fmtNum, fmtPct, makeAxisDateFormatter, makeCompactChartMedia, getDeploymentColor, hexToRgba } from './theme'
 import type { ZoomState } from './use-chart-zoom'
 
 type Props = {
@@ -72,7 +72,7 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, upperRef
         }
         result += `<div style="margin-top:4px;border-top:1px solid rgba(255,255,255,0.1);padding-top:4px">`
         result += `<span style="color:${CHART_COLORS.success}">Avg: ${fmtNum(avg)}</span>`
-        result += ` &nbsp;·&nbsp; <span style="color:${CHART_COLORS.warning}">${refLabel}: ${fmtNum(refLine)}</span>`
+        result += ` &nbsp;·&nbsp; <span style="color:${CHART_COLORS.warning}">${escapeHtml(refLabel)}: ${fmtNum(refLine)}</span>`
         if (upperRefLine) result += ` &nbsp;·&nbsp; <span style="color:#d83b01">Upper: ${fmtNum(upperRefLine)}</span>`
         result += `</div>`
         return result
@@ -241,11 +241,11 @@ export function TpmBandChart({ timestamps, tpm, avg, refLine, refLabel, upperRef
           // Per-deployment with % contribution
           for (const p of params) {
             if (p.seriesName === 'Avg' || p.seriesName === refLabel || p.seriesName === 'Combined') continue
-            result += `<div>${p.marker} <b>${p.seriesName}</b>: ${fmtNum(p.value)} <span style="opacity:0.6">(${fmtPct(p.value, combinedVal)})</span></div>`
+            result += `<div>${p.marker} <b>${escapeHtml(p.seriesName)}</b>: ${fmtNum(p.value)} <span style="opacity:0.6">(${fmtPct(p.value, combinedVal)})</span></div>`
           }
           result += `<div style="margin-top:4px;border-top:1px solid rgba(255,255,255,0.1);padding-top:4px">`
           result += `<span style="color:${CHART_COLORS.success}">Avg: ${fmtNum(avg)}</span>`
-          result += ` &nbsp;·&nbsp; <span style="color:${CHART_COLORS.warning}">${refLabel}: ${fmtNum(refLine)}</span>`
+          result += ` &nbsp;·&nbsp; <span style="color:${CHART_COLORS.warning}">${escapeHtml(refLabel)}: ${fmtNum(refLine)}</span>`
           if (upperRefLine) result += ` &nbsp;·&nbsp; <span style="color:#d83b01">Upper: ${fmtNum(upperRefLine)}</span>`
           result += `</div>`
           return result
