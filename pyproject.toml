@@ -1,6 +1,6 @@
 [project]
 name = "ptu-advisor"
-version = "1.1.0"
+version = "1.1.1"
 description = "Automated PTU vs PAYG recommendation tool for Azure AI Foundry deployments"
 readme = "README.md"
 requires-python = ">=3.11"

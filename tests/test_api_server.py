@@ -47,7 +47,7 @@ def test_health_endpoint_returns_ok():
 def test_api_metadata_matches_package_release_version():
     response = client.get("/openapi.json")
 
-    assert __version__ == "1.1.0"
+    assert __version__ == "1.1.1"
     assert response.status_code == 200
     assert response.json()["info"]["version"] == __version__
 
