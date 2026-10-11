@@ -26,10 +26,11 @@ vi.mock('echarts/components', () => ({
 }))
 vi.mock('echarts/renderers', () => ({ CanvasRenderer: { type: 'canvas' } }))
 
-import './echarts-setup'
-
 describe('ECharts component registration', () => {
-  it('registers mark areas used by the Cost Explorer savings window', () => {
+  it('registers mark areas used by the Cost Explorer savings window', async () => {
+    vi.resetModules()
+    await import('./echarts-setup')
+
     expect(useMock).toHaveBeenCalledTimes(1)
     expect(useMock.mock.calls[0]?.[0]).toContain(markAreaComponent)
   })

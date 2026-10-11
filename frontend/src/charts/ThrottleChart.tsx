@@ -1,6 +1,6 @@
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from './echarts-setup'
-import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, fmtTooltipDate, fmtNum, fmtPct, makeAxisDateFormatter, getDeploymentColor, hexToRgba } from './theme'
+import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, escapeHtml, fmtTooltipDate, fmtNum, fmtPct, makeAxisDateFormatter, getDeploymentColor, hexToRgba } from './theme'
 import type { ZoomState } from './use-chart-zoom'
 
 type Props = {
@@ -140,7 +140,7 @@ export function ThrottleChart({ timestamps, throttled, height, zoomState, onData
           // Per-deployment with % contribution
           for (const p of params) {
             if (p.seriesName === 'Combined') continue
-            result += `<div>${p.marker} <b>${p.seriesName}</b>: ${fmtNum(p.value)} <span style="opacity:0.6">(${fmtPct(p.value, combinedVal)})</span></div>`
+            result += `<div>${p.marker} <b>${escapeHtml(p.seriesName)}</b>: ${fmtNum(p.value)} <span style="opacity:0.6">(${fmtPct(p.value, combinedVal)})</span></div>`
           }
           return result
         },

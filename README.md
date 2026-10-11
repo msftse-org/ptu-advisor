@@ -34,7 +34,7 @@ Before running PTU Advisor, prepare the following.
 
 ### Required Tooling
 
-- Python 3.9+
+- Python 3.11+
 - Node.js 18+ and npm
 - Docker + Docker Compose (for containerized run)
 
@@ -92,7 +92,15 @@ The compose file mounts your host `~/.azure` into the container and sets `AZURE_
 
 If you only want demo mode, Azure login is not required.
 
-The web service is published on host loopback only and uses `PTU_ADVISOR_AUTH_MODE=local`. For an Azure App Service deployment, enable App Service Authentication with **Require authentication**, prevent direct access that bypasses App Service, and set `PTU_ADVISOR_AUTH_MODE=easy_auth`. In that mode, every API endpoint except `/api/health` requires the authenticated `X-MS-CLIENT-PRINCIPAL-ID` header injected by App Service.
+The web service is published on host loopback only and uses `PTU_ADVISOR_AUTH_MODE=local`. Authentication fails closed when this setting is omitted.
+
+For an Azure App Service deployment, enable App Service Authentication with **Require authentication**, prevent direct access that bypasses App Service, and configure:
+
+- `PTU_ADVISOR_AUTH_MODE=easy_auth`
+- `PTU_ADVISOR_REQUIRED_APP_ROLE=PTUAdvisor.User` (or your configured Entra app role)
+- `PTU_ADVISOR_ALLOWED_SUBSCRIPTION_IDS=<subscription-id>[,<subscription-id>...]`
+
+In Easy Auth mode, every API endpoint except `/api/health` requires an authenticated principal with the configured app role. Live Azure operations are restricted to the configured subscription allowlist.
 
 ### 1. Launch the full application
 
@@ -106,7 +114,7 @@ The app is available at `http://localhost:8000`.
 
 ```shell
 docker build -t ptu-advisor .
-docker run -p 127.0.0.1:8000:8000 ptu-advisor
+docker run -e PTU_ADVISOR_AUTH_MODE=local -p 127.0.0.1:8000:8000 ptu-advisor
 ```
 
 ### 3. Verify
@@ -143,7 +151,7 @@ cd ptu-recommander
 python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
-uvicorn ptu_advisor.api.server:app --reload --port 8000
+PTU_ADVISOR_AUTH_MODE=local uvicorn ptu_advisor.api.server:app --reload --port 8000
 ```
 
 ### 2. Frontend setup (React + Vite)

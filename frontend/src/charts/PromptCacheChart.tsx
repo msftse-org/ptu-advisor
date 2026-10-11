@@ -4,6 +4,7 @@ import { echarts } from './echarts-setup'
 import {
   CHART_COLORS,
   PTU_CHART_THEME,
+  escapeHtml,
   fmtTooltipDate,
   getDeploymentColor,
   makeAxisDateFormatter,
@@ -235,7 +236,7 @@ export function CacheEfficiencyChart({
         const rate = matchRatePct[index]
         const deploymentRows = perDeploymentEntries.map(([name, values]) => {
           const deploymentRate = values.match_rate_pct[index]
-          return `${name} cache (${values.source}): ${deploymentRate == null ? 'Unavailable' : `${formatExact(deploymentRate)}%`}`
+          return `${escapeHtml(name)} cache (${values.source}): ${deploymentRate == null ? 'Unavailable' : `${formatExact(deploymentRate)}%`}`
         })
         return [
           `<strong>${fmtTooltipDate(timestamps[index] ?? '')}</strong>`,

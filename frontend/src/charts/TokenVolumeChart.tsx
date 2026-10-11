@@ -1,6 +1,6 @@
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from './echarts-setup'
-import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, fmtTooltipDate, fmtNum, fmtPct, makeAxisDateFormatter, getDeploymentColor, hexToRgba } from './theme'
+import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, escapeHtml, fmtTooltipDate, fmtNum, fmtPct, makeAxisDateFormatter, getDeploymentColor, hexToRgba } from './theme'
 import type { ZoomState } from './use-chart-zoom'
 
 type Props = {
@@ -189,7 +189,7 @@ export function TokenVolumeChart({ timestamps, prompt, completion, total, height
             const depData = perDeployment![p.seriesName]
             const promptVal = depData?.prompt[idx] ?? 0
             const compVal = depData?.completion[idx] ?? 0
-            result += `<div>${p.marker} <b>${p.seriesName}</b>: ${fmtNum(p.value)} <span style="opacity:0.6">(${fmtPct(p.value, combinedVal)})</span></div>`
+            result += `<div>${p.marker} <b>${escapeHtml(p.seriesName)}</b>: ${fmtNum(p.value)} <span style="opacity:0.6">(${fmtPct(p.value, combinedVal)})</span></div>`
             result += `<div style="padding-left:18px;opacity:0.7">Prompt: ${fmtNum(promptVal)} · Completion: ${fmtNum(compVal)}</div>`
           }
           return result

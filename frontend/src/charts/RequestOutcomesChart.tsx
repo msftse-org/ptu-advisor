@@ -1,6 +1,6 @@
 import ReactEChartsCore from 'echarts-for-react/lib/core'
 import { echarts } from './echarts-setup'
-import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, fmtTooltipDate, fmtNum, fmtPct, makeAxisDateFormatter, getDeploymentColor, hexToRgba } from './theme'
+import { CHART_COLORS, COMBINED_TRACE_COLOR, PTU_CHART_THEME, escapeHtml, fmtTooltipDate, fmtNum, fmtPct, makeAxisDateFormatter, getDeploymentColor, hexToRgba } from './theme'
 import type { ZoomState } from './use-chart-zoom'
 
 type Props = {
@@ -213,7 +213,7 @@ export function RequestOutcomesChart({ timestamps, successful, throttled, height
             const depTotal = succVal + thrVal
             const depParam = params.find((p) => p.seriesName === name)
             const marker = depParam?.marker ?? ''
-            result += `<div>${marker} <b>${name}</b>: ${fmtNum(depTotal)} <span style="opacity:0.6">(${fmtPct(depTotal, combinedTotal)})</span></div>`
+            result += `<div>${marker} <b>${escapeHtml(name)}</b>: ${fmtNum(depTotal)} <span style="opacity:0.6">(${fmtPct(depTotal, combinedTotal)})</span></div>`
             result += `<div style="padding-left:18px;opacity:0.7">OK: ${fmtNum(succVal)} · 429: ${fmtNum(thrVal)}</div>`
           }
           return result
